@@ -1,0 +1,184 @@
+name: Build And Release
+
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  frontend-dist:
+    name: Build Frontend Dist
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install Frontend Dependencies
+        working-directory: frontend
+        run: bun install --frozen-lockfile
+
+      - name: Build Frontend
+        working-directory: frontend
+        run: bun run build
+
+      - name: Upload Frontend Dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          if-no-files-found: error
+
+  build-binaries:
+    name: Build ${{ matrix.target }}
+    needs: frontend-dist
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-13
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - os: macos-14
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            archive: zip
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Frontend Dist
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux ARM64 Linker
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+
+      - name: Build Backend (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        working-directory: backend
+        run: |
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+          fi
+          cargo build --release --locked --target "${{ matrix.target }}"
+
+      - name: Build Backend (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: backend
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package Artifact (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          PACKAGE="markflow-${{ matrix.target }}"
+          mkdir -p "release/${PACKAGE}"
+          cp "backend/target/${{ matrix.target }}/release/markflow" "release/${PACKAGE}/markflow"
+          cp backend/config.toml "release/${PACKAGE}/config.toml"
+          cp README.md "release/${PACKAGE}/README.md"
+          tar -C release -czf "release/${PACKAGE}.tar.gz" "${PACKAGE}"
+
+      - name: Package Artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $package = "markflow-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path "release/$package" | Out-Null
+          Copy-Item "backend/target/${{ matrix.target }}/release/markflow.exe" "release/$package/markflow.exe"
+          Copy-Item "backend/config.toml" "release/$package/config.toml"
+          Copy-Item "README.md" "release/$package/README.md"
+          Compress-Archive -Path "release/$package/*" -DestinationPath "release/$package.zip" -Force
+
+      - name: Upload Binary Archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            release/*.tar.gz
+            release/*.zip
+          if-no-files-found: error
+
+  release-tag:
+    name: Publish Tag Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-binaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download All Build Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: release-assets
+
+      - name: Publish GitHub Release (Tag)
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          overwrite_files: true
+
+  release-master:
+    name: Publish Master Snapshot
+    if: github.ref == 'refs/heads/master'
+    needs: build-binaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download All Build Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: release-assets
+
+      - name: Publish GitHub Pre-Release (Master)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: master-${{ github.sha }}
+          name: Master Build ${{ github.sha }}
+          prerelease: true
+          make_latest: false
+          files: release-assets/*
+          fail_on_unmatched_files: true
+          overwrite_files: true
