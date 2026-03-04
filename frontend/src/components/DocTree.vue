@@ -39,7 +39,7 @@
           @create="createUnder"
           @rename="startRename"
           @delete="deleteNode"
-          @share="n => emit('share', n)"
+          @share="(n: DocNode) => emit('share', n)"
           @contextmenu="openCtx"
           @dragstart-node="onDragStart"
           @dragover-row="onDragOverRow"
@@ -146,7 +146,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, defineComponent, h, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, defineComponent, h, nextTick, onMounted, onUnmounted, ref, watch, type VNodeChild } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useDocsStore, type DocNode } from '@/stores/docs'
 
@@ -587,7 +587,7 @@ async function deleteNode(node: DocNode) {
   }
 }
 
-const TreeNode = defineComponent({
+const TreeNode: any = defineComponent({
   name: 'TreeNode',
   props: {
     node: { type: Object as () => DocNode, required: true },
@@ -618,7 +618,7 @@ const TreeNode = defineComponent({
     const hasChildren = computed(() => (props.node.children?.length ?? 0) > 0)
     const expanded = computed(() => props.forceExpand || props.expandedIds.has(props.node.id))
 
-    return () => {
+    return (): VNodeChild => {
       const node = props.node
       const isSelected = props.selectedId === node.id
       const indent = props.depth * 14
@@ -627,7 +627,7 @@ const TreeNode = defineComponent({
       const isDropInside = props.dropTargetId === node.id && props.dropMode === 'inside'
       const isDropAfter = props.dropTargetId === node.id && props.dropMode === 'after'
 
-      const rowEl = h(
+      const rowEl: VNodeChild = h(
         'div',
         {
           class: [
@@ -774,7 +774,7 @@ const TreeNode = defineComponent({
         ]
       )
 
-      const children = isDir.value && expanded.value && hasChildren.value
+      const children: VNodeChild = isDir.value && expanded.value && hasChildren.value
         ? h(
             'div',
             { class: 'tree-children' },
