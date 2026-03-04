@@ -1,0 +1,28 @@
+services:
+  markflow:
+    image: lhstack/markflow:latest
+    container_name: markflow
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: "3000"
+      DATABASE_URL: "sqlite:data/markflow.db"
+      JWT_SECRET: "change_me_to_a_long_random_string_in_production"
+      RUST_LOG: "markflow=info,tower_http=warn"
+      LOG_TO_FILE: "true"
+      LOG_DIR: "logs"
+      LOG_FILE_NAME: "markflow.log"
+      LOG_ROTATE_SIZE_MB: "50"
+      LOG_ROTATE_DAYS: "1"
+      LOG_KEEP_DAYS: "14"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    cpus: "2.0"
+    mem_limit: "256m"
+    logging:
+      driver: json-file
+      options:
+        max-size: "16k"
+        max-file: "2"

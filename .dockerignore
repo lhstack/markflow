@@ -1,0 +1,13 @@
+.git
+.github
+.idea
+
+backend/target
+backend/markflow.db
+backend/logs
+
+frontend/node_modules
+frontend/dist
+
+data
+logs

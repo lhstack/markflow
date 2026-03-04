@@ -73,10 +73,10 @@ markflow/
 
 ## 环境要求
 
-- Rust stable（建议 1.75+）
+- Rust stable（建议 1.93.1）
 - Cargo
 - Node.js 18+（若使用 npm）
-- Bun 1.0+（推荐）
+- Bun 1.3.9（推荐）
 
 ## 本地开发
 
@@ -263,6 +263,18 @@ cargo check
 ### 3) 为什么创建项目后没有自动进入？
 
 当前交互设计是创建后停留在项目概览页，避免打断连续创建/管理流程。
+
+### 4) macOS 提示“Apple 无法验证 markflow”怎么办？
+
+这是未签名二进制在 macOS 上的常见提示。你可以在终端执行：
+
+```bash
+xattr -dr com.apple.quarantine /path/to/markflow
+chmod +x /path/to/markflow
+/path/to/markflow
+```
+
+请把 `/path/to/markflow` 替换成你的实际二进制路径。
 
 ## 生产建议
 
