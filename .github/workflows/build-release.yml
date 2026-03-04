@@ -144,6 +144,11 @@ jobs:
     needs: build-binaries
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Download All Build Artifacts
         uses: actions/download-artifact@v4
         with:
@@ -151,12 +156,33 @@ jobs:
           merge-multiple: true
           path: release-assets
 
+      - name: Build Tag Release Notes (from git commits)
+        shell: bash
+        run: |
+          set -euo pipefail
+          current_tag="${GITHUB_REF_NAME}"
+          prev_tag="$(git tag --list 'v*' --sort=-creatordate | grep -vx "${current_tag}" | head -n1 || true)"
+
+          {
+            echo "${current_tag}"
+            echo
+            if [ -n "${prev_tag}" ]; then
+              echo "变更范围: ${prev_tag}..${current_tag}"
+              echo
+              git log --reverse --pretty=format:'%s%n%b%n' "${prev_tag}..${current_tag}"
+            else
+              echo "首个版本发布。"
+              echo
+              git log -1 --pretty=format:'%s%n%b%n' "${current_tag}"
+            fi
+          } > release-notes.md
+
       - name: Publish GitHub Release (Tag)
         uses: softprops/action-gh-release@v2
         with:
           files: release-assets/*
           fail_on_unmatched_files: true
-          generate_release_notes: true
+          body_path: release-notes.md
           overwrite_files: true
 
   release-master:
@@ -165,6 +191,11 @@ jobs:
     needs: build-binaries
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Download All Build Artifacts
         uses: actions/download-artifact@v4
         with:
@@ -172,13 +203,32 @@ jobs:
           merge-multiple: true
           path: release-assets
 
+      - name: Move rolling snapshot tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f master-snapshot "${GITHUB_SHA}"
+          git push origin refs/tags/master-snapshot --force
+
+      - name: Build Master Snapshot Notes (current commit)
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "master-snapshot @ ${GITHUB_SHA}"
+            echo
+            git log -1 --pretty=format:'%s%n%b'
+          } > release-notes.md
+
       - name: Publish GitHub Pre-Release (Master)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: master-${{ github.sha }}
-          name: Master Build ${{ github.sha }}
+          tag_name: master-snapshot
+          name: Master Snapshot (Rolling)
           prerelease: true
-          make_latest: false
+          body_path: release-notes.md
           files: release-assets/*
           fail_on_unmatched_files: true
           overwrite_files: true
