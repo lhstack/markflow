@@ -16,10 +16,23 @@ pub struct User {
 pub struct DocNode {
     pub id: String,
     pub user_id: String,
+    pub project_id: Option<String>,
     pub parent_id: Option<String>,
     pub name: String,
     pub node_type: String,
     pub content: Option<String>,
+    pub sort_order: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct Project {
+    pub id: String,
+    pub user_id: String,
+    pub name: String,
+    pub description: String,
+    pub background_image: Option<String>,
     pub sort_order: i64,
     pub created_at: String,
     pub updated_at: String,
@@ -59,6 +72,7 @@ impl From<User> for UserInfo {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DocNodeResponse {
     pub id: String,
+    pub project_id: Option<String>,
     pub parent_id: Option<String>,
     pub name: String,
     pub node_type: String,
@@ -73,6 +87,7 @@ impl DocNodeResponse {
     pub fn from_node(node: DocNode) -> Self {
         Self {
             id: node.id,
+            project_id: node.project_id,
             parent_id: node.parent_id,
             name: node.name,
             node_type: node.node_type,
@@ -81,6 +96,31 @@ impl DocNodeResponse {
             created_at: node.created_at,
             updated_at: node.updated_at,
             children: vec![],
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ProjectResponse {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub background_image: Option<String>,
+    pub sort_order: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl From<Project> for ProjectResponse {
+    fn from(p: Project) -> Self {
+        Self {
+            id: p.id,
+            name: p.name,
+            description: p.description,
+            background_image: p.background_image,
+            sort_order: p.sort_order,
+            created_at: p.created_at,
+            updated_at: p.updated_at,
         }
     }
 }

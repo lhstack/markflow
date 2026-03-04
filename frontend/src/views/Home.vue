@@ -29,15 +29,19 @@
             <span class="brand-sub">Knowledge Mesh</span>
           </div>
         </div>
-        <div class="breadcrumb" v-if="docs.currentNode">
+        <div class="breadcrumb" v-if="showProjectOverview">
           <span class="bc-sep">/</span>
-          <span class="bc-item clickable" @click="docs.currentNode = null">我的文档</span>
-          <span class="bc-sep">/</span>
-          <span class="bc-item bc-current">{{ docs.currentNode.name }}</span>
+          <span class="bc-item bc-current">项目概览</span>
         </div>
-        <div class="breadcrumb" v-else>
+        <div class="breadcrumb" v-else-if="projects.currentProject">
           <span class="bc-sep">/</span>
-          <span class="bc-item bc-current">我的文档</span>
+          <span class="bc-item clickable" @click="backToOverview">项目概览</span>
+          <span class="bc-sep">/</span>
+          <span class="bc-item clickable" @click="docs.currentNode = null">{{ projects.currentProject.name }}</span>
+          <template v-if="docs.currentNode">
+            <span class="bc-sep">/</span>
+            <span class="bc-item bc-current">{{ docs.currentNode.name }}</span>
+          </template>
         </div>
       </div>
 
@@ -76,17 +80,31 @@
     <!-- Body -->
     <div class="app-body">
       <!-- Overlay for mobile -->
-      <div v-if="mobileOpen" class="sidebar-mask" @click="mobileOpen = false" />
+      <div v-if="mobileOpen && showSidebar" class="sidebar-mask" @click="mobileOpen = false" />
 
       <!-- Sidebar -->
-      <aside class="sidebar" :class="{ 'sidebar-hidden': !sidebarOpen, 'sidebar-mobile': mobileOpen }">
-        <DocTree @share="openShare" />
+      <aside v-if="showSidebar" class="sidebar" :class="{ 'sidebar-hidden': !sidebarOpen, 'sidebar-mobile': mobileOpen }">
+        <DocTree
+          :project-id="projects.currentProject?.id"
+          :project-name="projects.currentProject?.name"
+          @share="openShare"
+        />
       </aside>
 
       <!-- Main -->
       <main class="main-area">
         <transition name="slide-up" mode="out-in">
-          <WelcomeScreen v-if="!docs.currentNode" key="welcome" />
+          <ProjectOverview
+            v-if="showProjectOverview"
+            key="projects"
+            :projects="projects.projects"
+            :active-project-id="projects.currentProjectId"
+            @select="enterProject"
+            @create="createProject"
+            @update="updateProject"
+            @delete="deleteProject"
+          />
+          <WelcomeScreen v-else-if="!docs.currentNode" key="welcome" />
           <div v-else-if="docs.currentNode.node_type === 'dir'" class="main-scroll" key="dir">
             <DirStats :node="docs.currentNode" :stats="docs.currentStats" @share="openShare" @select="n => docs.fetchNode(n.id)" />
           </div>
@@ -115,33 +133,188 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
 import { useDocsStore, type DocNode } from '@/stores/docs'
+import { useProjectsStore } from '@/stores/projects'
 import DocTree from '@/components/DocTree.vue'
 import MarkdownEditor from '@/components/MarkdownEditor.vue'
 import DirStats from '@/components/DirStats.vue'
 import ShareDialog from '@/components/ShareDialog.vue'
 import ProfileDialog from '@/components/ProfileDialog.vue'
 import WelcomeScreen from '@/components/WelcomeScreen.vue'
+import ProjectOverview from '@/components/ProjectOverview.vue'
 import request from '@/utils/request'
 
 const router = useRouter()
+const route = useRoute()
 const auth = useAuthStore()
 const docs = useDocsStore()
+const projects = useProjectsStore()
 
-const sidebarOpen = ref(true)
+const HOME_SIDEBAR_KEY = 'markflow.home.sidebar_open'
+const HOME_LAST_PROJECT_KEY = 'markflow.home.last_project'
+const HOME_LAST_VIEW_KEY = 'markflow.home.last_view'
+const HOME_LAST_NODE_PREFIX = 'markflow.home.last_node.'
+
+function readBool(key: string, fallback: boolean): boolean {
+  const raw = localStorage.getItem(key)
+  if (raw === '1') return true
+  if (raw === '0') return false
+  return fallback
+}
+
+function getLastNodeKey(projectId: string) {
+  return `${HOME_LAST_NODE_PREFIX}${projectId}`
+}
+
+function readLastNode(projectId: string): string | null {
+  const value = localStorage.getItem(getLastNodeKey(projectId))
+  return value && value.trim() ? value : null
+}
+
+function writeLastNode(projectId: string, nodeId: string | null) {
+  const key = getLastNodeKey(projectId)
+  if (nodeId) localStorage.setItem(key, nodeId)
+  else localStorage.removeItem(key)
+}
+
+function normalizeQueryValue(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value : null
+}
+
+function projectExists(projectId: string | null): projectId is string {
+  return Boolean(projectId && projects.projects.some((project) => project.id === projectId))
+}
+
+const sidebarOpen = ref(readBool(HOME_SIDEBAR_KEY, true))
 const mobileOpen = ref(false)
+const showProjectOverview = ref(true)
 const showProfile = ref(false)
 const showShare = ref(false)
 const showPwChange = ref(false)
 const shareTarget = ref<DocNode | null>(null)
 const changingPw = ref(false)
 const pwForm = ref({ old: '', new: '', confirm: '' })
+const restoringHomeState = ref(true)
 
-onMounted(() => docs.fetchTree())
+const showSidebar = computed(() => !showProjectOverview.value && Boolean(projects.currentProject))
+
+function persistHomeCache() {
+  localStorage.setItem(HOME_SIDEBAR_KEY, sidebarOpen.value ? '1' : '0')
+  localStorage.setItem(HOME_LAST_VIEW_KEY, showProjectOverview.value ? 'overview' : 'project')
+
+  if (projects.currentProjectId) {
+    localStorage.setItem(HOME_LAST_PROJECT_KEY, projects.currentProjectId)
+    writeLastNode(projects.currentProjectId, docs.currentNode?.id || null)
+  } else {
+    localStorage.removeItem(HOME_LAST_PROJECT_KEY)
+  }
+}
+
+function buildHomeQuery(): Record<string, string> {
+  if (showProjectOverview.value) {
+    return { view: 'overview' }
+  }
+
+  const query: Record<string, string> = {}
+  if (projects.currentProjectId) query.project = projects.currentProjectId
+  if (docs.currentNode?.id) query.doc = docs.currentNode.id
+  return query
+}
+
+function sameQuery(a: Record<string, string>, b: Record<string, unknown>) {
+  const aKeys = Object.keys(a)
+  const bKeys = Object.keys(b).filter((key) => typeof b[key] === 'string')
+  if (aKeys.length !== bKeys.length) return false
+  return aKeys.every((key) => b[key] === a[key])
+}
+
+async function syncHomeRoute() {
+  const nextQuery = buildHomeQuery()
+  if (sameQuery(nextQuery, route.query as Record<string, unknown>)) return
+  await router.replace({ path: '/', query: nextQuery })
+}
+
+async function restoreHomeState() {
+  await projects.fetchProjects()
+
+  if (!projects.projects.length) {
+    projects.clearCurrentProject()
+    showProjectOverview.value = true
+    docs.tree = []
+    docs.currentNode = null
+    return
+  }
+
+  const queryProjectId = normalizeQueryValue(route.query.project)
+  const queryDocId = normalizeQueryValue(route.query.doc)
+  const queryView = normalizeQueryValue(route.query.view)
+  const cachedProjectId = normalizeQueryValue(localStorage.getItem(HOME_LAST_PROJECT_KEY))
+  const cachedView = normalizeQueryValue(localStorage.getItem(HOME_LAST_VIEW_KEY))
+
+  const targetProjectIdCandidate =
+    queryProjectId
+    || cachedProjectId
+    || projects.currentProjectId
+    || projects.projects[0]?.id
+
+  const targetProjectId = projectExists(targetProjectIdCandidate)
+    ? targetProjectIdCandidate
+    : projects.projects[0].id
+
+  projects.selectProject(targetProjectId)
+
+  const shouldShowOverview = queryView === 'overview'
+    || (
+      !queryView
+      && !queryProjectId
+      && !queryDocId
+      && cachedView === 'overview'
+    )
+
+  showProjectOverview.value = shouldShowOverview
+  docs.tree = []
+  docs.currentNode = null
+
+  if (showProjectOverview.value) {
+    return
+  }
+
+  await docs.fetchTree(targetProjectId)
+
+  const cachedDocId = readLastNode(targetProjectId)
+  const targetDocId = queryDocId || cachedDocId
+  if (!targetDocId) return
+
+  try {
+    await docs.fetchNode(targetDocId)
+  } catch {
+    docs.currentNode = null
+  }
+}
+
+onMounted(async () => {
+  await restoreHomeState()
+  restoringHomeState.value = false
+  persistHomeCache()
+  await syncHomeRoute()
+})
+
+watch(sidebarOpen, (open) => {
+  localStorage.setItem(HOME_SIDEBAR_KEY, open ? '1' : '0')
+})
+
+watch(
+  [showProjectOverview, () => projects.currentProjectId, () => docs.currentNode?.id],
+  () => {
+    if (restoringHomeState.value) return
+    persistHomeCache()
+    void syncHomeRoute()
+  }
+)
 
 function handleUserCmd(cmd: string) {
   if (cmd === 'profile') showProfile.value = true
@@ -156,6 +329,61 @@ function handleUserCmd(cmd: string) {
 function openShare(node: DocNode) {
   shareTarget.value = node
   showShare.value = true
+}
+
+function backToOverview() {
+  showProjectOverview.value = true
+  docs.currentNode = null
+  mobileOpen.value = false
+}
+
+async function enterProject(projectId: string) {
+  projects.selectProject(projectId)
+  showProjectOverview.value = false
+  docs.currentNode = null
+  await docs.fetchTree(projectId)
+}
+
+async function createProject(payload: { name: string; description: string; background_image: string }) {
+  try {
+    await projects.createProject(payload)
+    showProjectOverview.value = true
+    docs.currentNode = null
+    ElMessage.success('项目创建成功')
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || '项目创建失败')
+  }
+}
+
+async function updateProject(projectId: string, payload: { name: string; description: string; background_image: string }) {
+  try {
+    await projects.updateProject(projectId, payload)
+    ElMessage.success('项目更新成功')
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || '项目更新失败')
+  }
+}
+
+async function deleteProject(projectId: string) {
+  const wasCurrent = projects.currentProjectId === projectId
+  try {
+    await projects.deleteProject(projectId)
+    ElMessage.success('项目已删除')
+
+    if (wasCurrent) {
+      docs.currentNode = null
+      if (!projects.currentProjectId) {
+        docs.tree = []
+        showProjectOverview.value = true
+        return
+      }
+      if (!showProjectOverview.value) {
+        await docs.fetchTree(projects.currentProjectId)
+      }
+    }
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || '项目删除失败')
+  }
 }
 
 async function changePw() {

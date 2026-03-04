@@ -414,6 +414,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/auth/2fa/setup", post(routes::auth::setup_2fa))
         .route("/auth/2fa/confirm", post(routes::auth::confirm_2fa))
         .route("/auth/2fa/disable", post(routes::auth::disable_2fa))
+        .route("/projects", get(routes::projects::list_projects).post(routes::projects::create_project))
+        .route(
+            "/projects/:id",
+            put(routes::projects::update_project).delete(routes::projects::delete_project),
+        )
         .route("/docs", get(routes::documents::list_tree).post(routes::documents::create_node))
         .route(
             "/docs/:id",

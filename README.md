@@ -1,110 +1,97 @@
-﻿# MarkFlow
+# MarkFlow
 
-一个轻量、现代化的 Markdown 文档协作系统，包含文档树管理、实时编辑预览、受控分享、账号安全（验证码 + 2FA）与一体化打包部署能力。
+MarkFlow 是一个基于 `Rust + Vue 3` 的轻量文档系统，核心结构为：`用户 -> 项目 -> 文档树`。
 
-## 功能概览
+它支持项目卡片管理、目录/文档树编辑、Markdown 实时编辑预览、受控分享（密码/过期时间）、账号安全（验证码 + 2FA）以及前后端一体化部署。
 
-### 文档管理
-- 文档树（目录 + 文档）结构化管理，支持无限层级。
-- 新建/重命名/删除目录与文档。
-- 文档与目录拖拽移动（含顺序与父级调整）。
-- 目录统计信息展示（文档数、子目录数、最近更新时间等）。
+## 核心能力
 
-### Markdown 编辑体验
-- 基于 `@kangc/v-md-editor` 的 Markdown 编辑器。
-- 编辑/分栏/预览模式切换。
-- 代码块高亮（`highlight.js`）。
-- 编辑页与预览页视觉风格统一，支持系统主题变量。
-- 解决了常见输入中断/自动刷新导致无法继续编辑的问题。
+- 项目层级管理
+- 项目概览卡片页（分页网格、背景图上传、编辑/删除）
+- 项目名称重名校验（新增与编辑，前后端双重校验）
+- 创建项目后停留在概览页（不再自动跳入项目）
 
-### 分享能力
-- 支持文档分享与目录分享。
-- 支持分享密码保护（后端存储为哈希）。
-- 支持有效期：永久、1天、7天、30天、自定义到具体时间。
-- 分享内容过期后不可访问（后端与前端双重校验）。
-- 密码分享支持“输入一次后浏览器缓存记住（localStorage）”，刷新后无需重复输入。
-- 支持复制：
-  - 纯链接
-  - 链接 + 文档/目录名称 + 密码（便于 IM/邮件投递）
+- 文档树管理
+- 目录与文档的新增、重命名、删除
+- 拖拽排序（同级重排）
+- 拖拽跨目录移动（目录内/目录外/根级）
+- 树区域空白处右键菜单
 
-### 认证与安全
-- 用户注册/登录。
-- 登录验证码（算术验证码，5分钟有效）。
-- JWT 鉴权（默认 7 天有效）。
-- 两步验证（2FA / TOTP）：
-  - 登录第一步仅校验用户名+密码+验证码。
-  - 命中 2FA 用户后跳转独立 2FA 页面（挑战码 `challenge_id`，5分钟有效）。
-- 个人中心支持启用/关闭 2FA。
+- 编辑与预览
+- Markdown 编辑、分栏预览、纯预览
+- 代码高亮（`highlight.js`）
+- 目录节点统计展示
 
-### 个人资料
-- 支持头像上传与更新。
-- 头像以 Base64 DataURL 形式存储在 SQLite `users.avatar` 字段。
+- 分享能力
+- 文档分享与目录分享
+- 分享密码校验（哈希存储）
+- 分享有效期控制
+- 分享页目录可展开/收起
 
-### 日志与运维
-- 后端日志时间格式统一为 `yyyy-MM-dd HH:mm:ss`。
-- 支持控制台日志 + 文件日志。
-- 文件日志支持按大小/按天切割，并支持保留天数清理。
-- 日志参数可由 `config.toml` 与环境变量配置（环境变量优先级更高）。
+- 状态缓存（刷新不重置）
+- 首页侧边栏展开状态缓存
+- 文档树目录展开状态缓存（按项目隔离）
+- 分享页侧栏/目录展开状态缓存（按 token 隔离）
+- 首页支持恢复上次项目与文档上下文
 
-### 打包与部署
-- 后端通过 `rust-embed` 嵌入前端 `dist` 静态资源，单进程提供 API + 前端页面。
-- 适合本地离线部署和单文件分发场景（Windows 可编译 `markflow.exe`）。
-
----
+- 认证与安全
+- 注册/登录
+- 登录验证码
+- JWT 鉴权
+- 2FA（TOTP）
+- 头像上传
 
 ## 技术栈
 
-### 前端
+- 前端
 - Vue 3 + TypeScript + Vite
-- Pinia
-- Vue Router
+- Pinia + Vue Router
 - Element Plus
-- `@kangc/v-md-editor` + `highlight.js`
-- Axios
+- `@kangc/v-md-editor`
 
-### 后端
-- Rust
-- Axum
+- 后端
+- Rust + Axum
 - SQLx + SQLite
-- JWT（`jsonwebtoken`）
-- BCrypt
-- TOTP（`totp-rs`）
-- Tracing + 自定义文件滚动日志
-
----
+- JWT + BCrypt + TOTP
+- Tracing 日志（支持滚动文件日志）
+- `rust-embed`（嵌入前端 dist）
 
 ## 项目结构
 
 ```text
 markflow/
-├─ frontend/                # Vue 前端
-│  ├─ src/
-│  ├─ public/
-│  └─ package.json
-└─ backend/                 # Rust 后端
-   ├─ src/
-   ├─ config.toml
-   └─ Cargo.toml
+├─ README.md
+├─ backend/
+│  ├─ Cargo.toml
+│  ├─ config.toml
+│  └─ src/
+└─ frontend/
+   ├─ package.json
+   ├─ bun.lock
+   └─ src/
 ```
-
----
-
-## 快速开始
 
 ## 环境要求
-- Node.js 18+
+
 - Rust stable（建议 1.75+）
 - Cargo
+- Node.js 18+（若使用 npm）
+- Bun 1.0+（推荐）
 
-## 1) 启动前端开发环境
+## 本地开发
+
+### 1) 启动后端
 
 ```bash
-cd frontend
-npm install
-npm run dev
+cd backend
+cargo run
 ```
 
-也可使用 bun：
+后端默认地址：`http://localhost:3000`
+
+### 2) 启动前端
+
+使用 Bun：
 
 ```bash
 cd frontend
@@ -112,44 +99,50 @@ bun install
 bun run dev
 ```
 
-默认前端地址：`http://localhost:5173`
-
-## 2) 启动后端开发环境
-
-```bash
-cd backend
-cargo run
-```
-
-默认后端地址：`http://localhost:3000`
-
-> 前后端联调时，前端通过 `/api` 调用后端接口。
-
----
-
-## 一体化打包（推荐发布方式）
-
-后端通过 `rust-embed` 读取 `../frontend/dist`，因此发布前先构建前端：
+或使用 npm：
 
 ```bash
 cd frontend
-npm run build
+npm install
+npm run dev
+```
 
-cd ../backend
+前端默认地址：`http://localhost:5173`
+
+前端通过 Vite 代理把 `/api` 转发到 `http://localhost:3000`。
+
+## 一体化发布（单进程）
+
+发布前先构建前端：
+
+```bash
+cd frontend
+bun run build
+```
+
+再构建后端：
+
+```bash
+cd backend
 cargo build --release
 ```
 
-产物：`backend/target/release/markflow(.exe)`
+产物：
 
-将 `config.toml` 放在可执行文件同目录即可生效。
+- macOS / Linux: `backend/target/release/markflow`
+- Windows: `backend/target/release/markflow.exe`
 
----
+运行时会从可执行文件同目录读取 `config.toml`。
 
 ## 配置说明
 
-后端读取顺序：**环境变量 > `config.toml` > 默认值**。
+配置优先级：
 
-`backend/config.toml` 示例：
+- 环境变量
+- `config.toml`
+- 默认值
+
+示例（`backend/config.toml`）：
 
 ```toml
 port = "3000"
@@ -165,7 +158,7 @@ log_rotate_days = 1
 log_keep_days = 14
 ```
 
-### 关键环境变量
+对应环境变量：
 
 - `PORT`
 - `DATABASE_URL`
@@ -178,26 +171,27 @@ log_keep_days = 14
 - `LOG_ROTATE_DAYS`
 - `LOG_KEEP_DAYS`
 
----
+## 数据存储
 
-## 数据存储说明
+默认数据库：SQLite（`sqlite:markflow.db`）
 
-默认 SQLite 文件：`markflow.db`（由 `database_url` 决定）。
+核心数据表：
 
-核心表：
 - `users`
+- `projects`
 - `doc_nodes`
 - `shares`
 
 说明：
-- 用户头像存储在 `users.avatar`（Base64 DataURL）。
-- 分享密码仅存储哈希（`shares.password_hash`），不存明文。
 
----
+- 文档根节点归属项目（`doc_nodes.project_id`）
+- 头像使用 DataURL 存在 `users.avatar`
+- 分享密码仅存哈希，不存明文
 
-## 主要 API（摘要）
+## API 摘要（均以 `/api` 开头）
 
-### Auth
+Auth：
+
 - `GET /api/auth/captcha`
 - `POST /api/auth/register`
 - `POST /api/auth/login`
@@ -209,7 +203,15 @@ log_keep_days = 14
 - `POST /api/auth/2fa/confirm`
 - `POST /api/auth/2fa/disable`
 
-### Docs
+Projects：
+
+- `GET /api/projects`
+- `POST /api/projects`
+- `PUT /api/projects/:id`
+- `DELETE /api/projects/:id`
+
+Docs：
+
 - `GET /api/docs`
 - `POST /api/docs`
 - `GET /api/docs/:id`
@@ -217,7 +219,8 @@ log_keep_days = 14
 - `DELETE /api/docs/:id`
 - `PUT /api/docs/:id/move`
 
-### Shares
+Shares：
+
 - `POST /api/shares`
 - `GET /api/shares/doc/:doc_id`
 - `DELETE /api/shares/:id`
@@ -225,30 +228,49 @@ log_keep_days = 14
 - `POST /api/s/:token/verify`
 - `GET /api/s/:token/content`
 
----
+前端页面路由中，分享页访问路径是 `/s/:token`（由 SPA 承载）。
 
-## 安全建议（生产）
+## 开发校验命令
 
-- 必须修改 `JWT_SECRET` 为高强度随机值。
-- 通过反向代理（Nginx/Caddy）启用 HTTPS。
-- 关闭开发环境跨域放开策略，限制允许来源。
-- 为数据库与日志目录配置备份与权限控制。
+前端：
 
----
+```bash
+cd frontend
+bun run build
+```
+
+后端：
+
+```bash
+cd backend
+cargo check
+```
 
 ## 常见问题
 
-### Q1：为什么目录页面显示“目录为空”？
-表示该目录下当前没有直属子文档/子目录；可在该目录下新建文档或子目录。
+### 1) 刷新后为什么回到项目概览/树被重置？
 
-### Q2：为什么分享链接第一次打开需要密码，刷新后还要再输？
-当前实现已支持浏览器本地缓存密码（`localStorage`），在缓存未清理前可复用。
+已支持状态缓存与恢复：
 
-### Q3：链接已过期却还能打开？
-后端会在 `/api/s/:token` 与 `/api/s/:token/content` 两处校验过期时间，若发现异常请确认服务端系统时间与时区配置。
+- 首页会恢复最近项目与文档上下文
+- 文档树展开状态按项目缓存
+- 分享页侧栏与目录展开按分享 token 缓存
 
----
+### 2) 项目名为什么不能重名？
+
+系统已开启重名约束（忽略大小写），新增和编辑都不允许与同账号现有项目名冲突。
+
+### 3) 为什么创建项目后没有自动进入？
+
+当前交互设计是创建后停留在项目概览页，避免打断连续创建/管理流程。
+
+## 生产建议
+
+- 必须替换 `JWT_SECRET`
+- 建议通过 Nginx/Caddy 反向代理并启用 HTTPS
+- 限制 CORS 来源（当前默认开发友好配置）
+- 对数据库与日志目录做备份与权限控制
 
 ## License
 
-当前仓库未附带明确开源协议；如需开源发布，请补充 `LICENSE` 文件并声明授权条款。
+当前仓库未包含明确开源协议。如需开源发布，请补充 `LICENSE` 文件并声明授权条款。

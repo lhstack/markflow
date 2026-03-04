@@ -4,6 +4,7 @@ import request from '@/utils/request'
 
 export interface DocNode {
   id: string
+  project_id?: string | null
   parent_id?: string | null
   name: string
   node_type: 'dir' | 'doc'
@@ -25,10 +26,11 @@ export const useDocsStore = defineStore('docs', () => {
   const currentStats = ref<DirStats>({ doc_count: 0, dir_count: 0 })
   const loading = ref(false)
 
-  async function fetchTree() {
+  async function fetchTree(projectId?: string | null) {
     loading.value = true
     try {
-      const data = await request.get('/docs') as any
+      const config = projectId ? { params: { project_id: projectId } } : undefined
+      const data = await request.get('/docs', config) as any
       tree.value = data.tree
     } finally {
       loading.value = false
@@ -45,39 +47,48 @@ export const useDocsStore = defineStore('docs', () => {
   }
 
   async function createNode(payload: {
+    project_id?: string
     parent_id?: string
     name: string
     node_type: 'dir' | 'doc'
     content?: string
-  }) {
+  }, projectId?: string | null) {
     const data = await request.post('/docs', payload) as any
-    await fetchTree()
+    await fetchTree(projectId ?? payload.project_id ?? null)
     return data.node as DocNode
   }
 
-  async function updateNode(id: string, payload: { name?: string; content?: string }) {
+  async function updateNode(id: string, payload: { name?: string; content?: string }, projectId?: string | null) {
     const data = await request.put(`/docs/${id}`, payload) as any
     if (currentNode.value?.id === id) {
       currentNode.value = { ...currentNode.value, ...data.node }
     }
     // Only refresh tree on name change (not on content save to avoid re-render)
     if (payload.name !== undefined) {
-      await fetchTree()
+      await fetchTree(projectId)
     }
     return data.node as DocNode
   }
 
-  async function deleteNode(id: string) {
+  async function deleteNode(id: string, projectId?: string | null) {
     await request.delete(`/docs/${id}`)
     if (currentNode.value?.id === id) {
       currentNode.value = null
     }
-    await fetchTree()
+    await fetchTree(projectId)
   }
 
-  async function moveNode(id: string, parent_id: string | null, sort_order: number) {
+  async function moveNode(
+    id: string,
+    parent_id: string | null,
+    sort_order: number,
+    projectId?: string | null,
+    refresh = true
+  ) {
     await request.put(`/docs/${id}/move`, { parent_id, sort_order })
-    await fetchTree()
+    if (refresh) {
+      await fetchTree(projectId)
+    }
   }
 
   return {

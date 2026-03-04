@@ -48,11 +48,17 @@
     </div>
 
     <div v-else-if="state === 'doc'" class="share-doc-layout">
-      <ShareHeader :doc-name="content?.name" :share-info="shareInfo" />
-      <div class="share-doc-body">
+      <ShareHeader
+        :doc-name="content?.name"
+        :share-info="shareInfo"
+        :sidebar-open="shareSidebarOpen"
+        :show-sidebar-toggle="true"
+        @toggle-sidebar="toggleShareSidebar"
+      />
+      <div class="share-doc-body" :class="{ 'is-sidebar-collapsed': !shareSidebarOpen }">
         <aside class="share-doc-sidebar">
-          <div class="sidebar-title">文档</div>
-          <div class="doc-side-card">
+          <div class="sidebar-title">文档目录</div>
+          <div class="doc-side-card" v-if="shareSidebarOpen">
             <div class="doc-side-name">{{ content?.name || '未命名文档' }}</div>
           </div>
         </aside>
@@ -65,11 +71,24 @@
     </div>
 
     <div v-else-if="state === 'dir'" class="share-dir-layout">
-      <ShareHeader :doc-name="content?.name" :share-info="shareInfo" />
-      <div class="share-dir-body">
+      <ShareHeader
+        :doc-name="content?.name"
+        :share-info="shareInfo"
+        :sidebar-open="shareSidebarOpen"
+        :show-sidebar-toggle="true"
+        @toggle-sidebar="toggleShareSidebar"
+      />
+      <div class="share-dir-body" :class="{ 'is-sidebar-collapsed': !shareSidebarOpen }">
         <aside class="share-dir-sidebar">
           <div class="sidebar-title">目录</div>
-          <DirTreeNav :nodes="content?.children || []" :selected-id="selectedDoc?.id" @select="selectDoc" />
+          <DirTreeNav
+            v-if="shareSidebarOpen"
+            :nodes="content?.children || []"
+            :selected-id="selectedDoc?.id"
+            :expanded-ids="expandedDirIds"
+            @select="selectDoc"
+            @toggle-dir="toggleDirExpand"
+          />
         </aside>
         <main class="share-dir-content">
           <div v-if="selectedDoc" class="preview-shell">
@@ -127,11 +146,20 @@ const verifying = ref(false)
 const wrongPassword = ref(false)
 const selectedDoc = ref<ShareNode | null>(null)
 const shareToken = String(route.params.token || '')
+const shareSidebarOpen = ref(true)
+const expandedDirIds = ref<Set<string>>(new Set())
+const shareDirStateInitialized = ref(false)
+const hasDirExpansionPreference = ref(false)
 
 const SHARE_PASSWORD_KEY_PREFIX = 'markflow.share.password.'
+const SHARE_UI_KEY_PREFIX = 'markflow.share.ui.'
 
 function getSharePasswordKey(token: string) {
   return `${SHARE_PASSWORD_KEY_PREFIX}${token}`
+}
+
+function getShareUiKey(token: string) {
+  return `${SHARE_UI_KEY_PREFIX}${token}`
 }
 
 function readCachedPassword(token: string): string {
@@ -144,6 +172,41 @@ function cachePassword(token: string, pw: string) {
 
 function clearCachedPassword(token: string) {
   localStorage.removeItem(getSharePasswordKey(token))
+}
+
+function loadShareUiState() {
+  shareSidebarOpen.value = true
+  expandedDirIds.value = new Set()
+  hasDirExpansionPreference.value = false
+  try {
+    const raw = localStorage.getItem(getShareUiKey(shareToken))
+    if (!raw) return
+    const parsed = JSON.parse(raw) as { sidebar_open?: boolean; expanded_dir_ids?: string[] }
+    if (typeof parsed.sidebar_open === 'boolean') {
+      shareSidebarOpen.value = parsed.sidebar_open
+    }
+    if (Array.isArray(parsed.expanded_dir_ids)) {
+      expandedDirIds.value = new Set(parsed.expanded_dir_ids.filter((id) => typeof id === 'string'))
+      hasDirExpansionPreference.value = true
+    }
+  } catch {
+    // ignore invalid cache
+  }
+}
+
+function persistShareUiState() {
+  localStorage.setItem(
+    getShareUiKey(shareToken),
+    JSON.stringify({
+      sidebar_open: shareSidebarOpen.value,
+      expanded_dir_ids: Array.from(expandedDirIds.value),
+    })
+  )
+}
+
+function toggleShareSidebar() {
+  shareSidebarOpen.value = !shareSidebarOpen.value
+  persistShareUiState()
 }
 
 function parseTime(value?: string | null): number {
@@ -162,6 +225,46 @@ function isShareExpired(expiresAt?: string | null): boolean {
 
 function selectDoc(doc: ShareNode) {
   selectedDoc.value = doc
+}
+
+function collectDirIds(nodes: ShareNode[], set: Set<string>) {
+  for (const node of nodes) {
+    if (node.node_type === 'dir') {
+      set.add(node.id)
+      if (node.children?.length) collectDirIds(node.children, set)
+    }
+  }
+}
+
+function syncExpandedDirState(nodes: ShareNode[]) {
+  const currentDirIds = new Set<string>()
+  collectDirIds(nodes, currentDirIds)
+
+  if (!shareDirStateInitialized.value) {
+    if (hasDirExpansionPreference.value) {
+      expandedDirIds.value = new Set(
+        Array.from(expandedDirIds.value).filter((id) => currentDirIds.has(id))
+      )
+    } else {
+      expandedDirIds.value = currentDirIds
+    }
+    shareDirStateInitialized.value = true
+    persistShareUiState()
+    return
+  }
+
+  expandedDirIds.value = new Set(
+    Array.from(expandedDirIds.value).filter((id) => currentDirIds.has(id))
+  )
+  persistShareUiState()
+}
+
+function toggleDirExpand(dirId: string) {
+  const next = new Set(expandedDirIds.value)
+  if (next.has(dirId)) next.delete(dirId)
+  else next.add(dirId)
+  expandedDirIds.value = next
+  persistShareUiState()
 }
 
 function firstDocFromTree(nodes: ShareNode[]): ShareNode | null {
@@ -220,6 +323,7 @@ async function loadContent(pw?: string) {
     content.value = data.node
 
     if (data.node.node_type === 'dir') {
+      syncExpandedDirState(data.node.children || [])
       selectedDoc.value = firstDocFromTree(data.node.children || [])
       state.value = 'dir'
     } else {
@@ -263,7 +367,10 @@ async function verifyPassword() {
   }
 }
 
-onMounted(loadShareInfo)
+onMounted(async () => {
+  loadShareUiState()
+  await loadShareInfo()
+})
 
 const MarkFlowLogo = defineComponent({
   render() {
@@ -291,8 +398,11 @@ const ShareHeader = defineComponent({
   props: {
     docName: String,
     shareInfo: Object as () => ShareInfo | null,
+    sidebarOpen: { type: Boolean, default: true },
+    showSidebarToggle: { type: Boolean, default: false },
   },
-  setup(props) {
+  emits: ['toggle-sidebar'],
+  setup(props, { emit }) {
     function formatExpiry(dt: string) {
       const d = new Date(dt)
       const yyyy = d.getFullYear()
@@ -310,6 +420,15 @@ const ShareHeader = defineComponent({
           props.docName && h('span', { class: 'sh-doc-name' }, props.docName),
         ]),
         h('div', { class: 'sh-right' }, [
+          props.showSidebarToggle && h(
+            'button',
+            {
+              class: 'sh-toggle',
+              title: props.sidebarOpen ? '收起目录' : '展开目录',
+              onClick: () => emit('toggle-sidebar'),
+            },
+            props.sidebarOpen ? '收起目录' : '展开目录'
+          ),
           h('span', { class: 'sh-badge' }, '只读'),
           props.shareInfo?.expires_at && h('span', { class: 'sh-badge muted' }, formatExpiry(props.shareInfo.expires_at)),
         ]),
@@ -322,15 +441,24 @@ const DirTreeNav = defineComponent({
   props: {
     nodes: { type: Array as () => ShareNode[], default: () => [] },
     selectedId: String,
+    expandedIds: { type: Object as () => Set<string>, required: true },
   },
-  emits: ['select'],
+  emits: ['select', 'toggle-dir'],
   setup(props, { emit }) {
     function renderNodes(nodes: ShareNode[]): any {
       return nodes.map((node) => {
         if (node.node_type === 'dir') {
+          const expanded = props.expandedIds.has(node.id)
           return h('div', { class: 'nav-dir' }, [
-            h('div', { class: 'nav-dir-label' }, [h('span', { class: 'nav-icon' }, '▸'), h('span', { class: 'nav-dir-name' }, node.name)]),
-            node.children?.length ? h('div', { class: 'nav-children' }, renderNodes(node.children)) : null,
+            h(
+              'div',
+              {
+                class: ['nav-dir-label', { 'nav-dir-label--expanded': expanded }],
+                onClick: () => emit('toggle-dir', node.id),
+              },
+              [h('span', { class: ['nav-icon', { 'nav-icon-expanded': expanded }] }, '▸'), h('span', { class: 'nav-dir-name' }, node.name)]
+            ),
+            expanded && node.children?.length ? h('div', { class: 'nav-children' }, renderNodes(node.children)) : null,
           ])
         }
 
@@ -512,6 +640,24 @@ const DirTreeNav = defineComponent({
   gap: 8px;
 }
 
+:deep(.sh-toggle) {
+  border: 1px solid var(--border);
+  background: var(--bg3);
+  color: var(--text2);
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1;
+  padding: 6px 10px;
+  cursor: pointer;
+  transition: all 0.12s;
+}
+
+:deep(.sh-toggle:hover) {
+  color: var(--text);
+  border-color: var(--blue);
+  background: color-mix(in srgb, var(--blue) 12%, var(--bg3));
+}
+
 :deep(.sh-badge) {
   font-size: 11px;
   padding: 3px 8px;
@@ -534,6 +680,11 @@ const DirTreeNav = defineComponent({
   height: calc(100vh - var(--header-height));
   display: grid;
   grid-template-columns: 260px 1fr;
+  transition: grid-template-columns 0.18s ease;
+}
+
+.share-doc-body.is-sidebar-collapsed {
+  grid-template-columns: 0 1fr;
 }
 
 .share-doc-sidebar {
@@ -544,6 +695,8 @@ const DirTreeNav = defineComponent({
   );
   border-right: 1px solid var(--border);
   padding: 12px 10px;
+  min-width: 0;
+  overflow: hidden;
   overflow-y: auto;
 }
 
@@ -605,6 +758,11 @@ const DirTreeNav = defineComponent({
   height: calc(100vh - var(--header-height));
   display: grid;
   grid-template-columns: 260px 1fr;
+  transition: grid-template-columns 0.18s ease;
+}
+
+.share-dir-body.is-sidebar-collapsed {
+  grid-template-columns: 0 1fr;
 }
 
 .share-dir-sidebar {
@@ -615,7 +773,15 @@ const DirTreeNav = defineComponent({
   );
   border-right: 1px solid var(--border);
   padding: 12px 10px;
+  min-width: 0;
+  overflow: hidden;
   overflow-y: auto;
+}
+
+.share-doc-body.is-sidebar-collapsed .share-doc-sidebar,
+.share-dir-body.is-sidebar-collapsed .share-dir-sidebar {
+  padding: 0;
+  border-right-color: transparent;
 }
 
 .sidebar-title {
@@ -661,6 +827,13 @@ const DirTreeNav = defineComponent({
   font-size: 12px;
   font-weight: 600;
   color: var(--text2);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  transition: background 0.12s;
+}
+
+:deep(.nav-dir-label:hover) {
+  background: color-mix(in srgb, var(--blue) 10%, transparent);
 }
 
 :deep(.nav-dir-name) {
@@ -699,6 +872,11 @@ const DirTreeNav = defineComponent({
   font-size: 12px;
   flex-shrink: 0;
   color: var(--text3);
+  transition: transform 0.12s;
+}
+
+:deep(.nav-icon.nav-icon-expanded) {
+  transform: rotate(90deg);
 }
 
 :deep(.nav-doc-name) {

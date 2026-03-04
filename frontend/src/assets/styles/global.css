@@ -1,22 +1,22 @@
 :root {
-  --bg:        #070e1a;
-  --bg2:       #0d1727;
-  --bg3:       #111f33;
-  --bg4:       #162741;
-  --border:    rgba(128,157,192,0.2);
-  --border2:   rgba(127,180,255,0.38);
-  --text:      #dfe9f8;
-  --text2:     #9cb0cc;
-  --text3:     #7c8fa9;
-  --green:     #238636;
-  --green2:    #2ea043;
-  --green3:    #3fb950;
-  --green-dim: rgba(35,134,54,0.15);
-  --blue:      #5fa8ff;
-  --blue2:     #7fb4ff;
-  --red:       #f85149;
-  --yellow:    #d29922;
-  --orange:    #f0883e;
+  --bg:        #f3f7fd;
+  --bg2:       #ffffff;
+  --bg3:       #f5f9ff;
+  --bg4:       #edf4ff;
+  --border:    rgba(18,39,68,0.14);
+  --border2:   rgba(47,136,247,0.35);
+  --text:      #12213a;
+  --text2:     #40587b;
+  --text3:     #6f82a0;
+  --green:     #1f9a56;
+  --green2:    #1a8449;
+  --green3:    #1f9a56;
+  --green-dim: rgba(31,154,86,0.12);
+  --blue:      #2f88f7;
+  --blue2:     #1d6fd6;
+  --red:       #dd4d4d;
+  --yellow:    #d98a1f;
+  --orange:    #e3822e;
 
   --sidebar-width: 260px;
   --header-height: 50px;
@@ -34,29 +34,6 @@
 
   --font:  'Inter', 'Noto Sans SC', -apple-system, 'PingFang SC', sans-serif;
   --mono:  'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
-}
-
-@media (prefers-color-scheme: light) {
-  :root {
-    --bg:        #f3f7fd;
-    --bg2:       #ffffff;
-    --bg3:       #f5f9ff;
-    --bg4:       #edf4ff;
-    --border:    rgba(18,39,68,0.14);
-    --border2:   rgba(47,136,247,0.35);
-    --text:      #12213a;
-    --text2:     #40587b;
-    --text3:     #6f82a0;
-    --green:     #1f9a56;
-    --green2:    #1a8449;
-    --green3:    #1f9a56;
-    --green-dim: rgba(31,154,86,0.12);
-    --blue:      #2f88f7;
-    --blue2:     #1d6fd6;
-    --red:       #dd4d4d;
-    --yellow:    #d98a1f;
-    --orange:    #e3822e;
-  }
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }

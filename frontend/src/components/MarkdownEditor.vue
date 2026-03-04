@@ -82,15 +82,12 @@ const emit = defineEmits<{ share: [node: DocNode] }>()
 const docs = useDocsStore()
 const saving = ref(false)
 const isDirty = ref(false)
-const isSystemDark = ref(true)
 const draft = ref(props.node.content || '')
 const viewMode = ref<'edit' | 'split' | 'preview'>('split')
 let originalContent = props.node.content || ''
-let colorSchemeQuery: MediaQueryList | null = null
-let colorSchemeListener: ((event: MediaQueryListEvent) => void) | null = null
 
 const editorMode = computed(() => (viewMode.value === 'split' ? 'editable' : viewMode.value))
-const toneClass = computed(() => (isSystemDark.value ? 'tone-dark' : 'tone-light'))
+const toneClass = computed(() => 'tone-light')
 const wordCount = computed(() => {
   const text = draft.value
   const cjk = (text.match(/[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7ff]/g) || []).length
@@ -178,18 +175,6 @@ function handleSaveHotkey(event: KeyboardEvent) {
 }
 
 onMounted(() => {
-  colorSchemeQuery = window.matchMedia('(prefers-color-scheme: dark)')
-  isSystemDark.value = colorSchemeQuery.matches
-  colorSchemeListener = (event) => {
-    isSystemDark.value = event.matches
-  }
-
-  if (colorSchemeQuery.addEventListener) {
-    colorSchemeQuery.addEventListener('change', colorSchemeListener)
-  } else if (colorSchemeQuery.addListener) {
-    colorSchemeQuery.addListener(colorSchemeListener)
-  }
-
   window.addEventListener('beforeunload', handleBeforeUnload)
   window.addEventListener('keydown', handleSaveHotkey)
 })
@@ -197,14 +182,6 @@ onMounted(() => {
 onUnmounted(() => {
   window.removeEventListener('beforeunload', handleBeforeUnload)
   window.removeEventListener('keydown', handleSaveHotkey)
-
-  if (colorSchemeQuery && colorSchemeListener) {
-    if (colorSchemeQuery.removeEventListener) {
-      colorSchemeQuery.removeEventListener('change', colorSchemeListener)
-    } else if (colorSchemeQuery.removeListener) {
-      colorSchemeQuery.removeListener(colorSchemeListener)
-    }
-  }
 })
 </script>
 
