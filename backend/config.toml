@@ -1,0 +1,28 @@
+﻿# MarkFlow backend config
+# Place this file next to markflow.exe
+# Environment variables override file values
+
+# Application
+port = "3000"
+database_url = "sqlite:markflow.db"
+jwt_secret = "change_me_to_a_long_random_string_in_production"
+rust_log = "markflow=info,tower_http=warn"
+
+# Logging file output
+# Enable file logging: true/false
+log_to_file = true
+
+# Log file directory (relative to working dir or absolute path)
+log_dir = "logs"
+
+# Active log file name
+log_file_name = "markflow.log"
+
+# Rotate when file size exceeds this value (MB)
+log_rotate_size_mb = 50
+
+# Rotate when file age reaches this many days
+log_rotate_days = 1
+
+# Keep rotated logs for this many days (<=0 means keep forever)
+log_keep_days = 14

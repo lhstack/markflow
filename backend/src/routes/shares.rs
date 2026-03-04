@@ -1,0 +1,303 @@
+﻿use axum::{
+    extract::{Extension, Path},
+    http::{StatusCode, HeaderMap},
+    Json,
+    response::IntoResponse,
+};
+use serde::Deserialize;
+use serde_json::json;
+use std::sync::Arc;
+use uuid::Uuid;
+use rand::{Rng, distributions::Alphanumeric};
+use chrono::Utc;
+
+use crate::{db::Database, models::{Share, ShareResponse, DocNode, DocNodeResponse}, auth};
+
+fn generate_token() -> String {
+    rand::thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(20)
+        .map(char::from)
+        .collect()
+}
+
+fn is_expired(expires_at: &Option<String>) -> bool {
+    match expires_at {
+        None => false,
+        Some(dt) => {
+            if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(dt) {
+                parsed.with_timezone(&Utc) <= Utc::now()
+            } else if let Ok(parsed) = chrono::NaiveDateTime::parse_from_str(dt, "%Y-%m-%d %H:%M:%S") {
+                parsed <= Utc::now().naive_utc()
+            } else {
+                false
+            }
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct CreateShareRequest {
+    pub doc_id: String,
+    pub password: Option<String>,
+    pub expires_at: Option<String>, // ISO datetime string
+}
+
+pub async fn create_share(
+    Extension(db): Extension<Arc<Database>>,
+    headers: HeaderMap,
+    Json(body): Json<CreateShareRequest>,
+) -> impl IntoResponse {
+    let claims = match auth::extract_user_id(&headers) {
+        Some(c) => c,
+        None => return (StatusCode::UNAUTHORIZED, Json(json!({"error": "Unauthorized"}))).into_response(),
+    };
+
+    // Verify doc belongs to user
+    let doc_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM doc_nodes WHERE id = ? AND user_id = ?)"
+    )
+    .bind(&body.doc_id)
+    .bind(&claims.sub)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap_or(false);
+
+    if !doc_exists {
+        return (StatusCode::NOT_FOUND, Json(json!({"error": "Document not found"}))).into_response();
+    }
+
+    let token = generate_token();
+    let share_id = Uuid::new_v4().to_string();
+    let password_hash = body.password.as_ref().map(|p| bcrypt::hash(p, 10).unwrap());
+
+    sqlx::query(
+        "INSERT INTO shares (id, user_id, doc_id, token, password_hash, expires_at) VALUES (?, ?, ?, ?, ?, ?)"
+    )
+    .bind(&share_id)
+    .bind(&claims.sub)
+    .bind(&body.doc_id)
+    .bind(&token)
+    .bind(&password_hash)
+    .bind(&body.expires_at)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let share: Share = sqlx::query_as("SELECT * FROM shares WHERE id = ?")
+        .bind(&share_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+
+    (StatusCode::CREATED, Json(json!({"share": ShareResponse::from(share)}))).into_response()
+}
+
+pub async fn list_shares(
+    Extension(db): Extension<Arc<Database>>,
+    headers: HeaderMap,
+    Path(doc_id): Path<String>,
+) -> impl IntoResponse {
+    let claims = match auth::extract_user_id(&headers) {
+        Some(c) => c,
+        None => return (StatusCode::UNAUTHORIZED, Json(json!({"error": "Unauthorized"}))).into_response(),
+    };
+
+    let shares: Vec<Share> = sqlx::query_as(
+        "SELECT * FROM shares WHERE doc_id = ? AND user_id = ? ORDER BY created_at DESC"
+    )
+    .bind(&doc_id)
+    .bind(&claims.sub)
+    .fetch_all(&db.pool)
+    .await
+    .unwrap_or_default();
+
+    let responses: Vec<ShareResponse> = shares.into_iter().map(ShareResponse::from).collect();
+    Json(json!({"shares": responses})).into_response()
+}
+
+pub async fn delete_share(
+    Extension(db): Extension<Arc<Database>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let claims = match auth::extract_user_id(&headers) {
+        Some(c) => c,
+        None => return (StatusCode::UNAUTHORIZED, Json(json!({"error": "Unauthorized"}))).into_response(),
+    };
+
+    let result = sqlx::query("DELETE FROM shares WHERE id = ? AND user_id = ?")
+        .bind(&id)
+        .bind(&claims.sub)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+    if result.rows_affected() == 0 {
+        return (StatusCode::NOT_FOUND, Json(json!({"error": "Share not found"}))).into_response();
+    }
+
+    Json(json!({"message": "鍒犻櫎鎴愬姛"})).into_response()
+}
+
+pub async fn get_share(
+    Extension(db): Extension<Arc<Database>>,
+    Path(token): Path<String>,
+) -> impl IntoResponse {
+    let share: Option<Share> = sqlx::query_as("SELECT * FROM shares WHERE token = ?")
+        .bind(&token)
+        .fetch_optional(&db.pool)
+        .await
+        .unwrap();
+
+    let share = match share {
+        Some(s) => s,
+        None => return (StatusCode::NOT_FOUND, Json(json!({"error": "Share link not found"}))).into_response(),
+    };
+
+    if is_expired(&share.expires_at) {
+        return (StatusCode::GONE, Json(json!({"error": "Share link expired"}))).into_response();
+    }
+
+    // Get doc info (name, type) without content
+    let doc: Option<DocNode> = sqlx::query_as("SELECT * FROM doc_nodes WHERE id = ?")
+        .bind(&share.doc_id)
+        .fetch_optional(&db.pool)
+        .await
+        .unwrap();
+
+    let doc = match doc {
+        Some(d) => d,
+        None => return (StatusCode::NOT_FOUND, Json(json!({"error": "Document deleted"}))).into_response(),
+    };
+
+    Json(json!({
+        "share": {
+            "token": share.token,
+            "doc_name": doc.name,
+            "doc_type": doc.node_type,
+            "has_password": share.password_hash.is_some(),
+            "expires_at": share.expires_at
+        }
+    })).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct VerifyShareRequest {
+    pub password: String,
+}
+
+pub async fn verify_share(
+    Extension(db): Extension<Arc<Database>>,
+    Path(token): Path<String>,
+    Json(body): Json<VerifyShareRequest>,
+) -> impl IntoResponse {
+    let share: Option<Share> = sqlx::query_as("SELECT * FROM shares WHERE token = ?")
+        .bind(&token)
+        .fetch_optional(&db.pool)
+        .await
+        .unwrap();
+
+    let share = match share {
+        Some(s) => s,
+        None => return (StatusCode::NOT_FOUND, Json(json!({"error": "Share link not found"}))).into_response(),
+    };
+
+    if is_expired(&share.expires_at) {
+        return (StatusCode::GONE, Json(json!({"error": "Share link expired"}))).into_response();
+    }
+
+    match &share.password_hash {
+        None => Json(json!({"verified": true})).into_response(),
+        Some(hash) => {
+            if bcrypt::verify(&body.password, hash).unwrap_or(false) {
+                Json(json!({"verified": true})).into_response()
+            } else {
+                (StatusCode::UNAUTHORIZED, Json(json!({"error": "Invalid password", "verified": false}))).into_response()
+            }
+        }
+    }
+}
+
+pub async fn get_share_content(
+    Extension(db): Extension<Arc<Database>>,
+    Path(token): Path<String>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let share: Option<Share> = sqlx::query_as("SELECT * FROM shares WHERE token = ?")
+        .bind(&token)
+        .fetch_optional(&db.pool)
+        .await
+        .unwrap();
+
+    let share = match share {
+        Some(s) => s,
+        None => return (StatusCode::NOT_FOUND, Json(json!({"error": "Share link not found"}))).into_response(),
+    };
+
+    if is_expired(&share.expires_at) {
+        return (StatusCode::GONE, Json(json!({"error": "Share link expired"}))).into_response();
+    }
+
+    // If has password, verify via header
+    if share.password_hash.is_some() {
+        let verified = headers.get("X-Share-Password")
+            .and_then(|v| v.to_str().ok())
+            .map(|p| bcrypt::verify(p, share.password_hash.as_ref().unwrap()).unwrap_or(false))
+            .unwrap_or(false);
+        
+        if !verified {
+            return (StatusCode::UNAUTHORIZED, Json(json!({"error": "Password required"}))).into_response();
+        }
+    }
+
+    let doc: Option<DocNode> = sqlx::query_as("SELECT * FROM doc_nodes WHERE id = ?")
+        .bind(&share.doc_id)
+        .fetch_optional(&db.pool)
+        .await
+        .unwrap();
+
+    match doc {
+        Some(d) => {
+            if d.node_type == "dir" {
+                // Return dir with children
+                let children: Vec<DocNode> = sqlx::query_as(
+                    "SELECT * FROM doc_nodes WHERE user_id = ? ORDER BY sort_order ASC"
+                )
+                .bind(&d.user_id)
+                .fetch_all(&db.pool)
+                .await
+                .unwrap_or_default();
+                
+                // Build subtree from this dir
+                let tree = build_subtree(children, &d.id);
+                let mut resp = DocNodeResponse::from_node(d);
+                resp.children = tree;
+                Json(json!({"node": resp})).into_response()
+            } else {
+                Json(json!({"node": DocNodeResponse::from_node(d)})).into_response()
+            }
+        }
+        None => (StatusCode::NOT_FOUND, Json(json!({"error": "Document deleted"}))).into_response(),
+    }
+}
+
+fn build_subtree(all_nodes: Vec<DocNode>, root_id: &str) -> Vec<DocNodeResponse> {
+    let mut result = vec![];
+    for node in all_nodes.iter() {
+        if node.parent_id.as_deref() == Some(root_id) {
+            let mut resp = DocNodeResponse::from_node(node.clone());
+            resp.children = build_subtree(all_nodes.clone(), &node.id);
+            result.push(resp);
+        }
+    }
+    result.sort_by(|a, b| {
+        if a.node_type != b.node_type {
+            if a.node_type == "dir" { std::cmp::Ordering::Less } else { std::cmp::Ordering::Greater }
+        } else {
+            a.sort_order.cmp(&b.sort_order)
+        }
+    });
+    result
+}
+

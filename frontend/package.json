@@ -1,0 +1,36 @@
+{
+  "name": "markflow-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@codemirror/commands": "^6.0.0",
+    "@codemirror/lang-markdown": "^6.0.0",
+    "@codemirror/language": "^6.0.0",
+    "@codemirror/state": "^6.0.0",
+    "@codemirror/theme-one-dark": "^6.0.0",
+    "@codemirror/view": "^6.0.0",
+    "@element-plus/icons-vue": "^2.3.0",
+    "@kangc/v-md-editor": "2.3.18",
+    "@lezer/highlight": "^1.0.0",
+    "axios": "^1.6.0",
+    "element-plus": "^2.7.0",
+    "highlight.js": "^11.9.0",
+    "marked": "^12.0.0",
+    "pinia": "^2.1.0",
+    "vue": "^3.4.0",
+    "vue-router": "^4.3.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.0.0",
+    "typescript": "^5.2.0",
+    "vite": "^5.1.0",
+    "vue-tsc": "^2.0.0",
+    "@types/node": "^20.0.0"
+  }
+}
