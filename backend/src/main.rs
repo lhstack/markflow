@@ -435,7 +435,14 @@ async fn main() -> anyhow::Result<()> {
         .route("/auth/2fa/setup", post(routes::auth::setup_2fa))
         .route("/auth/2fa/confirm", post(routes::auth::confirm_2fa))
         .route("/auth/2fa/disable", post(routes::auth::disable_2fa))
-        .route("/uploads", post(routes::uploads::upload_file))
+        .route(
+            "/uploads",
+            get(routes::uploads::list_uploads).post(routes::uploads::upload_file),
+        )
+        .route(
+            "/uploads/:id",
+            put(routes::uploads::replace_upload).delete(routes::uploads::delete_upload),
+        )
         .route(
             "/projects",
             get(routes::projects::list_projects).post(routes::projects::create_project),
@@ -463,6 +470,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/s/:token/content", get(routes::shares::get_share_content));
 
     let app = Router::new()
+        .route("/uploads/files/:id", get(routes::uploads::serve_upload))
         .nest("/api", api)
         .fallback(static_handler)
         .layer(Extension(db))

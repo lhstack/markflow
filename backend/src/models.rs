@@ -49,6 +49,19 @@ pub struct Share {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct UploadAsset {
+    pub id: i64,
+    pub user_id: i64,
+    pub kind: String,
+    pub original_name: String,
+    pub stored_path: String,
+    pub content_type: Option<String>,
+    pub size: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 // API response types
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UserInfo {
@@ -146,6 +159,26 @@ impl From<Share> for ShareResponse {
             created_at: s.created_at,
         }
     }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UploadUsage {
+    pub avatar: bool,
+    pub project_refs: i64,
+    pub doc_refs: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UploadAssetResponse {
+    pub id: i64,
+    pub kind: String,
+    pub original_name: String,
+    pub url: String,
+    pub content_type: Option<String>,
+    pub size: i64,
+    pub created_at: String,
+    pub updated_at: String,
+    pub usage: UploadUsage,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

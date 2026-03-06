@@ -22,6 +22,9 @@
       </div>
 
       <div class="actions">
+        <button class="secondary-btn" :disabled="uploadingAsset" @click="triggerAttachmentUpload">
+          {{ uploadingAsset ? '上传中...' : '附件' }}
+        </button>
         <button class="secondary-btn" @click="emit('share', node)">分享</button>
         <button class="save-btn" :class="{ dirty: isDirty }" :disabled="saving" @click="save">
           <span>{{ saving ? '保存中...' : '保存' }}</span>
@@ -30,8 +33,40 @@
       </div>
     </header>
 
+    <div
+      v-if="assetUploadTask"
+      class="upload-banner"
+      :class="{
+        uploading: assetUploadTask.status === 'uploading',
+        error: assetUploadTask.status === 'error',
+      }"
+    >
+      <div class="upload-banner-meta">
+        <span class="upload-banner-title">{{ uploadBannerTitle }}</span>
+        <span class="upload-banner-file">{{ assetUploadTask.fileName }}</span>
+      </div>
+      <div class="upload-banner-body">
+        <div v-if="assetUploadTask.status === 'uploading'" class="upload-banner-progress">
+          <span>{{ assetUploadTask.progress }}%</span>
+          <el-progress :percentage="assetUploadTask.progress" :stroke-width="7" :show-text="false" />
+        </div>
+        <span v-else-if="assetUploadTask.status === 'error'" class="upload-banner-error">
+          {{ assetUploadTask.error || '上传失败' }}
+        </span>
+        <span v-else class="upload-banner-success">附件已插入文档</span>
+        <button
+          v-if="assetUploadTask.status !== 'uploading'"
+          class="upload-banner-close"
+          @click="clearAssetUploadTask"
+        >
+          关闭
+        </button>
+      </div>
+    </div>
+
     <div class="editor-host">
       <VMdEditor
+        ref="editorRef"
         v-model="draft"
         :mode="editorMode"
         :height="'100%'"
@@ -42,8 +77,16 @@
         :codemirror-config="codemirrorConfig"
         :placeholder="'开始输入 Markdown...'"
         @save="save"
+        @upload-image="handleUploadImage"
       />
     </div>
+
+    <input
+      ref="attachmentInput"
+      type="file"
+      style="display:none"
+      @change="handleAttachmentChange"
+    />
   </div>
 </template>
 
@@ -68,6 +111,8 @@ import '@kangc/v-md-editor/lib/style/base-editor.css'
 import '@kangc/v-md-editor/lib/theme/style/github.css'
 
 import { useDocsStore, type DocNode } from '@/stores/docs'
+import { createManagedUploadTask, removeManagedUpload, type ManagedUploadTask } from '@/utils/managedUploads'
+import { uploadFile, uploadImage } from '@/utils/uploads'
 
 const vmd = VMdEditor as any
 if (!vmd.__markflowConfigured) {
@@ -84,6 +129,10 @@ const saving = ref(false)
 const isDirty = ref(false)
 const draft = ref(props.node.content || '')
 const viewMode = ref<'edit' | 'split' | 'preview'>('split')
+const editorRef = ref<any>(null)
+const attachmentInput = ref<HTMLInputElement | null>(null)
+const uploadingAsset = ref(false)
+const assetUploadTask = ref<ManagedUploadTask | null>(null)
 let originalContent = props.node.content || ''
 
 const editorMode = computed(() => (viewMode.value === 'split' ? 'editable' : viewMode.value))
@@ -97,7 +146,7 @@ const wordCount = computed(() => {
 
 const leftToolbar = 'undo redo clear | h bold italic strikethrough quote | ul ol table hr | link image code'
 const rightToolbar = 'fullscreen'
-const disabledMenus = ['image/upload-image']
+const disabledMenus: string[] = []
 const codemirrorConfig = {
   indentUnit: 2,
   tabSize: 2,
@@ -105,6 +154,12 @@ const codemirrorConfig = {
   lineWrapping: true,
   scrollbarStyle: 'native',
 }
+const uploadBannerTitle = computed(() => {
+  if (!assetUploadTask.value) return ''
+  if (assetUploadTask.value.status === 'uploading') return '附件上传中'
+  if (assetUploadTask.value.status === 'error') return '附件上传失败'
+  return '附件上传完成'
+})
 
 function fmtDate(dateString: string) {
   const date = new Date(dateString.endsWith('Z') ? dateString : `${dateString}Z`)
@@ -161,6 +216,94 @@ async function save() {
   }
 }
 
+function beginAssetUpload(kind: 'doc-image' | 'doc-file', file: File) {
+  if (assetUploadTask.value) {
+    removeManagedUpload(assetUploadTask.value.id)
+  }
+  assetUploadTask.value = createManagedUploadTask(kind, file)
+  uploadingAsset.value = true
+  return assetUploadTask.value
+}
+
+function clearFileInput(input: HTMLInputElement | null) {
+  if (input) {
+    input.value = ''
+  }
+}
+
+function clearAssetUploadTask() {
+  if (assetUploadTask.value) {
+    removeManagedUpload(assetUploadTask.value.id)
+    assetUploadTask.value = null
+  }
+}
+
+function triggerAttachmentUpload() {
+  if (uploadingAsset.value) return
+  clearFileInput(attachmentInput.value)
+  attachmentInput.value?.click()
+}
+
+function insertAttachmentLink(fileName: string, url: string) {
+  const editor = editorRef.value
+  if (editor?.insert) {
+    editor.insert((selected: string) => ({
+      text: selected ? `[${selected}](${url})` : `[${fileName}](${url})`,
+      selected: null,
+    }))
+    return
+  }
+
+  const prefix = draft.value && !draft.value.endsWith('\n') ? '\n' : ''
+  draft.value = `${draft.value}${prefix}[${fileName}](${url})`
+}
+
+async function handleUploadImage(_event: Event, insertImage: (config: { url: string; desc: string }) => void, files: File[]) {
+  const file = files[0]
+  if (!file || uploadingAsset.value) return
+  if (!file.type.startsWith('image/')) {
+    ElMessage.warning('请选择图片文件')
+    return
+  }
+  if (file.size > 10 * 1024 * 1024) {
+    ElMessage.warning('图片大小不能超过 10MB')
+    return
+  }
+
+  const task = beginAssetUpload('doc-image', file)
+  try {
+    const url = await uploadImage(file, 'doc-image', { task })
+    insertImage({ url, desc: file.name })
+    ElMessage.success('图片已插入文档')
+  } catch (err: any) {
+    ElMessage.error(err.response?.data?.error || '图片上传失败')
+  } finally {
+    uploadingAsset.value = false
+  }
+}
+
+async function handleAttachmentChange(event: Event) {
+  const file = (event.target as HTMLInputElement).files?.[0]
+  if (!file) return
+  if (file.size > 20 * 1024 * 1024) {
+    ElMessage.warning('附件大小不能超过 20MB')
+    clearFileInput(attachmentInput.value)
+    return
+  }
+
+  const task = beginAssetUpload('doc-file', file)
+  try {
+    const url = await uploadFile(file, 'doc-file', { task })
+    insertAttachmentLink(file.name, url)
+    ElMessage.success('附件已插入文档')
+  } catch (err: any) {
+    ElMessage.error(err.response?.data?.error || '附件上传失败')
+  } finally {
+    uploadingAsset.value = false
+    clearFileInput(attachmentInput.value)
+  }
+}
+
 function handleBeforeUnload(event: BeforeUnloadEvent) {
   if (!isDirty.value) return
   event.preventDefault()
@@ -182,6 +325,7 @@ onMounted(() => {
 onUnmounted(() => {
   window.removeEventListener('beforeunload', handleBeforeUnload)
   window.removeEventListener('keydown', handleSaveHotkey)
+  clearAssetUploadTask()
 })
 </script>
 
@@ -329,6 +473,11 @@ onUnmounted(() => {
   color: var(--mde-text);
 }
 
+.secondary-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
 .save-btn {
   display: inline-flex;
   align-items: center;
@@ -359,6 +508,80 @@ onUnmounted(() => {
 .editor-host {
   flex: 1;
   min-height: 0;
+}
+
+.upload-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--mde-border);
+  background: color-mix(in srgb, var(--mde-accent) 7%, var(--mde-panel));
+}
+
+.upload-banner.error {
+  background: rgba(214, 76, 76, 0.08);
+}
+
+.upload-banner-meta {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.upload-banner-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--mde-text);
+}
+
+.upload-banner-file {
+  min-width: 0;
+  font-size: 12px;
+  color: var(--mde-text-soft);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.upload-banner-body {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 260px;
+}
+
+.upload-banner-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  font-size: 12px;
+  color: var(--mde-text-soft);
+}
+
+.upload-banner-success {
+  font-size: 12px;
+  color: #1e9352;
+}
+
+.upload-banner-error {
+  font-size: 12px;
+  color: #d64c4c;
+}
+
+.upload-banner-close {
+  border: 0;
+  background: transparent;
+  color: var(--mde-text-soft);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.upload-banner-close:hover {
+  color: var(--mde-text);
 }
 
 :deep(.v-md-editor) {
@@ -451,6 +674,15 @@ onUnmounted(() => {
 
   .actions {
     justify-content: flex-end;
+  }
+
+  .upload-banner {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .upload-banner-body {
+    min-width: 0;
   }
 }
 

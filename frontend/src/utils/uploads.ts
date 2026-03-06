@@ -31,10 +31,10 @@ async function uploadManagedAsset(file: File, kind: string, options: UploadOptio
         const total = event.total ?? file.size
         updateManagedUploadProgress(task, loaded, total)
       },
-    })) as { url: string }
+    })) as { upload: { url: string } }
 
-    finishManagedUpload(task, data.url)
-    return data.url
+    finishManagedUpload(task, data.upload.url)
+    return data.upload.url
   } catch (error: any) {
     failManagedUpload(task, error?.response?.data?.error || error?.message || '上传失败')
     throw error

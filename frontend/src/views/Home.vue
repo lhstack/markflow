@@ -3,7 +3,12 @@
     <!-- Header -->
     <header class="app-header">
       <div class="header-left">
-        <button class="sidebar-toggle" @click="sidebarOpen = !sidebarOpen" :title="sidebarOpen ? '收起侧边栏' : '展开侧边栏'">
+        <button
+          v-if="showSidebar"
+          class="sidebar-toggle"
+          @click="sidebarOpen = !sidebarOpen"
+          :title="sidebarOpen ? '收起侧边栏' : '展开侧边栏'"
+        >
           <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
             <path d="M1 2.75A.75.75 0 0 1 1.75 2h12.5a.75.75 0 0 1 0 1.5H1.75A.75.75 0 0 1 1 2.75Zm0 5A.75.75 0 0 1 1.75 7h12.5a.75.75 0 0 1 0 1.5H1.75A.75.75 0 0 1 1 7.75ZM1.75 12h12.5a.75.75 0 0 1 0 1.5H1.75a.75.75 0 0 1 0-1.5Z"/>
           </svg>
@@ -67,6 +72,10 @@
                 <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="flex-shrink:0"><path d="M6.5 7.5V6a3.5 3.5 0 0 1 7 0v1.5h.25a.75.75 0 0 1 .75.75v5.5a.75.75 0 0 1-.75.75h-7.5a.75.75 0 0 1-.75-.75v-5.5a.75.75 0 0 1 .75-.75Zm1.5-1.5v1.5h4V6a2 2 0 0 0-4 0Z"/></svg>
                 修改密码
               </el-dropdown-item>
+              <el-dropdown-item command="attachments">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="flex-shrink:0"><path d="M4.75 1A2.75 2.75 0 0 0 2 3.75v7.5A3.75 3.75 0 0 0 5.75 15h4.5A3.75 3.75 0 0 0 14 11.25v-6.5a2.75 2.75 0 0 0-5.5 0v5.75a1.25 1.25 0 0 0 2.5 0V5.75a.75.75 0 0 1 1.5 0v4.75a2.75 2.75 0 0 1-5.5 0V4.75a4.25 4.25 0 0 1 8.5 0v6.5A5.25 5.25 0 0 1 10.25 16h-4.5A5.25 5.25 0 0 1 .5 10.75v-7A2.75 2.75 0 0 1 3.25 1h1.5a.75.75 0 0 1 0 1.5Z"/></svg>
+                附件管理
+              </el-dropdown-item>
               <el-dropdown-item command="logout" divided>
                 <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="flex-shrink:0"><path d="M2 2.75C2 1.784 2.784 1 3.75 1h4.5a.75.75 0 0 1 0 1.5h-4.5a.25.25 0 0 0-.25.25v10.5c0 .138.112.25.25.25h4.5a.75.75 0 0 1 0 1.5h-4.5A1.75 1.75 0 0 1 2 13.25Zm10.44 4.5-1.97-1.97a.749.749 0 0 1 .326-1.275.749.749 0 0 1 .734.215l3.25 3.25a.75.75 0 0 1 0 1.06l-3.25 3.25a.749.749 0 0 1-1.275-.326.749.749 0 0 1 .215-.734l1.97-1.97H6.75a.75.75 0 0 1 0-1.5Z"/></svg>
                 退出登录
@@ -115,6 +124,7 @@
 
     <!-- Dialogs -->
     <ProfileDialog v-model="showProfile" />
+    <AttachmentManagerDialog v-model="showAttachments" />
     <ShareDialog v-if="shareTarget" v-model="showShare" :node="shareTarget" />
 
     <!-- Password dialog -->
@@ -144,6 +154,7 @@ import MarkdownEditor from '@/components/MarkdownEditor.vue'
 import DirStats from '@/components/DirStats.vue'
 import ShareDialog from '@/components/ShareDialog.vue'
 import ProfileDialog from '@/components/ProfileDialog.vue'
+import AttachmentManagerDialog from '@/components/AttachmentManagerDialog.vue'
 import WelcomeScreen from '@/components/WelcomeScreen.vue'
 import ProjectOverview from '@/components/ProjectOverview.vue'
 import request from '@/utils/request'
@@ -200,6 +211,7 @@ const sidebarOpen = ref(readBool(HOME_SIDEBAR_KEY, true))
 const mobileOpen = ref(false)
 const showProjectOverview = ref(true)
 const showProfile = ref(false)
+const showAttachments = ref(false)
 const showShare = ref(false)
 const showPwChange = ref(false)
 const shareTarget = ref<DocNode | null>(null)
@@ -328,6 +340,7 @@ watch(
 function handleUserCmd(cmd: string) {
   if (cmd === 'profile') showProfile.value = true
   else if (cmd === 'password') showPwChange.value = true
+  else if (cmd === 'attachments') showAttachments.value = true
   else if (cmd === 'logout') {
     ElMessageBox.confirm('确认退出登录？', '提示', {
       type: 'warning', confirmButtonText: '退出', cancelButtonText: '取消'
