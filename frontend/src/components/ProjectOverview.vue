@@ -79,15 +79,23 @@
             <div v-else class="bg-placeholder">点击上传背景图</div>
           </div>
           <div class="bg-upload-actions">
-            <el-button @click="triggerBackgroundUpload">上传背景图</el-button>
-            <el-button :disabled="!form.background_image" @click="clearBackgroundImage">移除</el-button>
+            <el-button :loading="uploadingBackground" @click="triggerBackgroundUpload">上传背景图</el-button>
+            <el-button :disabled="!form.background_image || uploadingBackground" @click="clearBackgroundImage">移除</el-button>
             <span class="bg-file-name">{{ backgroundFileName || (form.background_image ? '已设置背景图' : '未选择文件') }}</span>
           </div>
+          <el-progress
+            v-if="backgroundUploadTask && backgroundUploadTask.status === 'uploading'"
+            :percentage="backgroundUploadTask.progress"
+            :stroke-width="8"
+          />
+          <p v-if="backgroundUploadTask && backgroundUploadTask.status === 'error'" class="bg-upload-error">
+            {{ backgroundUploadTask.error || '上传失败' }}
+          </p>
         </div>
       </div>
       <template #footer>
         <el-button @click="showDialog = false">取消</el-button>
-        <el-button type="primary" @click="submitProject">保存</el-button>
+        <el-button type="primary" :disabled="uploadingBackground" @click="submitProject">保存</el-button>
       </template>
     </el-dialog>
   </section>
@@ -97,17 +105,19 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { ProjectItem } from '@/stores/projects'
+import { createManagedUploadTask, removeManagedUpload, type ManagedUploadTask } from '@/utils/managedUploads'
+import { uploadImage } from '@/utils/uploads'
 
 const props = defineProps<{
   projects: ProjectItem[]
-  activeProjectId?: string | null
+  activeProjectId?: number | null
 }>()
 
 const emit = defineEmits<{
-  select: [projectId: string]
+  select: [projectId: number]
   create: [payload: { name: string; description: string; background_image: string }]
-  update: [projectId: string, payload: { name: string; description: string; background_image: string }]
-  delete: [projectId: string]
+  update: [projectId: number, payload: { name: string; description: string; background_image: string }]
+  delete: [projectId: number]
 }>()
 
 const gridContainer = ref<HTMLElement | null>(null)
@@ -115,10 +125,12 @@ const cardsPerPage = ref(8)
 const currentPage = ref(1)
 const showDialog = ref(false)
 const mode = ref<'create' | 'edit'>('create')
-const editingProjectId = ref<string | null>(null)
+const editingProjectId = ref<number | null>(null)
 const bgFileInput = ref<HTMLInputElement | null>(null)
 const backgroundFileName = ref('')
 const form = ref({ name: '', description: '', background_image: '' })
+const uploadingBackground = ref(false)
+const backgroundUploadTask = ref<ManagedUploadTask | null>(null)
 
 const pageCount = computed(() => Math.max(1, Math.ceil(props.projects.length / cardsPerPage.value)))
 
@@ -171,10 +183,11 @@ function openEdit(project: ProjectItem) {
 }
 
 function triggerBackgroundUpload() {
+  if (uploadingBackground.value) return
   bgFileInput.value?.click()
 }
 
-function handleBackgroundFileChange(event: Event) {
+async function handleBackgroundFileChange(event: Event) {
   const file = (event.target as HTMLInputElement).files?.[0]
   if (!file) return
   if (!file.type.startsWith('image/')) {
@@ -186,12 +199,23 @@ function handleBackgroundFileChange(event: Event) {
     return
   }
 
-  const reader = new FileReader()
-  reader.onload = (ev) => {
-    form.value.background_image = (ev.target?.result as string) || ''
-    backgroundFileName.value = file.name
+  uploadingBackground.value = true
+  if (backgroundUploadTask.value) {
+    removeManagedUpload(backgroundUploadTask.value.id)
   }
-  reader.readAsDataURL(file)
+  backgroundUploadTask.value = createManagedUploadTask('project-background', file)
+  try {
+    form.value.background_image = await uploadImage(file, 'project-background', { task: backgroundUploadTask.value })
+    backgroundFileName.value = file.name
+    ElMessage.success('背景图上传成功')
+  } catch (err: any) {
+    ElMessage.error(err.response?.data?.error || '背景图上传失败')
+  } finally {
+    uploadingBackground.value = false
+    if (bgFileInput.value) {
+      bgFileInput.value.value = ''
+    }
+  }
 }
 
 function clearBackgroundImage() {
@@ -508,6 +532,11 @@ onUnmounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.bg-upload-error {
+  font-size: 12px;
+  color: #dd4d4d;
 }
 
 @media (max-width: 768px) {

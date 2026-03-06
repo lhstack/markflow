@@ -152,7 +152,7 @@ import { useDocsStore, type DocNode } from '@/stores/docs'
 
 const docs = useDocsStore()
 const props = defineProps<{
-  projectId?: string | null
+  projectId?: number | null
   projectName?: string
 }>()
 const emit = defineEmits<{ share: [node: DocNode] }>()
@@ -164,18 +164,18 @@ const renameTarget = ref<DocNode | null>(null)
 const showCreate = ref(false)
 const createName = ref('')
 const createType = ref<'doc' | 'dir'>('doc')
-const createParent = ref<string | null>(null)
+const createParent = ref<number | null>(null)
 const renameInput = ref()
-const expandedIds = ref<Set<string>>(new Set())
-const knownDirIds = ref<Set<string>>(new Set())
+const expandedIds = ref<Set<number>>(new Set())
+const knownDirIds = ref<Set<number>>(new Set())
 const expansionInitialized = ref(false)
-const cachedExpandedIds = ref<Set<string>>(new Set())
+const cachedExpandedIds = ref<Set<number>>(new Set())
 const hasExpandedPreference = ref(false)
-const draggingNodeId = ref<string | null>(null)
+const draggingNodeId = ref<number | null>(null)
 const dragMoving = ref(false)
 
 type DropMode = 'before' | 'inside' | 'after' | 'root'
-const dropState = ref<{ targetId: string | null; mode: DropMode } | null>(null)
+const dropState = ref<{ targetId: number | null; mode: DropMode } | null>(null)
 
 const ctxMenu = ref<{ visible: boolean; x: number; y: number; node: DocNode | null }>({
   visible: false,
@@ -184,7 +184,7 @@ const ctxMenu = ref<{ visible: boolean; x: number; y: number; node: DocNode | nu
   node: null,
 })
 
-function collectDirIds(nodes: DocNode[], set: Set<string>) {
+function collectDirIds(nodes: DocNode[], set: Set<number>) {
   for (const node of nodes) {
     if (node.node_type === 'dir') {
       set.add(node.id)
@@ -207,7 +207,7 @@ function loadExpandedPreference() {
     if (!raw) return
     const parsed = JSON.parse(raw)
     if (Array.isArray(parsed)) {
-      cachedExpandedIds.value = new Set(parsed.filter((id) => typeof id === 'string'))
+      cachedExpandedIds.value = new Set(parsed.filter((id) => typeof id === 'number'))
       hasExpandedPreference.value = true
     }
   } catch {
@@ -237,7 +237,7 @@ watch(
 watch(
   () => docs.tree,
   (tree) => {
-    const currentDirIds = new Set<string>()
+    const currentDirIds = new Set<number>()
     collectDirIds(tree, currentDirIds)
 
     // When restoring from cache, avoid treating the initial empty tree snapshot as
@@ -349,7 +349,7 @@ function filterNodes(nodes: DocNode[], q: string): DocNode[] {
 
 const filteredTree = computed(() => filterNodes(docs.tree, searchQuery.value))
 
-function findNodeById(nodes: DocNode[], id: string): DocNode | null {
+function findNodeById(nodes: DocNode[], id: number): DocNode | null {
   for (const node of nodes) {
     if (node.id === id) return node
     const found = findNodeById(node.children || [], id)
@@ -358,7 +358,7 @@ function findNodeById(nodes: DocNode[], id: string): DocNode | null {
   return null
 }
 
-function getChildrenByParentId(parentId: string | null): DocNode[] {
+function getChildrenByParentId(parentId: number | null): DocNode[] {
   if (!parentId) return docs.tree
   const parent = findNodeById(docs.tree, parentId)
   return parent?.children || []
@@ -377,10 +377,10 @@ function calcDropModeByPointer(event: DragEvent, isDir: boolean): Exclude<DropMo
 }
 
 function getInsertIndex(
-  parentId: string | null,
-  targetId: string,
+  parentId: number | null,
+  targetId: number,
   mode: Exclude<DropMode, 'root'>,
-  draggedId: string
+  draggedId: number
 ): number {
   const destinationIds = getChildrenByParentId(parentId).map((n) => n.id).filter((id) => id !== draggedId)
   if (mode === 'inside') {
@@ -392,7 +392,7 @@ function getInsertIndex(
   return mode === 'before' ? targetIndex : targetIndex + 1
 }
 
-async function applyTreeMove(parentId: string | null, insertIndex: number) {
+async function applyTreeMove(parentId: number | null, insertIndex: number) {
   const draggedId = draggingNodeId.value
   if (!draggedId || dragMoving.value) return
 
@@ -502,21 +502,21 @@ function selectNode(node: DocNode) {
   docs.fetchNode(node.id)
 }
 
-function toggleExpand(nodeId: string) {
+function toggleExpand(nodeId: number) {
   const next = new Set(expandedIds.value)
   if (next.has(nodeId)) next.delete(nodeId)
   else next.add(nodeId)
   expandedIds.value = next
 }
 
-function createNode(type: 'doc' | 'dir', parentId: string | null = null) {
+function createNode(type: 'doc' | 'dir', parentId: number | null = null) {
   createType.value = type
   createParent.value = parentId
   createName.value = ''
   showCreate.value = true
 }
 
-function createUnder(parentId: string, type: 'doc' | 'dir') {
+function createUnder(parentId: number, type: 'doc' | 'dir') {
   createNode(type, parentId)
 }
 
@@ -592,11 +592,11 @@ const TreeNode: any = defineComponent({
   props: {
     node: { type: Object as () => DocNode, required: true },
     depth: { type: Number, default: 0 },
-    selectedId: String,
-    expandedIds: { type: Object as () => Set<string>, required: true },
+    selectedId: Number,
+    expandedIds: { type: Object as () => Set<number>, required: true },
     forceExpand: { type: Boolean, default: false },
-    draggingId: { type: String, default: null },
-    dropTargetId: { type: String, default: null },
+    draggingId: { type: Number, default: null },
+    dropTargetId: { type: Number, default: null },
     dropMode: { type: String as () => DropMode | null, default: null },
   },
   emits: [
@@ -790,8 +790,8 @@ const TreeNode: any = defineComponent({
                 dropTargetId: props.dropTargetId,
                 dropMode: props.dropMode,
                 onSelect: (n: DocNode) => emit('select', n),
-                onToggle: (id: string) => emit('toggle', id),
-                onCreate: (pid: string, t: 'doc' | 'dir') => emit('create', pid, t),
+                onToggle: (id: number) => emit('toggle', id),
+                onCreate: (pid: number, t: 'doc' | 'dir') => emit('create', pid, t),
                 onRename: (n: DocNode) => emit('rename', n),
                 onDelete: (n: DocNode) => emit('delete', n),
                 onShare: (n: DocNode) => emit('share', n),

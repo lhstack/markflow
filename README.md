@@ -149,6 +149,7 @@ port = "3000"
 database_url = "sqlite:markflow.db"
 jwt_secret = "change_me_to_a_long_random_string_in_production"
 rust_log = "markflow=info,tower_http=warn"
+upload_dir = "uploads"
 
 log_to_file = true
 log_dir = "logs"
@@ -164,6 +165,7 @@ log_keep_days = 14
 - `DATABASE_URL`
 - `JWT_SECRET`
 - `RUST_LOG`
+- `UPLOAD_DIR`
 - `LOG_TO_FILE`
 - `LOG_DIR`
 - `LOG_FILE_NAME`
@@ -185,7 +187,8 @@ log_keep_days = 14
 说明：
 
 - 文档根节点归属项目（`doc_nodes.project_id`）
-- 头像使用 DataURL 存在 `users.avatar`
+- 上传文件默认保存在 `uploads/<user_id>/<yyyyMMdd>/`
+- 头像、项目背景图使用上传接口保存文件并在表中存 URL
 - 分享密码仅存哈希，不存明文
 
 ## API 摘要（均以 `/api` 开头）

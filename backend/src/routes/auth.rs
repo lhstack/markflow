@@ -1,4 +1,4 @@
-﻿use axum::{
+use axum::{
     extract::Extension,
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
@@ -21,7 +21,7 @@ use crate::{
 
 lazy_static::lazy_static! {
     static ref CAPTCHA_STORE: Mutex<HashMap<String, (String, u64)>> = Mutex::new(HashMap::new());
-    static ref TWO_FA_LOGIN_STORE: Mutex<HashMap<String, (String, u64)>> = Mutex::new(HashMap::new());
+    static ref TWO_FA_LOGIN_STORE: Mutex<HashMap<String, (i64, u64)>> = Mutex::new(HashMap::new());
 }
 
 fn current_ts() -> u64 {
@@ -31,20 +31,20 @@ fn current_ts() -> u64 {
         .as_secs()
 }
 
-async fn create_twofa_challenge(user_id: &str) -> String {
+async fn create_twofa_challenge(user_id: i64) -> String {
     let challenge_id = Uuid::new_v4().to_string();
     let now = current_ts();
     let mut store = TWO_FA_LOGIN_STORE.lock().await;
     store.retain(|_, (_, ts)| now - *ts < 300);
-    store.insert(challenge_id.clone(), (user_id.to_string(), now));
+    store.insert(challenge_id.clone(), (user_id, now));
     challenge_id
 }
 
-async fn get_twofa_challenge_user_id(challenge_id: &str) -> Option<String> {
+async fn get_twofa_challenge_user_id(challenge_id: &str) -> Option<i64> {
     let now = current_ts();
     let mut store = TWO_FA_LOGIN_STORE.lock().await;
     store.retain(|_, (_, ts)| now - *ts < 300);
-    store.get(challenge_id).map(|(user_id, _)| user_id.clone())
+    store.get(challenge_id).map(|(user_id, _)| *user_id)
 }
 
 async fn clear_twofa_challenge(challenge_id: &str) {
@@ -96,7 +96,15 @@ fn verify_totp(secret_encoded: &str, code: &str) -> bool {
         Err(_) => return false,
     };
 
-    match TOTP::new(Algorithm::SHA1, 6, 1, 30, bytes, None, "markflow".to_string()) {
+    match TOTP::new(
+        Algorithm::SHA1,
+        6,
+        1,
+        30,
+        bytes,
+        None,
+        "markflow".to_string(),
+    ) {
         Ok(totp) => totp.check_current(code).unwrap_or(false),
         Err(_) => false,
     }
@@ -144,18 +152,17 @@ pub async fn register(
     }
 
     let password_hash = bcrypt::hash(&body.password, 10).unwrap();
-    let user_id = Uuid::new_v4().to_string();
+    let user_id =
+        sqlx::query("INSERT INTO users (username, password_hash, avatar) VALUES (?, ?, ?)")
+            .bind(&username)
+            .bind(&password_hash)
+            .bind(&body.avatar)
+            .execute(&db.pool)
+            .await
+            .unwrap()
+            .last_insert_rowid();
 
-    sqlx::query("INSERT INTO users (id, username, password_hash, avatar) VALUES (?, ?, ?, ?)")
-        .bind(&user_id)
-        .bind(&username)
-        .bind(&password_hash)
-        .bind(&body.avatar)
-        .execute(&db.pool)
-        .await
-        .unwrap();
-
-    let token = auth::create_token(&user_id, &username).unwrap();
+    let token = auth::create_token(user_id, &username).unwrap();
     (
         StatusCode::CREATED,
         Json(json!({
@@ -222,7 +229,7 @@ pub async fn login(
         let code = match body.totp_code.as_deref() {
             Some(c) if !c.is_empty() => c.to_string(),
             _ => {
-                let challenge_id = create_twofa_challenge(&user.id).await;
+                let challenge_id = create_twofa_challenge(user.id).await;
                 return Json(json!({
                     "require_2fa": true,
                     "challenge_id": challenge_id,
@@ -241,7 +248,7 @@ pub async fn login(
         }
     }
 
-    let token = auth::create_token(&user.id, &user.username).unwrap();
+    let token = auth::create_token(user.id, &user.username).unwrap();
     let user_info = UserInfo::from(user);
     Json(json!({"token": token, "user": user_info})).into_response()
 }
@@ -313,15 +320,12 @@ pub async fn login_2fa(
 
     clear_twofa_challenge(&body.challenge_id).await;
 
-    let token = auth::create_token(&user.id, &user.username).unwrap();
+    let token = auth::create_token(user.id, &user.username).unwrap();
     let user_info = UserInfo::from(user);
     Json(json!({"token": token, "user": user_info})).into_response()
 }
 
-pub async fn me(
-    Extension(db): Extension<Arc<Database>>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
+pub async fn me(Extension(db): Extension<Arc<Database>>, headers: HeaderMap) -> impl IntoResponse {
     let claims = match auth::extract_user_id(&headers) {
         Some(c) => c,
         None => {

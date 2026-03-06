@@ -3,7 +3,7 @@ use sqlx::FromRow;
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct User {
-    pub id: String,
+    pub id: i64,
     pub username: String,
     pub password_hash: String,
     pub avatar: Option<String>,
@@ -14,10 +14,10 @@ pub struct User {
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct DocNode {
-    pub id: String,
-    pub user_id: String,
-    pub project_id: Option<String>,
-    pub parent_id: Option<String>,
+    pub id: i64,
+    pub user_id: i64,
+    pub project_id: Option<i64>,
+    pub parent_id: Option<i64>,
     pub name: String,
     pub node_type: String,
     pub content: Option<String>,
@@ -28,8 +28,8 @@ pub struct DocNode {
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct Project {
-    pub id: String,
-    pub user_id: String,
+    pub id: i64,
+    pub user_id: i64,
     pub name: String,
     pub description: String,
     pub background_image: Option<String>,
@@ -40,9 +40,9 @@ pub struct Project {
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct Share {
-    pub id: String,
-    pub user_id: String,
-    pub doc_id: String,
+    pub id: i64,
+    pub user_id: i64,
+    pub doc_id: i64,
     pub token: String,
     pub password_hash: Option<String>,
     pub expires_at: Option<String>,
@@ -52,7 +52,7 @@ pub struct Share {
 // API response types
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UserInfo {
-    pub id: String,
+    pub id: i64,
     pub username: String,
     pub avatar: Option<String>,
     pub totp_enabled: bool,
@@ -71,9 +71,9 @@ impl From<User> for UserInfo {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DocNodeResponse {
-    pub id: String,
-    pub project_id: Option<String>,
-    pub parent_id: Option<String>,
+    pub id: i64,
+    pub project_id: Option<i64>,
+    pub parent_id: Option<i64>,
     pub name: String,
     pub node_type: String,
     pub content: Option<String>,
@@ -102,7 +102,7 @@ impl DocNodeResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ProjectResponse {
-    pub id: String,
+    pub id: i64,
     pub name: String,
     pub description: String,
     pub background_image: Option<String>,
@@ -127,8 +127,8 @@ impl From<Project> for ProjectResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ShareResponse {
-    pub id: String,
-    pub doc_id: String,
+    pub id: i64,
+    pub doc_id: i64,
     pub token: String,
     pub has_password: bool,
     pub expires_at: Option<String>,
@@ -150,7 +150,7 @@ impl From<Share> for ShareResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
-    pub sub: String, // user_id
+    pub sub: i64,
     pub username: String,
     pub exp: usize,
     pub iat: usize,

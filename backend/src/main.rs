@@ -1,9 +1,12 @@
-﻿mod db;
-mod models;
 mod auth;
+mod db;
+mod models;
 mod routes;
 
-use axum::{Router, routing::{delete, get, post, put}, Extension};
+use axum::{
+    routing::{delete, get, post, put},
+    Extension, Router,
+};
 use chrono::{Local, NaiveDate};
 use serde::Deserialize;
 use std::{
@@ -31,6 +34,7 @@ struct FileConfig {
     port: Option<String>,
     jwt_secret: Option<String>,
     rust_log: Option<String>,
+    upload_dir: Option<String>,
     log_to_file: Option<bool>,
     log_dir: Option<String>,
     log_file_name: Option<String>,
@@ -199,7 +203,9 @@ impl RotatingFileState {
         }
 
         if self.active_path.exists() {
-            let len = fs::metadata(&self.active_path).map(|m| m.len()).unwrap_or(0);
+            let len = fs::metadata(&self.active_path)
+                .map(|m| m.len())
+                .unwrap_or(0);
             if len > 0 {
                 let suffix = Local::now().format("%Y%m%d-%H%M%S");
                 let rotated_name = format!("{}-{}{}", self.file_stem, suffix, self.file_ext);
@@ -217,7 +223,9 @@ impl RotatingFileState {
             return;
         }
 
-        let Some(cutoff) = SystemTime::now().checked_sub(Duration::from_secs((self.opts.keep_days as u64) * 24 * 60 * 60)) else {
+        let Some(cutoff) = SystemTime::now().checked_sub(Duration::from_secs(
+            (self.opts.keep_days as u64) * 24 * 60 * 60,
+        )) else {
             return;
         };
 
@@ -335,10 +343,19 @@ async fn main() -> anyhow::Result<()> {
     let file_cfg = load_config();
 
     // env > config.toml > defaults
-    let rust_log = cfg_val("RUST_LOG", file_cfg.rust_log, "markflow=info,tower_http=warn");
+    let rust_log = cfg_val(
+        "RUST_LOG",
+        file_cfg.rust_log,
+        "markflow=info,tower_http=warn",
+    );
     let database_url = cfg_val("DATABASE_URL", file_cfg.database_url, "sqlite:markflow.db");
     let port = cfg_val("PORT", file_cfg.port, "3000");
-    let jwt_secret = cfg_val("JWT_SECRET", file_cfg.jwt_secret, "markflow_dev_secret_change_in_production");
+    let jwt_secret = cfg_val(
+        "JWT_SECRET",
+        file_cfg.jwt_secret,
+        "markflow_dev_secret_change_in_production",
+    );
+    let upload_dir = cfg_val("UPLOAD_DIR", file_cfg.upload_dir, "uploads");
 
     let log_to_file = cfg_bool("LOG_TO_FILE", file_cfg.log_to_file, false);
     let log_dir = cfg_val("LOG_DIR", file_cfg.log_dir, "logs");
@@ -349,6 +366,9 @@ async fn main() -> anyhow::Result<()> {
 
     std::env::set_var("RUST_LOG", &rust_log);
     std::env::set_var("JWT_SECRET", &jwt_secret);
+    std::env::set_var("UPLOAD_DIR", &upload_dir);
+
+    fs::create_dir_all(&upload_dir)?;
 
     let console_layer = tracing_subscriber::fmt::layer()
         .with_timer(LocalTime)
@@ -383,9 +403,10 @@ async fn main() -> anyhow::Result<()> {
     }
 
     tracing::info!(
-        "Resolved config: port={}, database={}, log_to_file={}, log_dir={}, file={}, rotate_size_mb={}, rotate_days={}, keep_days={}",
+        "Resolved config: port={}, database={}, upload_dir={}, log_to_file={}, log_dir={}, file={}, rotate_size_mb={}, rotate_days={}, keep_days={}",
         port,
         database_url,
+        upload_dir,
         log_to_file,
         log_dir,
         log_file_name,
@@ -414,12 +435,19 @@ async fn main() -> anyhow::Result<()> {
         .route("/auth/2fa/setup", post(routes::auth::setup_2fa))
         .route("/auth/2fa/confirm", post(routes::auth::confirm_2fa))
         .route("/auth/2fa/disable", post(routes::auth::disable_2fa))
-        .route("/projects", get(routes::projects::list_projects).post(routes::projects::create_project))
+        .route("/uploads", post(routes::uploads::upload_file))
+        .route(
+            "/projects",
+            get(routes::projects::list_projects).post(routes::projects::create_project),
+        )
         .route(
             "/projects/:id",
             put(routes::projects::update_project).delete(routes::projects::delete_project),
         )
-        .route("/docs", get(routes::documents::list_tree).post(routes::documents::create_node))
+        .route(
+            "/docs",
+            get(routes::documents::list_tree).post(routes::documents::create_node),
+        )
         .route(
             "/docs/:id",
             get(routes::documents::get_node)

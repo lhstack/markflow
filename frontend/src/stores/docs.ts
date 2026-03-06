@@ -3,9 +3,9 @@ import { ref } from 'vue'
 import request from '@/utils/request'
 
 export interface DocNode {
-  id: string
-  project_id?: string | null
-  parent_id?: string | null
+  id: number
+  project_id?: number | null
+  parent_id?: number | null
   name: string
   node_type: 'dir' | 'doc'
   content?: string
@@ -26,7 +26,7 @@ export const useDocsStore = defineStore('docs', () => {
   const currentStats = ref<DirStats>({ doc_count: 0, dir_count: 0 })
   const loading = ref(false)
 
-  async function fetchTree(projectId?: string | null) {
+  async function fetchTree(projectId?: number | null) {
     loading.value = true
     try {
       const config = projectId ? { params: { project_id: projectId } } : undefined
@@ -37,7 +37,7 @@ export const useDocsStore = defineStore('docs', () => {
     }
   }
 
-  async function fetchNode(id: string) {
+  async function fetchNode(id: number) {
     const data = await request.get(`/docs/${id}`) as any
     currentNode.value = data.node
     if (data.stats) {
@@ -47,18 +47,18 @@ export const useDocsStore = defineStore('docs', () => {
   }
 
   async function createNode(payload: {
-    project_id?: string
-    parent_id?: string
+    project_id?: number
+    parent_id?: number
     name: string
     node_type: 'dir' | 'doc'
     content?: string
-  }, projectId?: string | null) {
+  }, projectId?: number | null) {
     const data = await request.post('/docs', payload) as any
     await fetchTree(projectId ?? payload.project_id ?? null)
     return data.node as DocNode
   }
 
-  async function updateNode(id: string, payload: { name?: string; content?: string }, projectId?: string | null) {
+  async function updateNode(id: number, payload: { name?: string; content?: string }, projectId?: number | null) {
     const data = await request.put(`/docs/${id}`, payload) as any
     if (currentNode.value?.id === id) {
       currentNode.value = { ...currentNode.value, ...data.node }
@@ -70,7 +70,7 @@ export const useDocsStore = defineStore('docs', () => {
     return data.node as DocNode
   }
 
-  async function deleteNode(id: string, projectId?: string | null) {
+  async function deleteNode(id: number, projectId?: number | null) {
     await request.delete(`/docs/${id}`)
     if (currentNode.value?.id === id) {
       currentNode.value = null
@@ -79,10 +79,10 @@ export const useDocsStore = defineStore('docs', () => {
   }
 
   async function moveNode(
-    id: string,
-    parent_id: string | null,
+    id: number,
+    parent_id: number | null,
     sort_order: number,
-    projectId?: string | null,
+    projectId?: number | null,
     refresh = true
   ) {
     await request.put(`/docs/${id}/move`, { parent_id, sort_order })

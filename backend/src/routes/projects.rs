@@ -7,7 +7,6 @@ use axum::{
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
-use uuid::Uuid;
 
 use crate::{
     auth,
@@ -15,7 +14,7 @@ use crate::{
     models::{Project, ProjectResponse},
 };
 
-async fn user_exists(db: &Database, user_id: &str) -> bool {
+async fn user_exists(db: &Database, user_id: i64) -> bool {
     sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE id = ?)")
         .bind(user_id)
         .fetch_one(&db.pool)
@@ -25,41 +24,37 @@ async fn user_exists(db: &Database, user_id: &str) -> bool {
 
 async fn project_name_exists(
     db: &Database,
-    user_id: &str,
+    user_id: i64,
     name: &str,
-    exclude_id: Option<&str>,
+    exclude_id: Option<i64>,
 ) -> bool {
     match exclude_id {
-        Some(project_id) => {
-            sqlx::query_scalar(
-                "SELECT EXISTS(
+        Some(project_id) => sqlx::query_scalar(
+            "SELECT EXISTS(
                     SELECT 1 FROM projects
                     WHERE user_id = ?
                       AND id != ?
                       AND name = ? COLLATE NOCASE
                 )",
-            )
-            .bind(user_id)
-            .bind(project_id)
-            .bind(name)
-            .fetch_one(&db.pool)
-            .await
-            .unwrap_or(false)
-        }
-        None => {
-            sqlx::query_scalar(
-                "SELECT EXISTS(
+        )
+        .bind(user_id)
+        .bind(project_id)
+        .bind(name)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap_or(false),
+        None => sqlx::query_scalar(
+            "SELECT EXISTS(
                     SELECT 1 FROM projects
                     WHERE user_id = ?
                       AND name = ? COLLATE NOCASE
                 )",
-            )
-            .bind(user_id)
-            .bind(name)
-            .fetch_one(&db.pool)
-            .await
-            .unwrap_or(false)
-        }
+        )
+        .bind(user_id)
+        .bind(name)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap_or(false),
     }
 }
 
@@ -78,7 +73,7 @@ pub async fn list_projects(
         }
     };
 
-    if !user_exists(&db, &claims.sub).await {
+    if !user_exists(&db, claims.sub).await {
         return (
             StatusCode::UNAUTHORIZED,
             Json(json!({"error": "User does not exist"})),
@@ -89,7 +84,7 @@ pub async fn list_projects(
     let projects: Vec<Project> = sqlx::query_as(
         "SELECT * FROM projects WHERE user_id = ? ORDER BY sort_order ASC, created_at ASC",
     )
-    .bind(&claims.sub)
+    .bind(claims.sub)
     .fetch_all(&db.pool)
     .await
     .unwrap_or_default();
@@ -121,7 +116,7 @@ pub async fn create_project(
         }
     };
 
-    if !user_exists(&db, &claims.sub).await {
+    if !user_exists(&db, claims.sub).await {
         return (
             StatusCode::UNAUTHORIZED,
             Json(json!({"error": "User does not exist"})),
@@ -137,7 +132,7 @@ pub async fn create_project(
         )
             .into_response();
     }
-    if project_name_exists(&db, &claims.sub, name, None).await {
+    if project_name_exists(&db, claims.sub, name, None).await {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({"error": "项目名称已存在"})),
@@ -147,12 +142,11 @@ pub async fn create_project(
 
     let max_order: i64 =
         sqlx::query_scalar("SELECT COALESCE(MAX(sort_order), -1) FROM projects WHERE user_id = ?")
-            .bind(&claims.sub)
+            .bind(claims.sub)
             .fetch_one(&db.pool)
             .await
             .unwrap_or(-1);
 
-    let project_id = Uuid::new_v4().to_string();
     let description = body.description.unwrap_or_default();
     let background_image = body
         .background_image
@@ -161,30 +155,31 @@ pub async fn create_project(
         .filter(|url| !url.is_empty())
         .map(|url| url.to_string());
 
-    let insert_result = sqlx::query(
-        "INSERT INTO projects (id, user_id, name, description, background_image, sort_order)
-         VALUES (?, ?, ?, ?, ?, ?)",
+    let project_id = match sqlx::query(
+        "INSERT INTO projects (user_id, name, description, background_image, sort_order)
+         VALUES (?, ?, ?, ?, ?)",
     )
-    .bind(&project_id)
-    .bind(&claims.sub)
+    .bind(claims.sub)
     .bind(name)
     .bind(&description)
     .bind(background_image)
     .bind(max_order + 1)
     .execute(&db.pool)
-    .await;
-
-    if let Err(e) = insert_result {
-        tracing::error!("create_project failed: {}", e);
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": "创建项目失败"})),
-        )
-            .into_response();
-    }
+    .await
+    {
+        Ok(result) => result.last_insert_rowid(),
+        Err(e) => {
+            tracing::error!("create_project failed: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "创建项目失败"})),
+            )
+                .into_response();
+        }
+    };
 
     let project: Project = match sqlx::query_as("SELECT * FROM projects WHERE id = ?")
-        .bind(&project_id)
+        .bind(project_id)
         .fetch_one(&db.pool)
         .await
     {
@@ -216,7 +211,7 @@ pub struct UpdateProjectRequest {
 pub async fn update_project(
     Extension(db): Extension<Arc<Database>>,
     headers: HeaderMap,
-    Path(id): Path<String>,
+    Path(id): Path<i64>,
     Json(body): Json<UpdateProjectRequest>,
 ) -> impl IntoResponse {
     let claims = match auth::extract_user_id(&headers) {
@@ -232,8 +227,8 @@ pub async fn update_project(
 
     let existing: Option<Project> =
         sqlx::query_as("SELECT * FROM projects WHERE id = ? AND user_id = ?")
-            .bind(&id)
-            .bind(&claims.sub)
+            .bind(id)
+            .bind(claims.sub)
             .fetch_optional(&db.pool)
             .await
             .unwrap_or(None);
@@ -257,7 +252,7 @@ pub async fn update_project(
         )
             .into_response();
     }
-    if project_name_exists(&db, &claims.sub, &name, Some(&id)).await {
+    if project_name_exists(&db, claims.sub, &name, Some(id)).await {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({"error": "项目名称已存在"})),
@@ -277,7 +272,7 @@ pub async fn update_project(
         existing.background_image
     };
 
-    let update_result = sqlx::query(
+    if let Err(e) = sqlx::query(
         "UPDATE projects
          SET name = ?, description = ?, background_image = ?, updated_at = datetime('now')
          WHERE id = ? AND user_id = ?",
@@ -285,12 +280,11 @@ pub async fn update_project(
     .bind(&name)
     .bind(&description)
     .bind(&background_image)
-    .bind(&id)
-    .bind(&claims.sub)
+    .bind(id)
+    .bind(claims.sub)
     .execute(&db.pool)
-    .await;
-
-    if let Err(e) = update_result {
+    .await
+    {
         tracing::error!("update_project failed: {}", e);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -300,7 +294,7 @@ pub async fn update_project(
     }
 
     let project: Project = match sqlx::query_as("SELECT * FROM projects WHERE id = ?")
-        .bind(&id)
+        .bind(id)
         .fetch_one(&db.pool)
         .await
     {
@@ -321,7 +315,7 @@ pub async fn update_project(
 pub async fn delete_project(
     Extension(db): Extension<Arc<Database>>,
     headers: HeaderMap,
-    Path(id): Path<String>,
+    Path(id): Path<i64>,
 ) -> impl IntoResponse {
     let claims = match auth::extract_user_id(&headers) {
         Some(c) => c,
@@ -336,8 +330,8 @@ pub async fn delete_project(
 
     let project_exists: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM projects WHERE id = ? AND user_id = ?)")
-            .bind(&id)
-            .bind(&claims.sub)
+            .bind(id)
+            .bind(claims.sub)
             .fetch_one(&db.pool)
             .await
             .unwrap_or(false);
@@ -347,7 +341,7 @@ pub async fn delete_project(
     }
 
     let project_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM projects WHERE user_id = ?")
-        .bind(&claims.sub)
+        .bind(claims.sub)
         .fetch_one(&db.pool)
         .await
         .unwrap_or(0);
@@ -372,14 +366,14 @@ pub async fn delete_project(
         }
     };
 
-    let fallback_project_id: String = match sqlx::query_scalar(
+    let fallback_project_id: i64 = match sqlx::query_scalar(
         "SELECT id FROM projects
          WHERE user_id = ? AND id != ?
          ORDER BY sort_order ASC, created_at ASC
          LIMIT 1",
     )
-    .bind(&claims.sub)
-    .bind(&id)
+    .bind(claims.sub)
+    .bind(id)
     .fetch_one(&mut *tx)
     .await
     {
@@ -398,9 +392,9 @@ pub async fn delete_project(
         "UPDATE doc_nodes SET project_id = ?, updated_at = datetime('now')
          WHERE user_id = ? AND project_id = ?",
     )
-    .bind(&fallback_project_id)
-    .bind(&claims.sub)
-    .bind(&id)
+    .bind(fallback_project_id)
+    .bind(claims.sub)
+    .bind(id)
     .execute(&mut *tx)
     .await
     {
@@ -413,8 +407,8 @@ pub async fn delete_project(
     }
 
     if let Err(e) = sqlx::query("DELETE FROM projects WHERE id = ? AND user_id = ?")
-        .bind(&id)
-        .bind(&claims.sub)
+        .bind(id)
+        .bind(claims.sub)
         .execute(&mut *tx)
         .await
     {

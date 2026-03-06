@@ -19,6 +19,14 @@
       <el-button v-if="avatarChanged" type="primary" @click="saveAvatar" :loading="savingAvatar" style="width:100%">
         保存头像
       </el-button>
+      <el-progress
+        v-if="avatarUploadTask && avatarUploadTask.status === 'uploading'"
+        :percentage="avatarUploadTask.progress"
+        :stroke-width="8"
+      />
+      <p v-if="avatarUploadTask && avatarUploadTask.status === 'error'" class="upload-error">
+        {{ avatarUploadTask.error || '上传失败' }}
+      </p>
 
       <el-divider />
 
@@ -89,6 +97,8 @@ import { ElMessage } from 'element-plus'
 import { Camera, UserFilled } from '@element-plus/icons-vue'
 import { useAuthStore } from '@/stores/auth'
 import request from '@/utils/request'
+import { createManagedUploadTask, removeManagedUpload, type ManagedUploadTask } from '@/utils/managedUploads'
+import { uploadImage } from '@/utils/uploads'
 
 const props = defineProps<{ modelValue: boolean }>()
 const emit = defineEmits<{ 'update:modelValue': [v: boolean]; close: [] }>()
@@ -104,6 +114,8 @@ const fileInput = ref<HTMLInputElement>()
 const avatarPreview = ref('')
 const avatarChanged = ref(false)
 const savingAvatar = ref(false)
+const selectedAvatarFile = ref<File | null>(null)
+const avatarUploadTask = ref<ManagedUploadTask | null>(null)
 
 const setting2FA = ref(false)
 const confirming = ref(false)
@@ -118,7 +130,20 @@ function triggerFileInput() {
 function handleAvatarChange(e: Event) {
   const file = (e.target as HTMLInputElement).files?.[0]
   if (!file) return
+  if (!file.type.startsWith('image/')) {
+    ElMessage.warning('请选择图片文件')
+    return
+  }
+  if (file.size > 2 * 1024 * 1024) {
+    ElMessage.warning('头像文件不能超过2MB')
+    return
+  }
 
+  selectedAvatarFile.value = file
+  if (avatarUploadTask.value) {
+    removeManagedUpload(avatarUploadTask.value.id)
+    avatarUploadTask.value = null
+  }
   const reader = new FileReader()
   reader.onload = (ev) => {
     avatarPreview.value = ev.target?.result as string
@@ -128,14 +153,22 @@ function handleAvatarChange(e: Event) {
 }
 
 async function saveAvatar() {
+  if (!selectedAvatarFile.value) return
   savingAvatar.value = true
+  avatarUploadTask.value = createManagedUploadTask('avatar', selectedAvatarFile.value)
   try {
-    const data = (await request.put('/auth/profile', { avatar: avatarPreview.value })) as any
+    const avatarUrl = await uploadImage(selectedAvatarFile.value, 'avatar', { task: avatarUploadTask.value })
+    const data = (await request.put('/auth/profile', { avatar: avatarUrl })) as any
     auth.updateUser({ avatar: data.user.avatar })
+    avatarPreview.value = data.user.avatar
     avatarChanged.value = false
+    selectedAvatarFile.value = null
+    if (fileInput.value) {
+      fileInput.value.value = ''
+    }
     ElMessage.success('头像已更新')
-  } catch {
-    ElMessage.error('更新失败')
+  } catch (err: any) {
+    ElMessage.error(err.response?.data?.error || '更新失败')
   } finally {
     savingAvatar.value = false
   }
@@ -257,6 +290,11 @@ async function disable2FA() {
   font-size: 12px;
   color: var(--text3);
   margin-top: 2px;
+}
+
+.upload-error {
+  font-size: 12px;
+  color: var(--red);
 }
 
 .twofa-header {

@@ -3,7 +3,7 @@ import { ref, computed } from 'vue'
 import request from '@/utils/request'
 
 export interface UserInfo {
-  id: string
+  id: number
   username: string
   avatar?: string
   totp_enabled: boolean

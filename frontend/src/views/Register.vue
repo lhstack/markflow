@@ -29,6 +29,14 @@
           </div>
           <input ref="fileInput" type="file" accept="image/*" @change="handleAvatarChange" style="display: none" />
           <p class="avatar-hint">点击上传头像（可选）</p>
+          <el-progress
+            v-if="avatarUploadTask && avatarUploadTask.status === 'uploading'"
+            :percentage="avatarUploadTask.progress"
+            :stroke-width="8"
+          />
+          <p v-if="avatarUploadTask && avatarUploadTask.status === 'error'" class="avatar-error">
+            {{ avatarUploadTask.error || '上传失败' }}
+          </p>
         </div>
 
         <el-form :model="form" @submit.prevent="handleRegister" class="auth-form">
@@ -89,14 +97,17 @@ import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
+import { createManagedUploadTask, removeManagedUpload, type ManagedUploadTask } from '@/utils/managedUploads'
 import request from '@/utils/request'
+import { uploadImage } from '@/utils/uploads'
 
 const router = useRouter()
 const auth = useAuthStore()
 const loading = ref(false)
 const avatarPreview = ref('')
-const avatarBase64 = ref('')
+const avatarFile = ref<File | null>(null)
 const fileInput = ref<HTMLInputElement>()
+const avatarUploadTask = ref<ManagedUploadTask | null>(null)
 
 const form = ref({
   username: '',
@@ -111,15 +122,23 @@ function triggerFileInput() {
 function handleAvatarChange(e: Event) {
   const file = (e.target as HTMLInputElement).files?.[0]
   if (!file) return
+  if (!file.type.startsWith('image/')) {
+    ElMessage.warning('请选择图片文件')
+    return
+  }
   if (file.size > 2 * 1024 * 1024) {
     ElMessage.warning('头像文件不能超过2MB')
     return
+  }
+  avatarFile.value = file
+  if (avatarUploadTask.value) {
+    removeManagedUpload(avatarUploadTask.value.id)
+    avatarUploadTask.value = null
   }
   const reader = new FileReader()
   reader.onload = (ev) => {
     const result = ev.target?.result as string
     avatarPreview.value = result
-    avatarBase64.value = result
   }
   reader.readAsDataURL(file)
 }
@@ -139,10 +158,21 @@ async function handleRegister() {
     const data = await request.post('/auth/register', {
       username: form.value.username,
       password: form.value.password,
-      avatar: avatarBase64.value || undefined,
     }) as any
-    
+
     auth.setAuth(data.token, data.user)
+
+    if (avatarFile.value) {
+      try {
+        avatarUploadTask.value = createManagedUploadTask('avatar', avatarFile.value)
+        const avatarUrl = await uploadImage(avatarFile.value, 'avatar', { task: avatarUploadTask.value })
+        const updated = await request.put('/auth/profile', { avatar: avatarUrl }) as any
+        auth.updateUser({ avatar: updated.user.avatar })
+      } catch (uploadErr: any) {
+        ElMessage.warning(uploadErr.response?.data?.error || '账号已创建，但头像上传失败')
+      }
+    }
+
     ElMessage.success('注册成功！')
     router.push('/')
   } catch (err: any) {
@@ -293,6 +323,11 @@ async function handleRegister() {
 .avatar-hint {
   font-size: 12px;
   color: var(--color-text-muted);
+}
+
+.avatar-error {
+  font-size: 12px;
+  color: #dd4d4d;
 }
 
 .auth-form {

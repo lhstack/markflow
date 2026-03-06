@@ -166,26 +166,33 @@ function readBool(key: string, fallback: boolean): boolean {
   return fallback
 }
 
-function getLastNodeKey(projectId: string) {
+function getLastNodeKey(projectId: number) {
   return `${HOME_LAST_NODE_PREFIX}${projectId}`
 }
 
-function readLastNode(projectId: string): string | null {
-  const value = localStorage.getItem(getLastNodeKey(projectId))
-  return value && value.trim() ? value : null
+function parseStoredId(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isInteger(value)) return value
+  if (typeof value !== 'string' || !value.trim()) return null
+  const parsed = Number(value)
+  return Number.isInteger(parsed) ? parsed : null
 }
 
-function writeLastNode(projectId: string, nodeId: string | null) {
+function readLastNode(projectId: number): number | null {
+  const value = localStorage.getItem(getLastNodeKey(projectId))
+  return parseStoredId(value)
+}
+
+function writeLastNode(projectId: number, nodeId: number | null) {
   const key = getLastNodeKey(projectId)
-  if (nodeId) localStorage.setItem(key, nodeId)
+  if (nodeId !== null) localStorage.setItem(key, String(nodeId))
   else localStorage.removeItem(key)
 }
 
-function normalizeQueryValue(value: unknown): string | null {
-  return typeof value === 'string' && value.trim() ? value : null
+function normalizeQueryId(value: unknown): number | null {
+  return parseStoredId(value)
 }
 
-function projectExists(projectId: string | null): projectId is string {
+function projectExists(projectId: number | null): projectId is number {
   return Boolean(projectId && projects.projects.some((project) => project.id === projectId))
 }
 
@@ -207,7 +214,7 @@ function persistHomeCache() {
   localStorage.setItem(HOME_LAST_VIEW_KEY, showProjectOverview.value ? 'overview' : 'project')
 
   if (projects.currentProjectId) {
-    localStorage.setItem(HOME_LAST_PROJECT_KEY, projects.currentProjectId)
+    localStorage.setItem(HOME_LAST_PROJECT_KEY, String(projects.currentProjectId))
     writeLastNode(projects.currentProjectId, docs.currentNode?.id || null)
   } else {
     localStorage.removeItem(HOME_LAST_PROJECT_KEY)
@@ -220,8 +227,8 @@ function buildHomeQuery(): Record<string, string> {
   }
 
   const query: Record<string, string> = {}
-  if (projects.currentProjectId) query.project = projects.currentProjectId
-  if (docs.currentNode?.id) query.doc = docs.currentNode.id
+  if (projects.currentProjectId) query.project = String(projects.currentProjectId)
+  if (docs.currentNode?.id) query.doc = String(docs.currentNode.id)
   return query
 }
 
@@ -249,11 +256,13 @@ async function restoreHomeState() {
     return
   }
 
-  const queryProjectId = normalizeQueryValue(route.query.project)
-  const queryDocId = normalizeQueryValue(route.query.doc)
-  const queryView = normalizeQueryValue(route.query.view)
-  const cachedProjectId = normalizeQueryValue(localStorage.getItem(HOME_LAST_PROJECT_KEY))
-  const cachedView = normalizeQueryValue(localStorage.getItem(HOME_LAST_VIEW_KEY))
+  const queryProjectId = normalizeQueryId(route.query.project)
+  const queryDocId = normalizeQueryId(route.query.doc)
+  const queryView = typeof route.query.view === 'string' && route.query.view.trim() ? route.query.view : null
+  const cachedProjectId = parseStoredId(localStorage.getItem(HOME_LAST_PROJECT_KEY))
+  const cachedView = typeof localStorage.getItem(HOME_LAST_VIEW_KEY) === 'string'
+    ? localStorage.getItem(HOME_LAST_VIEW_KEY)
+    : null
 
   const targetProjectIdCandidate =
     queryProjectId
@@ -337,7 +346,7 @@ function backToOverview() {
   mobileOpen.value = false
 }
 
-async function enterProject(projectId: string) {
+async function enterProject(projectId: number) {
   projects.selectProject(projectId)
   showProjectOverview.value = false
   docs.currentNode = null
@@ -355,7 +364,7 @@ async function createProject(payload: { name: string; description: string; backg
   }
 }
 
-async function updateProject(projectId: string, payload: { name: string; description: string; background_image: string }) {
+async function updateProject(projectId: number, payload: { name: string; description: string; background_image: string }) {
   try {
     await projects.updateProject(projectId, payload)
     ElMessage.success('项目更新成功')
@@ -364,7 +373,7 @@ async function updateProject(projectId: string, payload: { name: string; descrip
   }
 }
 
-async function deleteProject(projectId: string) {
+async function deleteProject(projectId: number) {
   const wasCurrent = projects.currentProjectId === projectId
   try {
     await projects.deleteProject(projectId)

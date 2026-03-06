@@ -3,7 +3,7 @@ import { defineStore } from 'pinia'
 import request from '@/utils/request'
 
 export interface ProjectItem {
-  id: string
+  id: number
   name: string
   description: string
   background_image?: string | null
@@ -14,7 +14,7 @@ export interface ProjectItem {
 
 export const useProjectsStore = defineStore('projects', () => {
   const projects = ref<ProjectItem[]>([])
-  const currentProjectId = ref<string | null>(null)
+  const currentProjectId = ref<number | null>(null)
   const loading = ref(false)
 
   const currentProject = computed(() =>
@@ -40,7 +40,7 @@ export const useProjectsStore = defineStore('projects', () => {
     currentProjectId.value = null
   }
 
-  function selectProject(projectId: string | null) {
+  function selectProject(projectId: number | null) {
     currentProjectId.value = projectId
   }
 
@@ -58,7 +58,7 @@ export const useProjectsStore = defineStore('projects', () => {
   }
 
   async function updateProject(
-    id: string,
+    id: number,
     payload: { name?: string; description?: string; background_image?: string }
   ) {
     const data = await request.put(`/projects/${id}`, payload) as any
@@ -68,12 +68,12 @@ export const useProjectsStore = defineStore('projects', () => {
     return updated
   }
 
-  async function deleteProject(id: string) {
+  async function deleteProject(id: number) {
     const data = await request.delete(`/projects/${id}`) as any
     projects.value = projects.value.filter((project) => project.id !== id)
 
     if (currentProjectId.value === id) {
-      const fallbackId = data.fallback_project_id as string | undefined
+      const fallbackId = data.fallback_project_id as number | undefined
       if (fallbackId && projects.value.some((project) => project.id === fallbackId)) {
         currentProjectId.value = fallbackId
       } else {

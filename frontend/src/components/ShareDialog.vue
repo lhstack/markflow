@@ -130,7 +130,7 @@ import request from '@/utils/request'
 import type { DocNode } from '@/stores/docs'
 
 type ShareItem = {
-  id: string
+  id: number
   token: string
   has_password: boolean
   expires_at?: string | null
@@ -292,7 +292,7 @@ async function createShare() {
   }
 }
 
-async function deleteShare(id: string) {
+async function deleteShare(id: number) {
   const share = shares.value.find((s) => s.id === id)
   try {
     await request.delete(`/shares/${id}`)

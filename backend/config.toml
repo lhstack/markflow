@@ -8,6 +8,9 @@ database_url = "sqlite:markflow.db"
 jwt_secret = "change_me_to_a_long_random_string_in_production"
 rust_log = "markflow=info,tower_http=warn"
 
+# Upload root directory (relative to working dir or absolute path)
+upload_dir = "uploads"
+
 # Logging file output
 # Enable file logging: true/false
 log_to_file = true

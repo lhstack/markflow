@@ -131,7 +131,7 @@ interface ShareInfo {
 }
 
 interface ShareNode {
-  id: string
+  id: number
   name: string
   node_type: 'doc' | 'dir'
   content?: string
@@ -147,7 +147,7 @@ const wrongPassword = ref(false)
 const selectedDoc = ref<ShareNode | null>(null)
 const shareToken = String(route.params.token || '')
 const shareSidebarOpen = ref(true)
-const expandedDirIds = ref<Set<string>>(new Set())
+const expandedDirIds = ref<Set<number>>(new Set())
 const shareDirStateInitialized = ref(false)
 const hasDirExpansionPreference = ref(false)
 
@@ -181,12 +181,12 @@ function loadShareUiState() {
   try {
     const raw = localStorage.getItem(getShareUiKey(shareToken))
     if (!raw) return
-    const parsed = JSON.parse(raw) as { sidebar_open?: boolean; expanded_dir_ids?: string[] }
+    const parsed = JSON.parse(raw) as { sidebar_open?: boolean; expanded_dir_ids?: number[] }
     if (typeof parsed.sidebar_open === 'boolean') {
       shareSidebarOpen.value = parsed.sidebar_open
     }
     if (Array.isArray(parsed.expanded_dir_ids)) {
-      expandedDirIds.value = new Set(parsed.expanded_dir_ids.filter((id) => typeof id === 'string'))
+      expandedDirIds.value = new Set(parsed.expanded_dir_ids.filter((id) => typeof id === 'number'))
       hasDirExpansionPreference.value = true
     }
   } catch {
@@ -227,7 +227,7 @@ function selectDoc(doc: ShareNode) {
   selectedDoc.value = doc
 }
 
-function collectDirIds(nodes: ShareNode[], set: Set<string>) {
+function collectDirIds(nodes: ShareNode[], set: Set<number>) {
   for (const node of nodes) {
     if (node.node_type === 'dir') {
       set.add(node.id)
@@ -237,7 +237,7 @@ function collectDirIds(nodes: ShareNode[], set: Set<string>) {
 }
 
 function syncExpandedDirState(nodes: ShareNode[]) {
-  const currentDirIds = new Set<string>()
+  const currentDirIds = new Set<number>()
   collectDirIds(nodes, currentDirIds)
 
   if (!shareDirStateInitialized.value) {
@@ -259,7 +259,7 @@ function syncExpandedDirState(nodes: ShareNode[]) {
   persistShareUiState()
 }
 
-function toggleDirExpand(dirId: string) {
+function toggleDirExpand(dirId: number) {
   const next = new Set(expandedDirIds.value)
   if (next.has(dirId)) next.delete(dirId)
   else next.add(dirId)
@@ -440,8 +440,8 @@ const DirTreeNav = defineComponent({
   name: 'DirTreeNav',
   props: {
     nodes: { type: Array as () => ShareNode[], default: () => [] },
-    selectedId: String,
-    expandedIds: { type: Object as () => Set<string>, required: true },
+    selectedId: Number,
+    expandedIds: { type: Object as () => Set<number>, required: true },
   },
   emits: ['select', 'toggle-dir'],
   setup(props, { emit }) {

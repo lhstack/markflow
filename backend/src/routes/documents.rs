@@ -7,7 +7,6 @@ use axum::{
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
-use uuid::Uuid;
 
 use crate::{
     auth,
@@ -15,7 +14,7 @@ use crate::{
     models::{DocNode, DocNodeResponse},
 };
 
-async fn user_exists(db: &Database, user_id: &str) -> bool {
+async fn user_exists(db: &Database, user_id: i64) -> bool {
     sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE id = ?)")
         .bind(user_id)
         .fetch_one(&db.pool)
@@ -23,7 +22,7 @@ async fn user_exists(db: &Database, user_id: &str) -> bool {
         .unwrap_or(false)
 }
 
-async fn project_exists(db: &Database, user_id: &str, project_id: &str) -> bool {
+async fn project_exists(db: &Database, user_id: i64, project_id: i64) -> bool {
     sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM projects WHERE id = ? AND user_id = ?)")
         .bind(project_id)
         .bind(user_id)
@@ -32,16 +31,16 @@ async fn project_exists(db: &Database, user_id: &str, project_id: &str) -> bool 
         .unwrap_or(false)
 }
 
-fn build_tree(nodes: Vec<DocNode>, parent_id: Option<&str>) -> Vec<DocNodeResponse> {
+fn build_tree(nodes: Vec<DocNode>, parent_id: Option<i64>) -> Vec<DocNodeResponse> {
     let mut result = vec![];
     for node in nodes.iter() {
         let matches = match parent_id {
-            Some(pid) => node.parent_id.as_deref() == Some(pid),
+            Some(pid) => node.parent_id == Some(pid),
             None => node.parent_id.is_none(),
         };
         if matches {
             let mut resp = DocNodeResponse::from_node(node.clone());
-            resp.children = build_tree(nodes.clone(), Some(&node.id));
+            resp.children = build_tree(nodes.clone(), Some(node.id));
             resp.children.sort_by(|a, b| {
                 if a.node_type != b.node_type {
                     if a.node_type == "dir" {
@@ -74,7 +73,7 @@ fn build_tree(nodes: Vec<DocNode>, parent_id: Option<&str>) -> Vec<DocNodeRespon
 
 #[derive(Deserialize)]
 pub struct ListTreeQuery {
-    pub project_id: Option<String>,
+    pub project_id: Option<i64>,
 }
 
 pub async fn list_tree(
@@ -93,7 +92,7 @@ pub async fn list_tree(
         }
     };
 
-    if !user_exists(&db, &claims.sub).await {
+    if !user_exists(&db, claims.sub).await {
         return (
             StatusCode::UNAUTHORIZED,
             Json(json!({"error": "User does not exist"})),
@@ -101,8 +100,8 @@ pub async fn list_tree(
             .into_response();
     }
 
-    let nodes: Vec<DocNode> = if let Some(project_id) = query.project_id.as_deref() {
-        if !project_exists(&db, &claims.sub, project_id).await {
+    let nodes: Vec<DocNode> = if let Some(project_id) = query.project_id {
+        if !project_exists(&db, claims.sub, project_id).await {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({"error": "项目不存在"})),
@@ -115,7 +114,7 @@ pub async fn list_tree(
              WHERE user_id = ? AND project_id = ?
              ORDER BY sort_order ASC, created_at ASC",
         )
-        .bind(&claims.sub)
+        .bind(claims.sub)
         .bind(project_id)
         .fetch_all(&db.pool)
         .await
@@ -126,7 +125,7 @@ pub async fn list_tree(
              WHERE user_id = ?
              ORDER BY sort_order ASC, created_at ASC",
         )
-        .bind(&claims.sub)
+        .bind(claims.sub)
         .fetch_all(&db.pool)
         .await
         .unwrap_or_default()
@@ -138,8 +137,8 @@ pub async fn list_tree(
 
 #[derive(Deserialize)]
 pub struct CreateNodeRequest {
-    pub project_id: Option<String>,
-    pub parent_id: Option<String>,
+    pub project_id: Option<i64>,
+    pub parent_id: Option<i64>,
     pub name: String,
     pub node_type: String,
     pub content: Option<String>,
@@ -161,7 +160,7 @@ pub async fn create_node(
         }
     };
 
-    if !user_exists(&db, &claims.sub).await {
+    if !user_exists(&db, claims.sub).await {
         return (
             StatusCode::UNAUTHORIZED,
             Json(json!({"error": "User does not exist"})),
@@ -184,12 +183,12 @@ pub async fn create_node(
             .into_response();
     }
 
-    let resolved_project_id = if let Some(ref pid) = body.parent_id {
-        let parent_project_id: Option<Option<String>> = sqlx::query_scalar(
+    let resolved_project_id = if let Some(pid) = body.parent_id {
+        let parent_project_id: Option<Option<i64>> = sqlx::query_scalar(
             "SELECT project_id FROM doc_nodes WHERE id = ? AND user_id = ? AND node_type = 'dir'",
         )
         .bind(pid)
-        .bind(&claims.sub)
+        .bind(claims.sub)
         .fetch_optional(&db.pool)
         .await
         .unwrap_or(None);
@@ -205,8 +204,8 @@ pub async fn create_node(
             }
         };
 
-        if let Some(request_project_id) = body.project_id.as_ref() {
-            if parent_project_id.as_deref() != Some(request_project_id.as_str()) {
+        if let Some(request_project_id) = body.project_id {
+            if parent_project_id != Some(request_project_id) {
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(json!({"error": "父目录与项目不一致"})),
@@ -217,14 +216,8 @@ pub async fn create_node(
 
         parent_project_id
     } else {
-        let project_id = body
-            .project_id
-            .as_ref()
-            .map(|v| v.trim())
-            .filter(|v| !v.is_empty());
-
-        let project_id = match project_id {
-            Some(pid) => pid,
+        let project_id = match body.project_id {
+            Some(project_id) => project_id,
             None => {
                 return (
                     StatusCode::BAD_REQUEST,
@@ -234,7 +227,7 @@ pub async fn create_node(
             }
         };
 
-        if !project_exists(&db, &claims.sub, project_id).await {
+        if !project_exists(&db, claims.sub, project_id).await {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({"error": "项目不存在"})),
@@ -242,7 +235,7 @@ pub async fn create_node(
                 .into_response();
         }
 
-        Some(project_id.to_string())
+        Some(project_id)
     };
 
     let max_order: i64 = sqlx::query_scalar(
@@ -250,49 +243,48 @@ pub async fn create_node(
          FROM doc_nodes
          WHERE user_id = ? AND parent_id IS ? AND project_id IS ?",
     )
-    .bind(&claims.sub)
-    .bind(&body.parent_id)
-    .bind(&resolved_project_id)
+    .bind(claims.sub)
+    .bind(body.parent_id)
+    .bind(resolved_project_id)
     .fetch_one(&db.pool)
     .await
     .unwrap_or(-1);
 
-    let node_id = Uuid::new_v4().to_string();
-
-    let insert_result = sqlx::query(
+    let node_id = match sqlx::query(
         "INSERT INTO doc_nodes
-         (id, user_id, project_id, parent_id, name, node_type, content, sort_order)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+         (user_id, project_id, parent_id, name, node_type, content, sort_order)
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
-    .bind(&node_id)
-    .bind(&claims.sub)
-    .bind(&resolved_project_id)
-    .bind(&body.parent_id)
+    .bind(claims.sub)
+    .bind(resolved_project_id)
+    .bind(body.parent_id)
     .bind(body.name.trim())
     .bind(&body.node_type)
     .bind(&body.content)
     .bind(max_order + 1)
     .execute(&db.pool)
-    .await;
-
-    if let Err(e) = insert_result {
-        if e.to_string().contains("FOREIGN KEY constraint failed") {
+    .await
+    {
+        Ok(result) => result.last_insert_rowid(),
+        Err(e) => {
+            if e.to_string().contains("FOREIGN KEY constraint failed") {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "Invalid parent or user reference"})),
+                )
+                    .into_response();
+            }
+            tracing::error!("create_node insert failed: {}", e);
             return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "Invalid parent or user reference"})),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "Failed to create node"})),
             )
                 .into_response();
         }
-        tracing::error!("create_node insert failed: {}", e);
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": "Failed to create node"})),
-        )
-            .into_response();
-    }
+    };
 
     let node: DocNode = match sqlx::query_as("SELECT * FROM doc_nodes WHERE id = ?")
-        .bind(&node_id)
+        .bind(node_id)
         .fetch_one(&db.pool)
         .await
     {
@@ -316,7 +308,7 @@ pub async fn create_node(
 pub async fn get_node(
     Extension(db): Extension<Arc<Database>>,
     headers: HeaderMap,
-    Path(id): Path<String>,
+    Path(id): Path<i64>,
 ) -> impl IntoResponse {
     let claims = match auth::extract_user_id(&headers) {
         Some(c) => c,
@@ -331,8 +323,8 @@ pub async fn get_node(
 
     let node: Option<DocNode> =
         sqlx::query_as("SELECT * FROM doc_nodes WHERE id = ? AND user_id = ?")
-            .bind(&id)
-            .bind(&claims.sub)
+            .bind(id)
+            .bind(claims.sub)
             .fetch_optional(&db.pool)
             .await
             .unwrap_or(None);
@@ -343,8 +335,8 @@ pub async fn get_node(
                 let doc_count: i64 = sqlx::query_scalar(
                     "SELECT COUNT(*) FROM doc_nodes WHERE user_id = ? AND node_type = 'doc' AND parent_id = ?",
                 )
-                .bind(&claims.sub)
-                .bind(&id)
+                .bind(claims.sub)
+                .bind(id)
                 .fetch_one(&db.pool)
                 .await
                 .unwrap_or(0);
@@ -352,8 +344,8 @@ pub async fn get_node(
                 let dir_count: i64 = sqlx::query_scalar(
                     "SELECT COUNT(*) FROM doc_nodes WHERE user_id = ? AND node_type = 'dir' AND parent_id = ?",
                 )
-                .bind(&claims.sub)
-                .bind(&id)
+                .bind(claims.sub)
+                .bind(id)
                 .fetch_one(&db.pool)
                 .await
                 .unwrap_or(0);
@@ -361,8 +353,8 @@ pub async fn get_node(
                 let children: Vec<DocNode> = sqlx::query_as(
                     "SELECT * FROM doc_nodes WHERE user_id = ? AND parent_id = ? ORDER BY sort_order ASC, created_at ASC",
                 )
-                .bind(&claims.sub)
-                .bind(&id)
+                .bind(claims.sub)
+                .bind(id)
                 .fetch_all(&db.pool)
                 .await
                 .unwrap_or_default();
@@ -412,7 +404,7 @@ pub struct UpdateNodeRequest {
 pub async fn update_node(
     Extension(db): Extension<Arc<Database>>,
     headers: HeaderMap,
-    Path(id): Path<String>,
+    Path(id): Path<i64>,
     Json(body): Json<UpdateNodeRequest>,
 ) -> impl IntoResponse {
     let claims = match auth::extract_user_id(&headers) {
@@ -428,8 +420,8 @@ pub async fn update_node(
 
     let node: Option<DocNode> =
         sqlx::query_as("SELECT * FROM doc_nodes WHERE id = ? AND user_id = ?")
-            .bind(&id)
-            .bind(&claims.sub)
+            .bind(id)
+            .bind(claims.sub)
             .fetch_optional(&db.pool)
             .await
             .unwrap_or(None);
@@ -449,13 +441,13 @@ pub async fn update_node(
     )
     .bind(&new_name)
     .bind(&new_content)
-    .bind(&id)
+    .bind(id)
     .execute(&db.pool)
     .await
     .unwrap();
 
     let updated: DocNode = sqlx::query_as("SELECT * FROM doc_nodes WHERE id = ?")
-        .bind(&id)
+        .bind(id)
         .fetch_one(&db.pool)
         .await
         .unwrap();
@@ -466,7 +458,7 @@ pub async fn update_node(
 pub async fn delete_node(
     Extension(db): Extension<Arc<Database>>,
     headers: HeaderMap,
-    Path(id): Path<String>,
+    Path(id): Path<i64>,
 ) -> impl IntoResponse {
     let claims = match auth::extract_user_id(&headers) {
         Some(c) => c,
@@ -480,8 +472,8 @@ pub async fn delete_node(
     };
 
     let result = sqlx::query("DELETE FROM doc_nodes WHERE id = ? AND user_id = ?")
-        .bind(&id)
-        .bind(&claims.sub)
+        .bind(id)
+        .bind(claims.sub)
         .execute(&db.pool)
         .await
         .unwrap();
@@ -495,14 +487,14 @@ pub async fn delete_node(
 
 #[derive(Deserialize)]
 pub struct MoveNodeRequest {
-    pub parent_id: Option<String>,
+    pub parent_id: Option<i64>,
     pub sort_order: Option<i64>,
 }
 
 pub async fn move_node(
     Extension(db): Extension<Arc<Database>>,
     headers: HeaderMap,
-    Path(id): Path<String>,
+    Path(id): Path<i64>,
     Json(body): Json<MoveNodeRequest>,
 ) -> impl IntoResponse {
     let claims = match auth::extract_user_id(&headers) {
@@ -516,7 +508,7 @@ pub async fn move_node(
         }
     };
 
-    if !user_exists(&db, &claims.sub).await {
+    if !user_exists(&db, claims.sub).await {
         return (
             StatusCode::UNAUTHORIZED,
             Json(json!({"error": "User does not exist"})),
@@ -524,10 +516,10 @@ pub async fn move_node(
             .into_response();
     }
 
-    let current_project_id: Option<Option<String>> =
+    let current_project_id: Option<Option<i64>> =
         sqlx::query_scalar("SELECT project_id FROM doc_nodes WHERE id = ? AND user_id = ?")
-            .bind(&id)
-            .bind(&claims.sub)
+            .bind(id)
+            .bind(claims.sub)
             .fetch_optional(&db.pool)
             .await
             .unwrap_or(None);
@@ -539,8 +531,8 @@ pub async fn move_node(
         }
     };
 
-    if let Some(ref new_parent) = body.parent_id {
-        if new_parent == &id {
+    if let Some(new_parent) = body.parent_id {
+        if new_parent == id {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({"error": "Cannot move a node under itself"})),
@@ -548,11 +540,11 @@ pub async fn move_node(
                 .into_response();
         }
 
-        let parent_project_id: Option<Option<String>> = sqlx::query_scalar(
+        let parent_project_id: Option<Option<i64>> = sqlx::query_scalar(
             "SELECT project_id FROM doc_nodes WHERE id = ? AND user_id = ? AND node_type = 'dir'",
         )
         .bind(new_parent)
-        .bind(&claims.sub)
+        .bind(claims.sub)
         .fetch_optional(&db.pool)
         .await
         .unwrap_or(None);
@@ -586,9 +578,9 @@ pub async fn move_node(
             )
             SELECT EXISTS(SELECT 1 FROM desc WHERE id = ?)",
         )
-        .bind(&claims.sub)
-        .bind(&id)
-        .bind(&claims.sub)
+        .bind(claims.sub)
+        .bind(id)
+        .bind(claims.sub)
         .bind(new_parent)
         .fetch_one(&db.pool)
         .await
@@ -610,11 +602,11 @@ pub async fn move_node(
          SET parent_id = ?, sort_order = ?, project_id = ?, updated_at = datetime('now')
          WHERE id = ? AND user_id = ?",
     )
-    .bind(&body.parent_id)
+    .bind(body.parent_id)
     .bind(sort_order)
-    .bind(&current_project_id)
-    .bind(&id)
-    .bind(&claims.sub)
+    .bind(current_project_id)
+    .bind(id)
+    .bind(claims.sub)
     .execute(&db.pool)
     .await;
 
