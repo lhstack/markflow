@@ -20,7 +20,7 @@ RUN mkdir -p src && \
 
 COPY backend/src ./src
 COPY --from=frontend-builder /app/frontend/dist /app/frontend/dist
-RUN cargo build --release --locked
+RUN find src -type f -exec touch {} + && cargo build --release --locked
 
 FROM alpine:3.21
 WORKDIR /app
