@@ -125,7 +125,7 @@
                   v-for="item in tocItems"
                   :key="item.id"
                   class="floating-toc-item"
-                  :class="[`level-${item.level}`, { active: item.id === selectedTocId }]"
+                  :class="[`level-${item.level}`, { active: item.id === activeTocId || item.id === selectedTocId }]"
                   @click="scrollToHeading(item)"
                 >
                   <span class="floating-toc-bullet"></span>
@@ -235,7 +235,7 @@
                   v-for="item in tocItems"
                   :key="item.id"
                   class="floating-toc-item"
-                  :class="[`level-${item.level}`, { active: item.id === selectedTocId }]"
+                  :class="[`level-${item.level}`, { active: item.id === activeTocId || item.id === selectedTocId }]"
                   @click="scrollToHeading(item)"
                 >
                   <span class="floating-toc-bullet"></span>
@@ -417,6 +417,7 @@ function updateActiveTocByScroll() {
     else break
   }
   activeTocId.value = current.id
+  selectedTocId.value = current.id
 }
 
 function refreshTocFromPreview() {

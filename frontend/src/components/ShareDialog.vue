@@ -47,25 +47,29 @@
                 </svg>
                 <span>有效期</span>
               </div>
-              <div class="expire-tabs">
-                <button
-                  v-for="opt in expireOptions"
-                  :key="opt.value"
-                  :class="['et-btn', { active: form.expireOption === opt.value }]"
-                  @click="form.expireOption = opt.value"
-                >{{ opt.label }}</button>
-              </div>
+              <el-date-picker
+                v-model="form.customExpiresAtLocal"
+                class="sd-picker"
+                type="datetime"
+                format="YYYY年MM月DD日 HH:mm"
+                date-format="YYYY年MM月DD日"
+                time-format="HH:mm"
+                value-format="YYYY-MM-DDTHH:mm:ss"
+                placeholder="永久有效，点击设置失效时间"
+                :editable="false"
+                :clearable="true"
+                popper-class="share-expire-picker"
+                :shortcuts="expireShortcuts"
+                :disabled-date="disabledPastDate"
+                :disabled-hours="disabledPastHours"
+                :disabled-minutes="disabledPastMinutes"
+                :disabled-seconds="disabledPastSeconds"
+              />
             </div>
 
-            <transition name="expand">
-              <div v-if="form.expireOption === 'custom'" class="sd-custom-expire">
-                <div class="field-wrap">
-                  <svg class="field-icon" width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M4.75 0a.75.75 0 0 1 .75.75V2h5V.75a.75.75 0 0 1 1.5 0V2h1.25c.966 0 1.75.784 1.75 1.75v10.5A1.75 1.75 0 0 1 13.25 16H2.75A1.75 1.75 0 0 1 1 14.25V3.75C1 2.784 1.784 2 2.75 2H4V.75A.75.75 0 0 1 4.75 0Zm-2.25 7.5v6.75c0 .138.112.25.25.25h10.5a.25.25 0 0 0 .25-.25V7.5Z"/></svg>
-                  <input v-model="form.customExpiresAtLocal" class="sd-input" type="datetime-local" />
-                </div>
-                <p class="sd-hint">按本地时区到点失效</p>
-              </div>
-            </transition>
+            <div class="sd-custom-expire">
+              <p class="sd-hint">{{ expirySummary }}；时间面板内可直接选择 1 天后、3 天后、7 天后</p>
+            </div>
           </div>
 
           <button class="sd-create-btn" :disabled="creating" @click="createShare">
@@ -124,7 +128,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import request from '@/utils/request'
 import type { DocNode } from '@/stores/docs'
@@ -150,17 +154,8 @@ const creating = ref(false)
 const form = ref({
   hasPassword: false,
   password: '',
-  expireOption: 'never',
   customExpiresAtLocal: '',
 })
-
-const expireOptions = [
-  { label: '永久', value: 'never' },
-  { label: '1天', value: '1d' },
-  { label: '7天', value: '7d' },
-  { label: '30天', value: '30d' },
-  { label: '自定义', value: 'custom' },
-]
 
 function getShareUrl(token: string) {
   return `${window.location.origin}/s/${token}`
@@ -174,6 +169,69 @@ function fmtExpiry(dt: string) {
   const hh = `${d.getHours()}`.padStart(2, '0')
   const mm = `${d.getMinutes()}`.padStart(2, '0')
   return `${yyyy}/${MM}/${dd} ${hh}:${mm}`
+}
+
+function addDays(days: number) {
+  const next = new Date()
+  next.setDate(next.getDate() + days)
+  return next
+}
+
+const expirySummary = computed(() => {
+  if (!form.value.customExpiresAtLocal) return '永久有效'
+  const parsed = new Date(form.value.customExpiresAtLocal)
+  if (Number.isNaN(parsed.getTime())) return '时间格式无效'
+  return `将在 ${fmtExpiry(parsed.toISOString())} 失效`
+})
+
+const expireShortcuts = [
+  {
+    text: '1 天后',
+    value: () => addDays(1),
+  },
+  {
+    text: '3 天后',
+    value: () => addDays(3),
+  },
+  {
+    text: '7 天后',
+    value: () => addDays(7),
+  },
+]
+
+function disabledPastDate(date: Date) {
+  const now = new Date()
+  now.setHours(0, 0, 0, 0)
+  return date.getTime() < now.getTime()
+}
+
+function isSelectedToday() {
+  const current = form.value.customExpiresAtLocal ? new Date(form.value.customExpiresAtLocal) : new Date()
+  const now = new Date()
+  return current.getFullYear() === now.getFullYear()
+    && current.getMonth() === now.getMonth()
+    && current.getDate() === now.getDate()
+}
+
+function range(from: number, to: number) {
+  return Array.from({ length: to - from }, (_, index) => index + from)
+}
+
+function disabledPastHours() {
+  if (!isSelectedToday()) return []
+  return range(0, new Date().getHours())
+}
+
+function disabledPastMinutes(hour: number) {
+  const now = new Date()
+  if (!isSelectedToday() || hour !== now.getHours()) return []
+  return range(0, now.getMinutes())
+}
+
+function disabledPastSeconds(hour: number, minute: number) {
+  const now = new Date()
+  if (!isSelectedToday() || hour !== now.getHours() || minute !== now.getMinutes()) return []
+  return range(0, now.getSeconds())
 }
 
 function readPasswordCache(): Record<string, string> {
@@ -228,34 +286,20 @@ async function loadShares() {
 }
 
 function resolveExpiresAtISO(): string | undefined {
-  const expiryMap: Record<string, number> = { '1d': 1, '7d': 7, '30d': 30 }
-
-  if (form.value.expireOption === 'never') {
+  if (!form.value.customExpiresAtLocal) {
     return undefined
   }
 
-  if (form.value.expireOption === 'custom') {
-    if (!form.value.customExpiresAtLocal) {
-      ElMessage.warning('请设置具体到期时间')
-      return 'invalid'
-    }
-    const custom = new Date(form.value.customExpiresAtLocal)
-    if (Number.isNaN(custom.getTime())) {
-      ElMessage.warning('到期时间格式无效')
-      return 'invalid'
-    }
-    if (custom.getTime() <= Date.now()) {
-      ElMessage.warning('到期时间必须晚于当前时间')
-      return 'invalid'
-    }
-    return custom.toISOString()
+  const custom = new Date(form.value.customExpiresAtLocal)
+  if (Number.isNaN(custom.getTime())) {
+    ElMessage.warning('到期时间格式无效')
+    return 'invalid'
   }
-
-  const days = expiryMap[form.value.expireOption]
-  if (!days) return undefined
-  const d = new Date()
-  d.setDate(d.getDate() + days)
-  return d.toISOString()
+  if (custom.getTime() <= Date.now()) {
+    ElMessage.warning('到期时间必须晚于当前时间')
+    return 'invalid'
+  }
+  return custom.toISOString()
 }
 
 async function createShare() {
@@ -283,7 +327,7 @@ async function createShare() {
     }
 
     ElMessage({ message: '链接已创建', type: 'success', duration: 1500 })
-    form.value = { hasPassword: false, password: '', expireOption: 'never', customExpiresAtLocal: '' }
+    form.value = { hasPassword: false, password: '', customExpiresAtLocal: '' }
     await loadShares()
   } catch {
     ElMessage.error('创建失败')
@@ -349,6 +393,7 @@ watch(
     }
   }
 )
+
 </script>
 
 <style scoped>
@@ -597,33 +642,118 @@ watch(
   color: var(--text3);
 }
 
-.expire-tabs {
-  display: flex;
-  gap: 4px;
-  flex-wrap: wrap;
+.sd-picker {
+  width: 280px;
+  max-width: 100%;
 }
 
-.et-btn {
-  padding: 4px 10px;
+.sd-picker :deep(.el-input__wrapper) {
+  min-height: 38px;
+  background: var(--bg2) !important;
+  box-shadow: 0 0 0 1px var(--border) inset !important;
+}
+
+.sd-picker :deep(.el-input__inner) {
+  text-align: right;
+}
+
+.sd-custom-expire {
+  padding-top: 0;
+}
+
+@media (max-width: 640px) {
+  .sd-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .sd-picker {
+    width: 100%;
+  }
+
+  .sd-picker :deep(.el-input__inner) {
+    text-align: left;
+  }
+}
+
+:global(.share-expire-picker.el-picker__popper) {
+  border-radius: 18px;
   border: 1px solid var(--border);
-  background: transparent;
-  color: var(--text3);
-  border-radius: var(--r-sm);
-  font-size: 12px;
-  cursor: pointer;
-  font-family: var(--font);
-  transition: all 0.12s;
+  box-shadow: var(--shadow-lg);
 }
 
-.et-btn:hover {
-  border-color: var(--border2);
+:global(.share-expire-picker .el-picker-panel) {
+  background: var(--bg2);
+  color: var(--text);
+  border-radius: 18px;
+}
+
+:global(.share-expire-picker .el-picker-panel__sidebar) {
+  background: linear-gradient(180deg, #f7faf3 0%, #f1f6eb 100%);
+  border-right: 1px solid var(--border);
+  width: 108px;
+}
+
+:global(.share-expire-picker .el-picker-panel__shortcut) {
+  color: var(--text2);
+  font-size: 13px;
+  padding: 10px 16px;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+:global(.share-expire-picker .el-picker-panel__shortcut:hover) {
+  background: rgba(111, 154, 79, 0.1);
+  color: var(--green3);
+}
+
+:global(.share-expire-picker .el-date-picker__header-label),
+:global(.share-expire-picker .el-date-picker__header-year) {
+  color: var(--text);
+  font-weight: 600;
+}
+
+:global(.share-expire-picker .el-picker-panel__icon-btn) {
   color: var(--text2);
 }
 
-.et-btn.active {
-  background: var(--green-dim);
-  border-color: var(--green2);
+:global(.share-expire-picker .el-date-table th) {
+  color: var(--text3);
+}
+
+:global(.share-expire-picker .el-date-table td.current:not(.disabled) .el-date-table-cell__text),
+:global(.share-expire-picker .el-date-table td.today .el-date-table-cell__text),
+:global(.share-expire-picker .el-date-table td.available:hover .el-date-table-cell__text),
+:global(.share-expire-picker .el-time-panel__btn.confirm) {
+  background: var(--green);
+  color: #fff;
+}
+
+:global(.share-expire-picker .el-date-table td.current:not(.disabled) .el-date-table-cell__text) {
+  box-shadow: 0 10px 18px rgba(31, 154, 86, 0.18);
+}
+
+:global(.share-expire-picker .el-date-table td.available:hover .el-date-table-cell__text) {
+  background: rgba(31, 154, 86, 0.14);
   color: var(--green3);
+}
+
+:global(.share-expire-picker .el-time-panel) {
+  border-left: 1px solid var(--border);
+}
+
+:global(.share-expire-picker .el-time-spinner__item.active:not(.disabled)) {
+  color: var(--green3);
+  font-weight: 600;
+}
+
+:global(.share-expire-picker .el-picker-panel__footer) {
+  background: linear-gradient(180deg, #fbfdf8 0%, #f5f9ef 100%);
+  border-top: 1px solid var(--border);
+}
+
+:global(.share-expire-picker .el-button--text),
+:global(.share-expire-picker .el-picker-panel__link-btn) {
+  color: var(--text2);
 }
 
 .sd-create-btn {

@@ -5,14 +5,3 @@
     </transition>
   </router-view>
 </template>
-
-<script setup lang="ts">
-import { onMounted } from 'vue'
-import { useSystemStore } from '@/stores/system'
-
-const system = useSystemStore()
-
-onMounted(() => {
-  void system.fetchPublicSettings().catch(() => {})
-})
-</script>
