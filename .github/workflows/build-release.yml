@@ -2,8 +2,6 @@ name: Build And Release
 
 on:
   push:
-    branches:
-      - master
     tags:
       - 'v*'
   workflow_dispatch:
@@ -138,6 +136,57 @@ jobs:
             release/*.zip
           if-no-files-found: error
 
+  docker-publish:
+    name: Build And Push Docker Image
+    needs:
+      - frontend-dist
+      - build-binaries
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Frontend Dist
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: lhstack/markflow
+          tags: |
+            type=raw,value=latest
+            type=ref,event=tag
+            type=sha,prefix=sha-
+
+      - name: Build and push multi-arch image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.release
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   release-tag:
     name: Publish Tag Release
     if: startsWith(github.ref, 'refs/tags/v')
@@ -183,52 +232,4 @@ jobs:
           files: release-assets/*
           fail_on_unmatched_files: true
           body_path: release-notes.md
-          overwrite_files: true
-
-  release-master:
-    name: Publish Master Snapshot
-    if: github.ref == 'refs/heads/master'
-    needs: build-binaries
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout (full history)
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Download All Build Artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: release-*
-          merge-multiple: true
-          path: release-assets
-
-      - name: Move rolling snapshot tag
-        shell: bash
-        run: |
-          set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -f master-snapshot "${GITHUB_SHA}"
-          git push origin refs/tags/master-snapshot --force
-
-      - name: Build Master Snapshot Notes (current commit)
-        shell: bash
-        run: |
-          set -euo pipefail
-          {
-            echo "master-snapshot @ ${GITHUB_SHA}"
-            echo
-            git log -1 --pretty=format:'%s%n%b'
-          } > release-notes.md
-
-      - name: Publish GitHub Pre-Release (Master)
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: master-snapshot
-          name: Master Snapshot (Rolling)
-          prerelease: true
-          body_path: release-notes.md
-          files: release-assets/*
-          fail_on_unmatched_files: true
           overwrite_files: true
