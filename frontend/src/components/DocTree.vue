@@ -460,7 +460,7 @@ function onDragStart(event: DragEvent, node: DocNode) {
     ElMessage.warning('搜索模式下不可拖拽，请先清空搜索')
     return
   }
-  event.dataTransfer?.setData('text/plain', node.id)
+  event.dataTransfer?.setData('text/plain', String(node.id))
   if (event.dataTransfer) {
     event.dataTransfer.effectAllowed = 'move'
   }

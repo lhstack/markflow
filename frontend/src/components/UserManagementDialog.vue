@@ -43,7 +43,7 @@
                   <el-switch
                     :model-value="row.is_active"
                     :loading="Boolean(statusLoading[row.id])"
-                    @change="(value) => updateStatus(row, value)"
+                    @change="(value: boolean | string | number) => updateStatus(row, Boolean(value))"
                   />
                   <span class="state-pill" :class="row.is_active ? 'active' : 'inactive'">
                     {{ row.is_active ? '已启用' : '已停用' }}
@@ -60,7 +60,7 @@
                   <el-switch
                     :model-value="row.totp_enabled"
                     :loading="Boolean(twofaLoading[row.id])"
-                    @change="(value) => updateTwoFA(row, value)"
+                    @change="(value: boolean | string | number) => updateTwoFA(row, Boolean(value))"
                   />
                   <span class="state-pill" :class="row.has_totp_secret ? 'ready' : 'plain'">
                     {{ row.has_totp_secret ? '已初始化' : '未初始化' }}
