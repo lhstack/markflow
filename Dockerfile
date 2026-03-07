@@ -24,7 +24,7 @@ RUN find src -type f -exec touch {} + && cargo build --release --locked
 
 FROM alpine:3.21
 WORKDIR /app
-RUN apk add --no-cache ca-certificates tzdata && \
+RUN apk add --no-cache ca-certificates tzdata su-exec tini && \
     addgroup -S markflow && \
     adduser -S -G markflow markflow && \
     mkdir -p /app/data /app/logs && \
@@ -32,12 +32,14 @@ RUN apk add --no-cache ca-certificates tzdata && \
 
 COPY --from=backend-builder /app/backend/target/release/markflow /app/markflow
 COPY backend/config.toml /app/config.toml
+COPY docker-entrypoint.sh /app/docker-entrypoint.sh
+RUN chmod +x /app/docker-entrypoint.sh
 
-USER markflow
 EXPOSE 3000
 
 ENV PORT=3000 \
     DATABASE_URL=sqlite:data/markflow.db \
+    UPLOAD_DIR=uploads \
     LOG_DIR=logs
 
-ENTRYPOINT ["/app/markflow"]
+ENTRYPOINT ["/sbin/tini", "--", "/app/docker-entrypoint.sh"]
