@@ -1,142 +1,134 @@
 <template>
-  <div class="mde-shell" :class="toneClass">
-    <header class="mde-header">
-      <div class="doc-info">
-        <div class="doc-title-row">
-          <h2 class="doc-title">{{ node.name }}</h2>
-          <span v-if="isDirty" class="dirty-dot" title="存在未保存修改"></span>
+  <div class="sy-editor-shell">
+    <header class="sy-editor-header">
+      <div class="sy-editor-header-inner">
+        <div class="sy-doc-meta">
+          <div class="sy-doc-kicker">MARKDOWN NOTE</div>
+          <div class="sy-doc-title-row">
+            <h2 class="sy-doc-title">{{ node.name }}</h2>
+            <span v-if="isDirty" class="sy-dirty-chip">未保存</span>
+          </div>
+          <div class="sy-doc-subline">
+            <span>更新 {{ fmtDate(node.updated_at) }}</span>
+            <span class="dot">·</span>
+            <span>创建 {{ fmtDate(node.created_at) }}</span>
+            <span class="dot">·</span>
+            <span>{{ wordCount }} 字</span>
+          </div>
         </div>
-        <div class="doc-meta">
-          <span>更新 {{ fmtDate(node.updated_at) }}</span>
-          <span class="dot">·</span>
-          <span>创建 {{ fmtDate(node.created_at) }}</span>
-          <span class="dot">·</span>
-          <span>{{ wordCount }} 字</span>
+
+        <div class="sy-editor-actions">
+          <div class="sy-shortcut-hint">上传、拖拽、粘贴都可插入附件</div>
+          <button class="ghost-btn" @click="emit('share', node)">分享</button>
+          <button class="save-btn" :class="{ dirty: isDirty }" :disabled="saving" @click="save">
+            <span>{{ saving ? '保存中...' : '保存' }}</span>
+            <kbd>⌘S</kbd>
+          </button>
         </div>
-      </div>
-
-      <div class="mode-switch" role="tablist" aria-label="编辑模式">
-        <button class="mode-btn" :class="{ active: viewMode === 'edit' }" @click="viewMode = 'edit'">编辑</button>
-        <button class="mode-btn" :class="{ active: viewMode === 'split' }" @click="viewMode = 'split'">分栏</button>
-        <button class="mode-btn" :class="{ active: viewMode === 'preview' }" @click="viewMode = 'preview'">预览</button>
-      </div>
-
-      <div class="actions">
-        <button class="secondary-btn" :disabled="uploadingAsset" @click="triggerAttachmentUpload">
-          {{ uploadingAsset ? '上传中...' : '附件' }}
-        </button>
-        <button class="secondary-btn" @click="emit('share', node)">分享</button>
-        <button class="save-btn" :class="{ dirty: isDirty }" :disabled="saving" @click="save">
-          <span>{{ saving ? '保存中...' : '保存' }}</span>
-          <kbd>⌘S</kbd>
-        </button>
       </div>
     </header>
 
     <div
       v-if="assetUploadTask"
-      class="upload-banner"
+      class="sy-upload-banner"
       :class="{
         uploading: assetUploadTask.status === 'uploading',
         error: assetUploadTask.status === 'error',
       }"
     >
-      <div class="upload-banner-meta">
-        <span class="upload-banner-title">{{ uploadBannerTitle }}</span>
-        <span class="upload-banner-file">{{ assetUploadTask.fileName }}</span>
-      </div>
-      <div class="upload-banner-body">
-        <div v-if="assetUploadTask.status === 'uploading'" class="upload-banner-progress">
-          <span>{{ assetUploadTask.progress }}%</span>
-          <el-progress :percentage="assetUploadTask.progress" :stroke-width="7" :show-text="false" />
+      <div class="sy-upload-banner-inner">
+        <div class="sy-upload-main">
+          <span class="sy-upload-title">{{ uploadBannerTitle }}</span>
+          <span class="sy-upload-name">{{ assetUploadTask.fileName }}</span>
         </div>
-        <span v-else-if="assetUploadTask.status === 'error'" class="upload-banner-error">
-          {{ assetUploadTask.error || '上传失败' }}
-        </span>
-        <span v-else class="upload-banner-success">附件已插入文档</span>
-        <button
-          v-if="assetUploadTask.status !== 'uploading'"
-          class="upload-banner-close"
-          @click="clearAssetUploadTask"
-        >
-          关闭
-        </button>
+        <div class="sy-upload-side">
+          <div v-if="assetUploadTask.status === 'uploading'" class="sy-upload-progress">
+            <span>{{ assetUploadTask.progress }}%</span>
+            <el-progress :percentage="assetUploadTask.progress" :stroke-width="6" :show-text="false" />
+          </div>
+          <span v-else-if="assetUploadTask.status === 'error'" class="sy-upload-error">
+            {{ assetUploadTask.error || '上传失败' }}
+          </span>
+          <span v-else class="sy-upload-success">已插入当前文档</span>
+          <button
+            v-if="assetUploadTask.status !== 'uploading'"
+            class="sy-upload-close"
+            @click="clearAssetUploadTask"
+          >
+            关闭
+          </button>
+        </div>
       </div>
     </div>
 
-    <div class="editor-host">
-      <VMdEditor
-        ref="editorRef"
-        v-model="draft"
-        :mode="editorMode"
-        :height="'100%'"
-        :left-toolbar="leftToolbar"
-        :right-toolbar="rightToolbar"
-        :disabled-menus="disabledMenus"
-        :tab-size="2"
-        :codemirror-config="codemirrorConfig"
-        :placeholder="'开始输入 Markdown...'"
-        @save="save"
-        @upload-image="handleUploadImage"
-      />
+    <div class="sy-editor-stage">
+      <div class="sy-editor-stage-inner">
+        <div class="sy-split-shell" :class="`mode-${viewMode}`">
+          <div class="sy-view-switch" role="tablist" aria-label="视图切换">
+            <button
+              class="sy-view-btn"
+              :class="{ active: viewMode === 'source' }"
+              @click="viewMode = 'source'"
+            >
+              源码
+            </button>
+            <button
+              class="sy-view-btn"
+              :class="{ active: viewMode === 'preview' }"
+              @click="viewMode = 'preview'"
+            >
+              预览
+            </button>
+            <button
+              class="sy-view-btn"
+              :class="{ active: viewMode === 'split' }"
+              @click="viewMode = 'split'"
+            >
+              分栏
+            </button>
+          </div>
+          <section class="sy-editor-pane">
+            <div ref="editorRef" class="sy-editor-host"></div>
+          </section>
+          <aside class="sy-preview-pane">
+            <div ref="previewBodyRef" class="sy-preview-body">
+              <VditorPreview :markdown="draft" @rendered="syncPreviewScrollFromEditor" />
+            </div>
+          </aside>
+        </div>
+      </div>
     </div>
-
-    <input
-      ref="attachmentInput"
-      type="file"
-      style="display:none"
-      @change="handleAttachmentChange"
-    />
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import VMdEditor from '@kangc/v-md-editor/lib/codemirror-editor'
-import githubTheme from '@kangc/v-md-editor/lib/theme/github.js'
-import hljs from 'highlight.js'
-import Codemirror from 'codemirror'
-
-import 'codemirror/lib/codemirror.css'
-import 'codemirror/addon/scroll/simplescrollbars.css'
-import 'codemirror/mode/markdown/markdown'
-import 'codemirror/addon/display/placeholder'
-import 'codemirror/addon/selection/active-line'
-import 'codemirror/addon/edit/closebrackets'
-import 'codemirror/addon/edit/closetag'
-import 'codemirror/addon/scroll/simplescrollbars'
-
-import '@kangc/v-md-editor/lib/style/base-editor.css'
-import '@kangc/v-md-editor/lib/theme/style/github.css'
+import Vditor from 'vditor'
+import 'vditor/dist/index.css'
 
 import { useDocsStore, type DocNode } from '@/stores/docs'
+import VditorPreview from '@/components/VditorPreview.vue'
 import { createManagedUploadTask, removeManagedUpload, type ManagedUploadTask } from '@/utils/managedUploads'
 import { uploadFile, uploadImage } from '@/utils/uploads'
-
-const vmd = VMdEditor as any
-if (!vmd.__markflowConfigured) {
-  vmd.Codemirror = Codemirror
-  vmd.use(githubTheme, { Hljs: hljs })
-  vmd.__markflowConfigured = true
-}
 
 const props = defineProps<{ node: DocNode }>()
 const emit = defineEmits<{ share: [node: DocNode] }>()
 
 const docs = useDocsStore()
+const editorRef = ref<HTMLDivElement | null>(null)
+const previewBodyRef = ref<HTMLDivElement | null>(null)
 const saving = ref(false)
 const isDirty = ref(false)
 const draft = ref(props.node.content || '')
-const viewMode = ref<'edit' | 'split' | 'preview'>('split')
-const editorRef = ref<any>(null)
-const attachmentInput = ref<HTMLInputElement | null>(null)
-const uploadingAsset = ref(false)
 const assetUploadTask = ref<ManagedUploadTask | null>(null)
+const viewMode = ref<'source' | 'preview' | 'split'>('split')
 let originalContent = props.node.content || ''
+let editor: Vditor | null = null
+let editorScrollEl: HTMLElement | null = null
+let scrollSyncLocked = false
+let scrollUnlockFrame = 0
 
-const editorMode = computed(() => (viewMode.value === 'split' ? 'editable' : viewMode.value))
-const toneClass = computed(() => 'tone-light')
 const wordCount = computed(() => {
   const text = draft.value
   const cjk = (text.match(/[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7ff]/g) || []).length
@@ -144,16 +136,6 @@ const wordCount = computed(() => {
   return cjk + words
 })
 
-const leftToolbar = 'undo redo clear | h bold italic strikethrough quote | ul ol table hr | link image code'
-const rightToolbar = 'fullscreen'
-const disabledMenus: string[] = []
-const codemirrorConfig = {
-  indentUnit: 2,
-  tabSize: 2,
-  indentWithTabs: false,
-  lineWrapping: true,
-  scrollbarStyle: 'native',
-}
 const uploadBannerTitle = computed(() => {
   if (!assetUploadTask.value) return ''
   if (assetUploadTask.value.status === 'uploading') return '附件上传中'
@@ -170,38 +152,216 @@ function fmtDate(dateString: string) {
   return `${MM}/${dd} ${hh}:${mm}`
 }
 
-watch(draft, (value) => {
+function syncDraftFromEditor() {
+  if (!editor) return
+  const value = editor.getValue()
+  draft.value = value
   isDirty.value = value !== originalContent
-})
+}
 
-watch(
-  () => props.node.id,
-  () => {
-    const next = props.node.content || ''
-    draft.value = next
-    originalContent = next
-    isDirty.value = false
+function getEditorScrollElement() {
+  if (!editorRef.value) return null
+  return (
+    (editorRef.value.querySelector('.vditor-sv') as HTMLElement | null) ||
+    (editorRef.value.querySelector('.vditor-content') as HTMLElement | null)
+  )
+}
+
+function lockScrollSync() {
+  scrollSyncLocked = true
+  if (scrollUnlockFrame) {
+    cancelAnimationFrame(scrollUnlockFrame)
   }
-)
+  scrollUnlockFrame = requestAnimationFrame(() => {
+    scrollSyncLocked = false
+  })
+}
 
-watch(
-  () => props.node.content,
-  (value) => {
-    const next = value || ''
-    if (!isDirty.value && draft.value !== next) {
-      draft.value = next
-      originalContent = next
+function syncScrollPosition(source: HTMLElement, target: HTMLElement) {
+  const sourceMax = source.scrollHeight - source.clientHeight
+  const targetMax = target.scrollHeight - target.clientHeight
+  if (sourceMax <= 0 || targetMax <= 0) return
+  const ratio = source.scrollTop / sourceMax
+  target.scrollTop = ratio * targetMax
+}
+
+function syncPreviewScrollFromEditor() {
+  if (viewMode.value !== 'split' || scrollSyncLocked) return
+  const previewBody = previewBodyRef.value
+  const source = editorScrollEl || getEditorScrollElement()
+  if (!previewBody || !source) return
+  lockScrollSync()
+  syncScrollPosition(source, previewBody)
+}
+
+function syncEditorScrollFromPreview() {
+  if (viewMode.value !== 'split' || scrollSyncLocked) return
+  const previewBody = previewBodyRef.value
+  const source = editorScrollEl || getEditorScrollElement()
+  if (!previewBody || !source) return
+  lockScrollSync()
+  syncScrollPosition(previewBody, source)
+}
+
+function bindScrollSync() {
+  editorScrollEl?.removeEventListener('scroll', syncPreviewScrollFromEditor)
+  previewBodyRef.value?.removeEventListener('scroll', syncEditorScrollFromPreview)
+
+  editorScrollEl = getEditorScrollElement()
+  editorScrollEl?.addEventListener('scroll', syncPreviewScrollFromEditor, { passive: true })
+  previewBodyRef.value?.addEventListener('scroll', syncEditorScrollFromPreview, { passive: true })
+}
+
+function beginAssetUpload(kind: 'doc-image' | 'doc-file', file: File) {
+  if (assetUploadTask.value) {
+    removeManagedUpload(assetUploadTask.value.id)
+  }
+  assetUploadTask.value = createManagedUploadTask(kind, file)
+  return assetUploadTask.value
+}
+
+function clearAssetUploadTask() {
+  if (assetUploadTask.value) {
+    removeManagedUpload(assetUploadTask.value.id)
+    assetUploadTask.value = null
+  }
+}
+
+async function handleEditorUpload(files: File[]) {
+  if (!editor) return '编辑器尚未完成初始化'
+
+  for (const file of files) {
+    if (file.size > 20 * 1024 * 1024) {
+      return `文件 ${file.name} 超过 20MB 限制`
+    }
+
+    const isImage = file.type.startsWith('image/')
+    const kind = isImage ? 'doc-image' : 'doc-file'
+    const task = beginAssetUpload(kind, file)
+
+    try {
+      const url = isImage
+        ? await uploadImage(file, 'doc-image', { task })
+        : await uploadFile(file, 'doc-file', { task })
+
+      const markdown = isImage ? `![${file.name}](${url})\n` : `[${file.name}](${url})\n`
+      editor.insertValue(markdown)
+      syncDraftFromEditor()
+    } catch (error: any) {
+      return error?.response?.data?.error || error?.message || `文件 ${file.name} 上传失败`
     }
   }
-)
+
+  return null
+}
+
+function buildToolbar() {
+  return [
+    'emoji',
+    'headings',
+    'bold',
+    'italic',
+    'strike',
+    '|',
+    'link',
+    'upload',
+    '|',
+    'list',
+    'ordered-list',
+    'check',
+    '|',
+    'quote',
+    'line',
+    'code',
+    'inline-code',
+    'table',
+    '|',
+    'undo',
+    'redo',
+    'fullscreen',
+  ] as const
+}
+
+async function initEditor() {
+  await nextTick()
+  if (!editorRef.value) return
+
+  if (editor) {
+    editor.destroy()
+    editor = null
+  }
+
+  editor = new Vditor(editorRef.value, {
+    value: draft.value,
+    mode: 'sv',
+    theme: 'classic',
+    icon: 'material',
+    lang: 'zh_CN',
+    minHeight: 520,
+    height: '100%',
+    width: '100%',
+    toolbar: buildToolbar() as unknown as any[],
+    toolbarConfig: {
+      pin: false,
+    },
+    counter: {
+      enable: true,
+      type: 'text',
+    },
+    cache: {
+      enable: false,
+    },
+    placeholder: '开始记录内容，支持 Markdown、拖拽上传、图片粘贴...',
+    preview: {
+      mode: 'editor',
+      actions: [],
+      delay: 0,
+      markdown: {
+        toc: true,
+        mark: true,
+        footnotes: true,
+        autoSpace: true,
+        codeBlockPreview: true,
+        mathBlockPreview: true,
+      },
+      hljs: {
+        style: 'github',
+        lineNumber: false,
+      },
+      theme: {
+        current: 'light',
+      },
+    },
+    upload: {
+      accept: 'image/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.zip,.rar,.7z,.txt,.md,.csv,.json',
+      multiple: true,
+      max: 20 * 1024 * 1024,
+      handler: handleEditorUpload,
+    },
+    after() {
+      syncDraftFromEditor()
+      editor?.setPreviewMode('editor')
+      void nextTick().then(() => {
+        bindScrollSync()
+        syncPreviewScrollFromEditor()
+      })
+    },
+    input(value) {
+      draft.value = value
+      isDirty.value = value !== originalContent
+    },
+  })
+}
 
 async function save() {
-  if (saving.value) return
+  if (saving.value || !editor) return
 
   saving.value = true
   try {
-    await docs.updateNode(props.node.id, { content: draft.value })
-    originalContent = draft.value
+    const value = editor.getValue()
+    await docs.updateNode(props.node.id, { content: value })
+    draft.value = value
+    originalContent = value
     isDirty.value = false
     ElMessage({
       message: '已保存',
@@ -216,94 +376,6 @@ async function save() {
   }
 }
 
-function beginAssetUpload(kind: 'doc-image' | 'doc-file', file: File) {
-  if (assetUploadTask.value) {
-    removeManagedUpload(assetUploadTask.value.id)
-  }
-  assetUploadTask.value = createManagedUploadTask(kind, file)
-  uploadingAsset.value = true
-  return assetUploadTask.value
-}
-
-function clearFileInput(input: HTMLInputElement | null) {
-  if (input) {
-    input.value = ''
-  }
-}
-
-function clearAssetUploadTask() {
-  if (assetUploadTask.value) {
-    removeManagedUpload(assetUploadTask.value.id)
-    assetUploadTask.value = null
-  }
-}
-
-function triggerAttachmentUpload() {
-  if (uploadingAsset.value) return
-  clearFileInput(attachmentInput.value)
-  attachmentInput.value?.click()
-}
-
-function insertAttachmentLink(fileName: string, url: string) {
-  const editor = editorRef.value
-  if (editor?.insert) {
-    editor.insert((selected: string) => ({
-      text: selected ? `[${selected}](${url})` : `[${fileName}](${url})`,
-      selected: null,
-    }))
-    return
-  }
-
-  const prefix = draft.value && !draft.value.endsWith('\n') ? '\n' : ''
-  draft.value = `${draft.value}${prefix}[${fileName}](${url})`
-}
-
-async function handleUploadImage(_event: Event, insertImage: (config: { url: string; desc: string }) => void, files: File[]) {
-  const file = files[0]
-  if (!file || uploadingAsset.value) return
-  if (!file.type.startsWith('image/')) {
-    ElMessage.warning('请选择图片文件')
-    return
-  }
-  if (file.size > 10 * 1024 * 1024) {
-    ElMessage.warning('图片大小不能超过 10MB')
-    return
-  }
-
-  const task = beginAssetUpload('doc-image', file)
-  try {
-    const url = await uploadImage(file, 'doc-image', { task })
-    insertImage({ url, desc: file.name })
-    ElMessage.success('图片已插入文档')
-  } catch (err: any) {
-    ElMessage.error(err.response?.data?.error || '图片上传失败')
-  } finally {
-    uploadingAsset.value = false
-  }
-}
-
-async function handleAttachmentChange(event: Event) {
-  const file = (event.target as HTMLInputElement).files?.[0]
-  if (!file) return
-  if (file.size > 20 * 1024 * 1024) {
-    ElMessage.warning('附件大小不能超过 20MB')
-    clearFileInput(attachmentInput.value)
-    return
-  }
-
-  const task = beginAssetUpload('doc-file', file)
-  try {
-    const url = await uploadFile(file, 'doc-file', { task })
-    insertAttachmentLink(file.name, url)
-    ElMessage.success('附件已插入文档')
-  } catch (err: any) {
-    ElMessage.error(err.response?.data?.error || '附件上传失败')
-  } finally {
-    uploadingAsset.value = false
-    clearFileInput(attachmentInput.value)
-  }
-}
-
 function handleBeforeUnload(event: BeforeUnloadEvent) {
   if (!isDirty.value) return
   event.preventDefault()
@@ -313,11 +385,47 @@ function handleBeforeUnload(event: BeforeUnloadEvent) {
 function handleSaveHotkey(event: KeyboardEvent) {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
     event.preventDefault()
-    save()
+    void save()
   }
 }
 
+watch(
+  () => props.node.id,
+  async () => {
+    const next = props.node.content || ''
+    draft.value = next
+    originalContent = next
+    isDirty.value = false
+    if (!editor) {
+      await initEditor()
+      return
+    }
+    editor.setValue(next, true)
+  }
+)
+
+watch(
+  () => props.node.content,
+  (value) => {
+    const next = value || ''
+    if (isDirty.value || !editor) return
+    draft.value = next
+    originalContent = next
+    if (editor.getValue() !== next) {
+      editor.setValue(next, true)
+    }
+  }
+)
+
+watch(viewMode, async (mode) => {
+  if (mode !== 'split') return
+  await nextTick()
+  bindScrollSync()
+  syncPreviewScrollFromEditor()
+})
+
 onMounted(() => {
+  void initEditor()
   window.addEventListener('beforeunload', handleBeforeUnload)
   window.addEventListener('keydown', handleSaveHotkey)
 })
@@ -325,157 +433,137 @@ onMounted(() => {
 onUnmounted(() => {
   window.removeEventListener('beforeunload', handleBeforeUnload)
   window.removeEventListener('keydown', handleSaveHotkey)
+  editorScrollEl?.removeEventListener('scroll', syncPreviewScrollFromEditor)
+  previewBodyRef.value?.removeEventListener('scroll', syncEditorScrollFromPreview)
+  if (scrollUnlockFrame) {
+    cancelAnimationFrame(scrollUnlockFrame)
+  }
   clearAssetUploadTask()
+  if (editor) {
+    editor.destroy()
+    editor = null
+  }
 })
 </script>
 
 <style scoped>
-.mde-shell {
-  --mde-font: "Plus Jakarta Sans", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
-  --mde-mono: "JetBrains Mono", "Fira Code", "Cascadia Code", "Consolas", monospace;
-  --mde-radius: 10px;
+.sy-editor-shell {
+  --sy-paper: linear-gradient(180deg, #fbfdf8 0%, #f6f8ef 100%);
+  --sy-line: rgba(31, 41, 27, 0.08);
+  --sy-line-strong: rgba(86, 112, 59, 0.18);
+  --sy-text: #20251f;
+  --sy-text-soft: #586456;
+  --sy-text-faint: #7f8d7c;
+  --sy-accent: #6f9a4f;
+  --sy-accent-deep: #537535;
+  --sy-danger: #c45a4d;
 
   display: flex;
   flex-direction: column;
   height: 100%;
   min-height: 0;
-  font-family: var(--mde-font);
+  background:
+    radial-gradient(circle at top left, rgba(196, 214, 171, 0.24), transparent 36%),
+    radial-gradient(circle at top right, rgba(242, 235, 203, 0.36), transparent 28%),
+    var(--sy-paper);
+  color: var(--sy-text);
 }
 
-.mde-shell.tone-dark {
-  --mde-panel: #0b1728;
-  --mde-panel-2: #102036;
-  --mde-editor-bg: #091324;
-  --mde-border: rgba(128, 157, 192, 0.2);
-  --mde-border-strong: rgba(127, 180, 255, 0.4);
-  --mde-text: #dfe9f8;
-  --mde-text-soft: #9cb0cc;
-  --mde-muted: #7c8fa9;
-  --mde-accent: #5fa8ff;
+.sy-editor-header {
+  display: flex;
+  justify-content: center;
+  padding: 14px 20px 12px;
+  border-bottom: 1px solid var(--sy-line);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.74), rgba(255, 255, 255, 0.5));
+  backdrop-filter: blur(12px);
 }
 
-.mde-shell.tone-light {
-  --mde-panel: #ffffff;
-  --mde-panel-2: #f7faff;
-  --mde-editor-bg: #ffffff;
-  --mde-border: rgba(18, 39, 68, 0.14);
-  --mde-border-strong: rgba(47, 136, 247, 0.35);
-  --mde-text: #12213a;
-  --mde-text-soft: #40587b;
-  --mde-muted: #6f82a0;
-  --mde-accent: #2f88f7;
+.sy-editor-header-inner {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  width: min(1700px, 100%);
 }
 
-.mde-header {
-  display: grid;
-  grid-template-columns: minmax(180px, 300px) auto auto;
-  align-items: center;
-  gap: 10px;
-  min-height: 56px;
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--mde-border);
-  background: var(--mde-panel-2);
-}
-
-.doc-info {
+.sy-doc-meta {
   min-width: 0;
 }
 
-.doc-title-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+.sy-doc-kicker {
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  color: var(--sy-text-faint);
 }
 
-.doc-title {
+.sy-doc-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.sy-doc-title {
   margin: 0;
-  font-size: 14px;
-  line-height: 1.2;
+  font-size: 22px;
+  line-height: 1.1;
   font-weight: 700;
-  color: var(--mde-text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  color: #181d17;
 }
 
-.dirty-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: #ff9f43;
-  box-shadow: 0 0 0 5px rgba(255, 159, 67, 0.14);
-}
-
-.doc-meta {
-  margin-top: 4px;
-  display: flex;
-  gap: 6px;
-  align-items: center;
+.sy-dirty-chip {
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(219, 142, 47, 0.12);
+  color: #a86411;
   font-size: 12px;
-  color: var(--mde-muted);
+  font-weight: 700;
+}
+
+.sy-doc-subline {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--sy-text-soft);
 }
 
 .dot {
-  opacity: 0.5;
+  opacity: 0.45;
 }
 
-.mode-switch {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 3px;
-  border-radius: 10px;
-  border: 1px solid var(--mde-border);
-  background: var(--mde-panel);
-}
-
-.mode-btn {
-  height: 28px;
-  min-width: 46px;
-  border: 0;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--mde-text-soft);
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.mode-btn.active {
-  color: #fff;
-  background: var(--mde-accent);
-}
-
-.actions {
+.sy-editor-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-self: center;
 }
 
-.secondary-btn,
-.save-btn {
-  height: 34px;
-  border-radius: 10px;
-  border: 1px solid var(--mde-border);
-  padding: 0 12px;
+.sy-shortcut-hint {
   font-size: 12px;
-  font-weight: 600;
+  color: var(--sy-text-faint);
+  margin-right: 6px;
+}
+
+.ghost-btn,
+.save-btn {
+  height: 38px;
+  border-radius: 12px;
+  padding: 0 14px;
+  border: 1px solid var(--sy-line-strong);
+  background: rgba(255, 255, 255, 0.82);
+  color: var(--sy-text-soft);
+  font-size: 13px;
+  font-weight: 700;
   cursor: pointer;
 }
 
-.secondary-btn {
-  color: var(--mde-text-soft);
-  background: var(--mde-panel);
-}
-
-.secondary-btn:hover {
-  border-color: var(--mde-border-strong);
-  color: var(--mde-text);
-}
-
-.secondary-btn:disabled {
-  cursor: not-allowed;
-  opacity: 0.7;
+.ghost-btn:hover {
+  border-color: rgba(111, 154, 79, 0.36);
+  color: var(--sy-text);
 }
 
 .save-btn {
@@ -483,212 +571,373 @@ onUnmounted(() => {
   align-items: center;
   gap: 8px;
   border: none;
-  color: #f8fffb;
-  background: linear-gradient(135deg, #31b36b, #1e9352);
+  color: #f9fff4;
+  background: linear-gradient(135deg, var(--sy-accent), var(--sy-accent-deep));
+  box-shadow: 0 14px 28px rgba(93, 125, 64, 0.22);
 }
 
 .save-btn.dirty {
-  background: linear-gradient(135deg, #f59f3c, #dd7f20);
+  background: linear-gradient(135deg, #d0a24a, #b57b21);
 }
 
-.save-btn:disabled {
-  opacity: 0.7;
+.save-btn:disabled,
+.ghost-btn:disabled {
+  opacity: 0.72;
   cursor: not-allowed;
 }
 
 .save-btn kbd {
-  font-family: var(--mde-mono);
+  font-family: "JetBrains Mono", "Fira Code", monospace;
   font-size: 11px;
   border-radius: 6px;
   padding: 2px 5px;
-  border: 1px solid rgba(255, 255, 255, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.28);
   background: rgba(255, 255, 255, 0.12);
 }
 
-.editor-host {
-  flex: 1;
-  min-height: 0;
+.sy-upload-banner {
+  display: flex;
+  justify-content: center;
+  padding: 8px 20px;
+  border-bottom: 1px solid var(--sy-line);
+  background: rgba(243, 247, 235, 0.92);
 }
 
-.upload-banner {
+.sy-upload-banner.error {
+  background: rgba(196, 90, 77, 0.08);
+}
+
+.sy-upload-banner-inner {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 14px;
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--mde-border);
-  background: color-mix(in srgb, var(--mde-accent) 7%, var(--mde-panel));
+  gap: 16px;
+  width: min(1700px, 100%);
 }
 
-.upload-banner.error {
-  background: rgba(214, 76, 76, 0.08);
-}
-
-.upload-banner-meta {
+.sy-upload-main {
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
 }
 
-.upload-banner-title {
+.sy-upload-title {
   font-size: 12px;
   font-weight: 700;
-  color: var(--mde-text);
+  color: var(--sy-text);
 }
 
-.upload-banner-file {
+.sy-upload-name {
   min-width: 0;
   font-size: 12px;
-  color: var(--mde-text-soft);
+  color: var(--sy-text-soft);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.upload-banner-body {
+.sy-upload-side {
   display: flex;
   align-items: center;
   gap: 12px;
-  min-width: 260px;
+  min-width: 280px;
 }
 
-.upload-banner-progress {
+.sy-upload-progress {
   display: flex;
   align-items: center;
   gap: 10px;
   width: 100%;
   font-size: 12px;
-  color: var(--mde-text-soft);
+  color: var(--sy-text-soft);
 }
 
-.upload-banner-success {
+.sy-upload-success {
   font-size: 12px;
-  color: #1e9352;
+  color: var(--sy-accent-deep);
 }
 
-.upload-banner-error {
+.sy-upload-error {
   font-size: 12px;
-  color: #d64c4c;
+  color: var(--sy-danger);
 }
 
-.upload-banner-close {
+.sy-upload-close {
   border: 0;
   background: transparent;
-  color: var(--mde-text-soft);
-  font-size: 12px;
+  color: var(--sy-text-soft);
   cursor: pointer;
+  font-size: 12px;
 }
 
-.upload-banner-close:hover {
-  color: var(--mde-text);
+.sy-upload-close:hover {
+  color: var(--sy-text);
 }
 
-:deep(.v-md-editor) {
+.sy-editor-stage {
+  flex: 1;
+  min-height: 0;
+  padding: 20px 20px 26px;
+}
+
+.sy-editor-stage-inner {
   height: 100%;
-  border-radius: 0;
-  box-shadow: none;
+  display: flex;
+  justify-content: center;
+}
+
+.sy-split-shell {
+  position: relative;
+  height: 100%;
+  width: min(1700px, 100%);
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 0.9fr);
+  min-width: 0;
+  min-height: 0;
+  border-radius: 28px;
+  overflow: hidden;
+  border: 1px solid rgba(56, 71, 44, 0.08);
+  background: rgba(255, 255, 255, 0.88);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.62),
+    0 24px 50px rgba(67, 84, 49, 0.1);
+}
+
+.sy-split-shell::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 52px;
+  border-bottom: 1px solid var(--sy-line);
+  background:
+    linear-gradient(90deg, rgba(244, 248, 238, 0.98) 0%, rgba(244, 248, 238, 0.98) 49%, rgba(251, 252, 248, 0.98) 58%, rgba(250, 252, 246, 0.98) 100%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.sy-view-switch {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 4;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  height: 52px;
+  min-width: 280px;
+  padding: 0 20px;
+  background: linear-gradient(90deg, rgba(251, 252, 248, 0) 0%, rgba(251, 252, 248, 0.92) 18%, rgba(250, 252, 246, 0.98) 100%);
+}
+
+.sy-view-btn {
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--sy-text-soft);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition:
+    background-color 0.18s ease,
+    border-color 0.18s ease,
+    color 0.18s ease;
+}
+
+.sy-view-btn:hover {
+  color: var(--sy-text);
+  background: rgba(111, 154, 79, 0.1);
+}
+
+.sy-view-btn.active {
+  border-color: rgba(111, 154, 79, 0.24);
+  background: rgba(111, 154, 79, 0.16);
+  color: #35501f;
+}
+
+.sy-split-shell.mode-source {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.sy-split-shell.mode-source .sy-preview-pane {
+  display: none;
+}
+
+.sy-split-shell.mode-preview {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.sy-split-shell.mode-preview .sy-editor-pane {
+  display: none;
+}
+
+.sy-split-shell.mode-preview .sy-preview-pane {
+  border-left: none;
+}
+
+.sy-editor-pane,
+.sy-preview-pane {
+  min-width: 0;
+  min-height: 0;
+}
+
+.sy-editor-host {
+  height: 100%;
+  width: 100%;
+  min-height: 0;
+}
+
+.sy-preview-pane {
+  position: relative;
+  padding-top: 52px;
+  border-left: 1px solid rgba(56, 71, 44, 0.08);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(250, 252, 246, 0.96));
+}
+
+.sy-preview-body {
+  height: 100%;
+  overflow: auto;
+  padding: 20px 24px 30px;
+}
+
+:deep(.vditor) {
+  height: 100%;
   border: none;
-  background: var(--mde-panel);
-  color: var(--mde-text);
+  background: transparent;
 }
 
-:deep(.v-md-editor__toolbar) {
-  padding: 6px 8px;
-  border-bottom: 1px solid var(--mde-border);
-  background: var(--mde-panel);
+:deep(.vditor-toolbar) {
+  position: relative;
+  z-index: 1;
+  padding: 10px 14px;
+  border-bottom: none;
+  background: transparent;
 }
 
-:deep(.v-md-editor__toolbar-item) {
-  color: var(--mde-text-soft);
+:deep(.vditor-toolbar__item) {
+  color: var(--sy-text-soft);
 }
 
-:deep(.v-md-editor__toolbar-item:hover) {
-  background: color-mix(in srgb, var(--mde-accent) 12%, transparent);
-  color: var(--mde-text);
+:deep(.vditor-toolbar__item .vditor-tooltipped) {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border-radius: 9px;
 }
 
-:deep(.v-md-editor__toolbar-item--active),
-:deep(.v-md-editor__toolbar-item--active:hover) {
-  background: color-mix(in srgb, var(--mde-accent) 22%, transparent);
+:deep(.vditor-toolbar__item:hover) {
+  background: rgba(111, 154, 79, 0.12);
+  color: var(--sy-text);
 }
 
-:deep(.v-md-editor--editable .v-md-editor__editor-wrapper) {
-  border-right: 1px solid var(--mde-border);
+:deep(.vditor-toolbar__divider) {
+  border-left-color: rgba(88, 100, 75, 0.16);
 }
 
-:deep(.CodeMirror) {
-  height: 100%;
-  background: var(--mde-editor-bg);
-  color: var(--mde-text);
-  font-family: var(--mde-mono);
-  font-size: 14px;
-  line-height: 1.7;
+:deep(.vditor-toolbar__item--current),
+:deep(.vditor-toolbar__item--current:hover) {
+  background: rgba(111, 154, 79, 0.18);
+  color: #35501f;
 }
 
-:deep(.CodeMirror-gutters) {
-  min-width: 38px;
-  border-right: 1px solid var(--mde-border);
-  background: var(--mde-editor-bg);
+:deep(.vditor-content) {
+  background: linear-gradient(180deg, rgba(249, 251, 245, 0.96), rgba(244, 248, 238, 0.88));
 }
 
-:deep(.CodeMirror-linenumber) {
-  min-width: 26px;
-  padding: 0 8px 0 4px;
-  color: var(--mde-muted);
+:deep(.vditor-sv) {
+  padding: 28px 30px 72px;
+  font-size: 15px;
+  line-height: 1.9;
+  color: #232a21;
+  background: rgba(255, 255, 255, 0.74);
 }
 
-:deep(.CodeMirror-lines) {
-  padding: 14px 0 28px;
+:deep(.vditor-sv:focus) {
+  background: rgba(255, 255, 255, 0.86);
 }
 
-:deep(.CodeMirror pre) {
-  padding-left: 4px;
-}
-
-:deep(.v-md-editor__preview-wrapper) {
-  background: var(--mde-panel);
-}
-
-:deep(.github-markdown-body) {
-  padding: 18px 24px 32px !important;
-  color: var(--mde-text) !important;
-  background: transparent !important;
-}
-
-:deep(.github-markdown-body pre) {
-  border-radius: var(--mde-radius);
-  border: 1px solid var(--mde-border);
-  padding: 12px 14px !important;
-}
-
-:deep(.github-markdown-body code) {
-  font-family: var(--mde-mono);
+:deep(.vditor-counter) {
+  color: var(--sy-text-faint);
+  background: rgba(255, 255, 255, 0.74);
+  margin: 12px 12px 0 0;
 }
 
 @media (max-width: 980px) {
-  .mde-header {
-    grid-template-columns: 1fr;
-    gap: 8px;
-  }
-
-  .actions {
-    justify-content: flex-end;
-  }
-
-  .upload-banner {
+  .sy-editor-header-inner {
     flex-direction: column;
     align-items: stretch;
   }
 
-  .upload-banner-body {
+  .sy-editor-actions {
+    justify-content: flex-start;
+  }
+
+  .sy-upload-banner-inner {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .sy-upload-side {
     min-width: 0;
+  }
+
+  .sy-split-shell {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(420px, 1fr) minmax(280px, 0.74fr);
+  }
+
+  .sy-view-switch {
+    min-width: 0;
+    width: 100%;
+    padding: 0 14px;
+  }
+
+  .sy-preview-pane {
+    padding-top: 52px;
+    border-left: none;
+    border-top: 1px solid rgba(56, 71, 44, 0.08);
+  }
+
+  .sy-split-shell.mode-source,
+  .sy-split-shell.mode-preview {
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .sy-split-shell.mode-preview .sy-preview-pane {
+    border-top: none;
   }
 }
 
 @media (max-width: 768px) {
-  .doc-meta {
-    display: none;
+  .sy-editor-stage {
+    padding: 12px;
+  }
+
+  .sy-editor-pane,
+  .sy-preview-pane {
+    border-radius: 18px;
+  }
+
+  :deep(.vditor-sv) {
+    padding: 20px 18px 48px;
+  }
+
+  .sy-preview-body {
+    padding: 16px 14px 18px;
+  }
+
+  .sy-view-switch {
+    gap: 6px;
+    height: 48px;
+    padding: 0 10px;
+  }
+
+  .sy-view-btn {
+    padding: 0 10px;
   }
 }
 </style>

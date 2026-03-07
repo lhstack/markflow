@@ -57,15 +57,26 @@
       />
       <div class="share-doc-body" :class="{ 'is-sidebar-collapsed': !shareSidebarOpen }">
         <aside class="share-doc-sidebar">
-          <div class="sidebar-title">文档目录</div>
-          <div class="doc-side-card" v-if="shareSidebarOpen">
-            <div class="doc-side-name">{{ content?.name || '未命名文档' }}</div>
+          <div v-if="shareSidebarOpen" class="share-tree-shell">
+            <div class="sidebar-title">文档树</div>
+            <div class="share-tree-scroll">
+              <ShareTreeNav
+                :nodes="content ? [content] : []"
+                :selected-id="content?.id"
+                :expanded-ids="readonlyExpandedIds"
+                @select="selectDoc"
+              />
+            </div>
           </div>
         </aside>
         <main class="share-doc-content">
-          <div class="preview-shell">
-            <VMdPreview class="share-preview" :text="content?.content || ''" />
-          </div>
+          <article class="share-paper">
+            <div class="share-paper-head">
+              <div class="share-paper-kicker">SHARED NOTE</div>
+              <h1>{{ content?.name || '未命名文档' }}</h1>
+            </div>
+            <VditorPreview :markdown="content?.content || ''" />
+          </article>
         </main>
       </div>
     </div>
@@ -80,20 +91,38 @@
       />
       <div class="share-dir-body" :class="{ 'is-sidebar-collapsed': !shareSidebarOpen }">
         <aside class="share-dir-sidebar">
-          <div class="sidebar-title">目录</div>
-          <DirTreeNav
-            v-if="shareSidebarOpen"
-            :nodes="content?.children || []"
-            :selected-id="selectedDoc?.id"
-            :expanded-ids="expandedDirIds"
-            @select="selectDoc"
-            @toggle-dir="toggleDirExpand"
-          />
+          <div v-if="shareSidebarOpen" class="share-tree-shell">
+            <div class="sidebar-title">文档树</div>
+            <div class="share-tree-search">
+              <svg class="share-tree-search-icon" width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M10.68 11.74a6 6 0 0 1-7.922-8.982 6 6 0 0 1 8.982 7.922l3.04 3.04a.749.749 0 0 1-.326 1.275.749.749 0 0 1-.734-.215ZM11.5 7a4.499 4.499 0 1 0-8.997 0A4.499 4.499 0 0 0 11.5 7Z"/></svg>
+              <input v-model="shareSearchQuery" class="share-tree-input" placeholder="搜索文档..." />
+              <button v-if="shareSearchQuery" class="share-tree-clear" @click="shareSearchQuery = ''">×</button>
+            </div>
+            <div class="share-tree-scroll">
+              <ShareTreeNav
+                v-if="filteredShareNodes.length"
+                :nodes="filteredShareNodes"
+                :selected-id="selectedDoc?.id"
+                :expanded-ids="expandedDirIds"
+                :force-expand="Boolean(shareSearchQuery)"
+                @select="selectDoc"
+                @toggle-dir="toggleDirExpand"
+              />
+              <div v-else class="share-tree-empty">
+                <svg width="28" height="28" viewBox="0 0 16 16" fill="var(--text3)"><path d="M10.68 11.74a6 6 0 0 1-7.922-8.982 6 6 0 0 1 8.982 7.922l3.04 3.04a.749.749 0 0 1-.326 1.275.749.749 0 0 1-.734-.215ZM11.5 7a4.499 4.499 0 1 0-8.997 0A4.499 4.499 0 0 0 11.5 7Z"/></svg>
+                <span>未找到 "{{ shareSearchQuery }}"</span>
+              </div>
+            </div>
+          </div>
         </aside>
         <main class="share-dir-content">
-          <div v-if="selectedDoc" class="preview-shell">
-            <VMdPreview class="share-preview" :text="selectedDoc.content || ''" />
-          </div>
+          <article v-if="selectedDoc" class="share-paper">
+            <div class="share-paper-head">
+              <div class="share-paper-kicker">SHARED NOTE</div>
+              <h1>{{ selectedDoc.name }}</h1>
+            </div>
+            <VditorPreview :markdown="selectedDoc.content || ''" />
+          </article>
           <div v-else class="dir-placeholder">
             <el-icon><Folder /></el-icon>
             <p>从左侧选择文档查看</p>
@@ -105,20 +134,11 @@
 </template>
 
 <script setup lang="ts">
-import { defineComponent, h, onMounted, ref } from 'vue'
-import VMdPreview from '@kangc/v-md-editor/lib/preview'
-import githubTheme from '@kangc/v-md-editor/lib/theme/github.js'
-import hljs from 'highlight.js'
-import '@kangc/v-md-editor/lib/style/preview.css'
-import '@kangc/v-md-editor/lib/theme/style/github.css'
+import { computed, defineComponent, h, onMounted, ref } from 'vue'
 import request from '@/utils/request'
 import { useRoute } from 'vue-router'
-
-const preview = VMdPreview as any
-if (!preview.__markflowConfigured) {
-  preview.use(githubTheme, { Hljs: hljs })
-  preview.__markflowConfigured = true
-}
+import VditorPreview from '@/components/VditorPreview.vue'
+import TreeNodeGlyph from '@/components/TreeNodeGlyph.vue'
 
 const route = useRoute()
 
@@ -147,9 +167,11 @@ const wrongPassword = ref(false)
 const selectedDoc = ref<ShareNode | null>(null)
 const shareToken = String(route.params.token || '')
 const shareSidebarOpen = ref(true)
+const shareSearchQuery = ref('')
 const expandedDirIds = ref<Set<number>>(new Set())
 const shareDirStateInitialized = ref(false)
 const hasDirExpansionPreference = ref(false)
+const readonlyExpandedIds = new Set<number>()
 
 const SHARE_PASSWORD_KEY_PREFIX = 'markflow.share.password.'
 const SHARE_UI_KEY_PREFIX = 'markflow.share.ui.'
@@ -224,7 +246,9 @@ function isShareExpired(expiresAt?: string | null): boolean {
 }
 
 function selectDoc(doc: ShareNode) {
-  selectedDoc.value = doc
+  if (doc.node_type === 'doc') {
+    selectedDoc.value = doc
+  }
 }
 
 function collectDirIds(nodes: ShareNode[], set: Set<number>) {
@@ -266,6 +290,33 @@ function toggleDirExpand(dirId: number) {
   expandedDirIds.value = next
   persistShareUiState()
 }
+
+function filterShareNodes(nodes: ShareNode[], q: string): ShareNode[] {
+  if (!q) return nodes
+  const lq = q.toLowerCase()
+
+  return nodes.flatMap((node) => {
+    const match = node.name.toLowerCase().includes(lq)
+    const children = filterShareNodes(node.children || [], q)
+
+    if (match) return [{ ...node, children: node.children || [] }]
+    if (children.length) return [{ ...node, children }]
+    return []
+  })
+}
+
+function findShareNodeById(nodes: ShareNode[], id: number): ShareNode | null {
+  for (const node of nodes) {
+    if (node.id === id) return node
+    const found = findShareNodeById(node.children || [], id)
+    if (found) return found
+  }
+  return null
+}
+
+const filteredShareNodes = computed(() =>
+  filterShareNodes(content.value?.children || [], shareSearchQuery.value.trim())
+)
 
 function firstDocFromTree(nodes: ShareNode[]): ShareNode | null {
   for (const node of nodes) {
@@ -324,9 +375,13 @@ async function loadContent(pw?: string) {
 
     if (data.node.node_type === 'dir') {
       syncExpandedDirState(data.node.children || [])
-      selectedDoc.value = firstDocFromTree(data.node.children || [])
+      const preservedSelectedId = selectedDoc.value?.id ?? null
+      selectedDoc.value =
+        (preservedSelectedId ? findShareNodeById(data.node.children || [], preservedSelectedId) : null) ||
+        firstDocFromTree(data.node.children || [])
       state.value = 'dir'
     } else {
+      selectedDoc.value = data.node
       state.value = 'doc'
     }
   } catch (err: any) {
@@ -414,21 +469,26 @@ const ShareHeader = defineComponent({
     }
 
     return () =>
-      h('header', { class: 'share-header' }, [
+        h('header', { class: 'share-header' }, [
         h('div', { class: 'sh-left' }, [
+          props.showSidebarToggle && h(
+            'button',
+            {
+              class: 'sh-sidebar-toggle',
+              title: props.sidebarOpen ? '收起目录' : '展开目录',
+              'aria-label': props.sidebarOpen ? '收起目录' : '展开目录',
+              onClick: () => emit('toggle-sidebar'),
+            },
+            h('svg', { width: '16', height: '16', viewBox: '0 0 16 16', fill: 'currentColor', 'aria-hidden': 'true' }, [
+              h('path', {
+                d: 'M1 2.75A.75.75 0 0 1 1.75 2h12.5a.75.75 0 0 1 0 1.5H1.75A.75.75 0 0 1 1 2.75Zm0 5A.75.75 0 0 1 1.75 7h12.5a.75.75 0 0 1 0 1.5H1.75A.75.75 0 0 1 1 7.75ZM1.75 12h12.5a.75.75 0 0 1 0 1.5H1.75a.75.75 0 0 1 0-1.5Z',
+              }),
+            ])
+          ),
           h('a', { href: '/', class: 'sh-brand' }, [h(MarkFlowLogo), h('span', 'MarkFlow')]),
           props.docName && h('span', { class: 'sh-doc-name' }, props.docName),
         ]),
         h('div', { class: 'sh-right' }, [
-          props.showSidebarToggle && h(
-            'button',
-            {
-              class: 'sh-toggle',
-              title: props.sidebarOpen ? '收起目录' : '展开目录',
-              onClick: () => emit('toggle-sidebar'),
-            },
-            props.sidebarOpen ? '收起目录' : '展开目录'
-          ),
           h('span', { class: 'sh-badge' }, '只读'),
           props.shareInfo?.expires_at && h('span', { class: 'sh-badge muted' }, formatExpiry(props.shareInfo.expires_at)),
         ]),
@@ -436,16 +496,18 @@ const ShareHeader = defineComponent({
   },
 })
 
-const DirTreeNav = defineComponent({
-  name: 'DirTreeNav',
+const ShareTreeNav = defineComponent({
+  name: 'ShareTreeNav',
   props: {
     nodes: { type: Array as () => ShareNode[], default: () => [] },
     selectedId: Number,
     expandedIds: { type: Object as () => Set<number>, required: true },
+    forceExpand: { type: Boolean, default: false },
+    depth: { type: Number, default: 0 },
   },
   emits: ['select', 'toggle-dir'],
   setup(props, { emit }) {
-    function renderNodes(nodes: ShareNode[]): any {
+    function renderNodes(nodes: ShareNode[], depth = 0): any {
       return nodes.map((node) => {
         if (node.node_type === 'dir') {
           const expanded = props.expandedIds.has(node.id)
@@ -453,27 +515,55 @@ const DirTreeNav = defineComponent({
             h(
               'div',
               {
-                class: ['nav-dir-label', { 'nav-dir-label--expanded': expanded }],
+                class: ['share-tree-node-row', 'is-dir', { 'is-selected': props.selectedId === node.id }],
+                style: { paddingLeft: `${8 + depth * 14}px` },
                 onClick: () => emit('toggle-dir', node.id),
               },
-              [h('span', { class: ['nav-icon', { 'nav-icon-expanded': expanded }] }, '▸'), h('span', { class: 'nav-dir-name' }, node.name)]
+              [
+                h(
+                  'span',
+                  { class: ['share-tree-expand', { expanded }] },
+                  h('svg', { width: '10', height: '10', viewBox: '0 0 16 16', fill: 'currentColor' }, [
+                    h('path', {
+                      d: 'M6.22 3.22a.75.75 0 0 1 1.06 0l4.25 4.25a.75.75 0 0 1 0 1.06l-4.25 4.25a.751.751 0 0 1-1.042-.018.751.751 0 0 1-.018-1.042L9.94 8 6.22 4.28a.75.75 0 0 1 0-1.06Z',
+                    }),
+                  ])
+                ),
+                h('span', { class: 'share-tree-node-icon' }, [
+                  h(TreeNodeGlyph, { kind: 'dir', expanded, active: props.selectedId === node.id, size: 18 }),
+                ]),
+                h('span', { class: 'share-tree-node-label' }, node.name),
+              ]
             ),
-            expanded && node.children?.length ? h('div', { class: 'nav-children' }, renderNodes(node.children)) : null,
+            (props.forceExpand || expanded) && node.children?.length
+              ? h('div', { class: 'share-tree-children' }, renderNodes(node.children, depth + 1))
+              : null,
           ])
         }
 
         return h(
           'div',
           {
-            class: ['nav-doc', { 'nav-doc--active': props.selectedId === node.id }],
+            class: ['share-tree-node-row', { 'is-selected': props.selectedId === node.id }],
+            style: { paddingLeft: `${22 + depth * 14}px` },
             onClick: () => emit('select', node),
           },
-          [h('span', { class: 'nav-icon' }, '•'), h('span', { class: 'nav-doc-name' }, node.name)]
+          [
+            h('span', { class: 'share-tree-node-icon' }, [
+              h(TreeNodeGlyph, {
+                kind: 'doc',
+                expanded: false,
+                active: props.selectedId === node.id,
+                size: 18,
+              }),
+            ]),
+            h('span', { class: 'share-tree-node-label' }, node.name),
+          ]
         )
       })
     }
 
-    return () => h('div', { class: 'dir-tree-nav' }, renderNodes(props.nodes))
+    return () => h('div', { class: 'share-tree-nav' }, renderNodes(props.nodes, props.depth))
   },
 })
 </script>
@@ -481,9 +571,12 @@ const DirTreeNav = defineComponent({
 <style scoped>
 .share-page {
   min-height: 100vh;
-  background: var(--bg);
+  background:
+    radial-gradient(circle at top left, rgba(198, 220, 181, 0.22), transparent 28%),
+    radial-gradient(circle at top right, rgba(240, 230, 190, 0.26), transparent 24%),
+    linear-gradient(180deg, #f7f9f3 0%, #eef3e7 100%);
   color: var(--text);
-  font-family: var(--font);
+  font-family: "Avenir Next", "PingFang SC", "Noto Sans SC", sans-serif;
 }
 
 .share-center {
@@ -516,13 +609,14 @@ const DirTreeNav = defineComponent({
   width: 64px;
   height: 64px;
   border-radius: 50%;
-  background: color-mix(in srgb, var(--bg3) 84%, transparent);
-  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.76);
+  border: 1px solid rgba(68, 82, 54, 0.1);
   display: flex;
   align-items: center;
   justify-content: center;
   font-size: 28px;
   color: var(--text3);
+  box-shadow: 0 18px 36px rgba(53, 64, 40, 0.08);
 }
 
 .state-icon.danger {
@@ -546,14 +640,15 @@ const DirTreeNav = defineComponent({
 .pw-card {
   width: 100%;
   max-width: 390px;
-  background: var(--bg2);
-  border: 1px solid var(--border);
-  border-radius: var(--r-lg);
+  background: rgba(255, 255, 255, 0.84);
+  border: 1px solid rgba(58, 72, 46, 0.08);
+  border-radius: 26px;
   padding: 36px 32px;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 14px;
+  box-shadow: 0 24px 50px rgba(52, 64, 38, 0.12);
 }
 
 .pw-logo {
@@ -590,12 +685,8 @@ const DirTreeNav = defineComponent({
 
 :deep(.share-header) {
   height: var(--header-height);
-  background: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--bg2) 92%, transparent) 0%,
-    color-mix(in srgb, var(--bg2) 78%, transparent) 100%
-  );
-  border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.84), rgba(248, 250, 242, 0.72));
+  border-bottom: 1px solid rgba(36, 48, 27, 0.08);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -603,6 +694,7 @@ const DirTreeNav = defineComponent({
   position: sticky;
   top: 0;
   z-index: 100;
+  backdrop-filter: blur(14px);
 }
 
 :deep(.sh-left) {
@@ -610,6 +702,35 @@ const DirTreeNav = defineComponent({
   align-items: center;
   gap: 16px;
   min-width: 0;
+}
+
+:deep(.sh-sidebar-toggle) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border: 1px solid rgba(72, 94, 58, 0.12);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.84);
+  color: var(--text2);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition:
+    border-color 0.12s ease,
+    background 0.12s ease,
+    color 0.12s ease,
+    transform 0.12s ease;
+}
+
+:deep(.sh-sidebar-toggle:hover) {
+  color: var(--text);
+  border-color: rgba(102, 143, 72, 0.32);
+  background: rgba(237, 244, 228, 0.96);
+}
+
+:deep(.sh-sidebar-toggle:active) {
+  transform: translateY(1px);
 }
 
 :deep(.sh-brand) {
@@ -627,7 +748,7 @@ const DirTreeNav = defineComponent({
   font-weight: 500;
   color: var(--text);
   padding-left: 16px;
-  border-left: 1px solid var(--border);
+  border-left: 1px solid rgba(57, 72, 40, 0.1);
   max-width: 420px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -640,29 +761,11 @@ const DirTreeNav = defineComponent({
   gap: 8px;
 }
 
-:deep(.sh-toggle) {
-  border: 1px solid var(--border);
-  background: var(--bg3);
-  color: var(--text2);
-  border-radius: 8px;
-  font-size: 12px;
-  line-height: 1;
-  padding: 6px 10px;
-  cursor: pointer;
-  transition: all 0.12s;
-}
-
-:deep(.sh-toggle:hover) {
-  color: var(--text);
-  border-color: var(--blue);
-  background: color-mix(in srgb, var(--blue) 12%, var(--bg3));
-}
-
 :deep(.sh-badge) {
   font-size: 11px;
-  padding: 3px 8px;
-  background: var(--bg3);
-  border: 1px solid var(--border);
+  padding: 5px 10px;
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid rgba(72, 94, 58, 0.1);
   border-radius: 20px;
   color: var(--text2);
 }
@@ -671,89 +774,13 @@ const DirTreeNav = defineComponent({
   color: var(--text3);
 }
 
-.share-doc-layout {
-  height: 100vh;
-  overflow: hidden;
-}
-
-.share-doc-body {
-  height: calc(100vh - var(--header-height));
-  display: grid;
-  grid-template-columns: 260px 1fr;
-  transition: grid-template-columns 0.18s ease;
-}
-
-.share-doc-body.is-sidebar-collapsed {
-  grid-template-columns: 0 1fr;
-}
-
-.share-doc-sidebar {
-  background: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--bg2) 94%, transparent) 0%,
-    color-mix(in srgb, var(--bg2) 84%, var(--bg)) 100%
-  );
-  border-right: 1px solid var(--border);
-  padding: 12px 10px;
-  min-width: 0;
-  overflow: hidden;
-  overflow-y: auto;
-}
-
-.doc-side-card {
-  background: var(--bg3);
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  padding: 10px 10px 9px;
-}
-
-.doc-side-name {
-  color: var(--text);
-  font-size: 13px;
-  font-weight: 600;
-  line-height: 1.3;
-  word-break: break-word;
-}
-
-.share-doc-content {
-  overflow-y: auto;
-  padding: 18px 20px 28px;
-}
-
-.preview-shell {
-  width: 100%;
-}
-
-:deep(.share-preview.v-md-editor-preview) {
-  border: none;
-  box-shadow: none;
-  background: transparent;
-}
-
-:deep(.share-preview .github-markdown-body) {
-  padding: 4px 2px 18px !important;
-  background: transparent !important;
-  color: var(--text) !important;
-  max-width: none !important;
-  margin: 0 !important;
-}
-
-:deep(.share-preview .github-markdown-body pre) {
-  border-radius: 10px;
-  border: 1px solid var(--border);
-  padding: 12px 14px !important;
-  background: var(--bg2);
-}
-
-:deep(.share-preview .github-markdown-body code) {
-  font-family: var(--mono);
-}
-
+.share-doc-layout,
 .share-dir-layout {
   height: 100vh;
   overflow: hidden;
 }
 
+.share-doc-body,
 .share-dir-body {
   height: calc(100vh - var(--header-height));
   display: grid;
@@ -761,18 +788,16 @@ const DirTreeNav = defineComponent({
   transition: grid-template-columns 0.18s ease;
 }
 
+.share-doc-body.is-sidebar-collapsed,
 .share-dir-body.is-sidebar-collapsed {
   grid-template-columns: 0 1fr;
 }
 
+.share-doc-sidebar,
 .share-dir-sidebar {
-  background: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--bg2) 94%, transparent) 0%,
-    color-mix(in srgb, var(--bg2) 84%, var(--bg)) 100%
-  );
-  border-right: 1px solid var(--border);
-  padding: 12px 10px;
+  background: linear-gradient(180deg, rgba(251, 253, 247, 0.8), rgba(242, 246, 236, 0.88));
+  border-right: 1px solid rgba(42, 56, 31, 0.08);
+  padding: 10px 8px 12px;
   min-width: 0;
   overflow: hidden;
   overflow-y: auto;
@@ -782,6 +807,7 @@ const DirTreeNav = defineComponent({
 .share-dir-body.is-sidebar-collapsed .share-dir-sidebar {
   padding: 0;
   border-right-color: transparent;
+  pointer-events: none;
 }
 
 .sidebar-title {
@@ -790,13 +816,125 @@ const DirTreeNav = defineComponent({
   letter-spacing: 0.7px;
   text-transform: uppercase;
   color: var(--text3);
-  padding: 0 6px;
-  margin-bottom: 10px;
+  padding: 0 8px;
+  margin-bottom: 12px;
 }
 
+.share-tree-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.share-tree-search {
+  position: relative;
+  padding: 0 4px 8px;
+  flex-shrink: 0;
+}
+
+.share-tree-search-icon {
+  position: absolute;
+  left: 14px;
+  top: 50%;
+  transform: translateY(-60%);
+  color: var(--text3);
+  pointer-events: none;
+}
+
+.share-tree-input {
+  width: 100%;
+  padding: 5px 24px 5px 26px;
+  background: rgba(240, 244, 235, 0.88);
+  border: 1px solid transparent;
+  border-radius: 10px;
+  color: var(--text2);
+  font-size: 12px;
+  outline: none;
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease,
+    color 0.15s ease;
+}
+
+.share-tree-input:focus {
+  border-color: rgba(111, 154, 79, 0.22);
+  background: rgba(248, 251, 243, 0.96);
+  color: var(--text);
+}
+
+.share-tree-input::placeholder {
+  color: var(--text3);
+}
+
+.share-tree-clear {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-60%);
+  border: none;
+  background: transparent;
+  color: var(--text3);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+}
+
+.share-tree-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 2px 6px;
+}
+
+.share-tree-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 36px 14px;
+  color: var(--text3);
+  font-size: 12px;
+  text-align: center;
+}
+
+.share-doc-content,
 .share-dir-content {
   overflow-y: auto;
-  padding: 18px 20px 28px;
+  padding: 24px 24px 40px;
+}
+
+.share-paper {
+  width: min(1440px, 100%);
+  margin: 0 auto;
+  padding: 30px 40px 42px;
+  border-radius: 30px;
+  border: 1px solid rgba(48, 62, 35, 0.08);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(252, 253, 248, 0.94));
+  box-shadow:
+    0 24px 60px rgba(49, 64, 39, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.66);
+}
+
+.share-paper-head {
+  padding-bottom: 18px;
+  margin-bottom: 22px;
+  border-bottom: 1px solid rgba(53, 67, 40, 0.08);
+}
+
+.share-paper-kicker {
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  color: #83907d;
+}
+
+.share-paper-head h1 {
+  margin: 10px 0 0;
+  font-size: 2rem;
+  line-height: 1.1;
+  color: #171b16;
+  letter-spacing: -0.02em;
 }
 
 .dir-placeholder {
@@ -815,101 +953,120 @@ const DirTreeNav = defineComponent({
   opacity: 0.45;
 }
 
+:deep(.share-tree-nav) {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
 :deep(.nav-dir) {
   margin-bottom: 2px;
 }
 
-:deep(.nav-dir-label) {
+:deep(.share-tree-node-row) {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 5px 6px;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text2);
-  border-radius: var(--r-sm);
-  cursor: pointer;
-  transition: background 0.12s;
-}
-
-:deep(.nav-dir-label:hover) {
-  background: color-mix(in srgb, var(--blue) 10%, transparent);
-}
-
-:deep(.nav-dir-name) {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-:deep(.nav-children) {
-  padding-left: 12px;
-}
-
-:deep(.nav-doc) {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 8px;
-  border-radius: var(--r-sm);
-  font-size: 13px;
+  min-height: 32px;
+  padding-right: 8px;
+  border-radius: 10px;
   cursor: pointer;
   color: var(--text);
-  transition: background 0.12s;
-  margin-bottom: 1px;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
 }
 
-:deep(.nav-doc:hover) {
-  background: color-mix(in srgb, var(--blue) 10%, transparent);
+:deep(.share-tree-node-row:hover) {
+  background: rgba(115, 153, 82, 0.12);
 }
 
-:deep(.nav-doc--active) {
-  background: var(--green-dim) !important;
-  color: var(--green3);
+:deep(.share-tree-node-row.is-selected) {
+  background: rgba(111, 154, 79, 0.18);
 }
 
-:deep(.nav-icon) {
-  font-size: 12px;
-  flex-shrink: 0;
+:deep(.share-tree-node-row.is-selected .share-tree-node-label) {
+  color: #35501f;
+  font-weight: 600;
+}
+
+:deep(.share-tree-expand) {
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   color: var(--text3);
-  transition: transform 0.12s;
+  flex-shrink: 0;
+  transition: transform 0.12s ease;
 }
 
-:deep(.nav-icon.nav-icon-expanded) {
+:deep(.share-tree-expand.expanded) {
   transform: rotate(90deg);
 }
 
-:deep(.nav-doc-name) {
+:deep(.share-tree-node-icon) {
+  width: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+:deep(.share-tree-node-label) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  min-width: 0;
+  font-size: 13px;
+}
+
+:deep(.share-tree-children) {
+  padding-left: 12px;
 }
 
 @media (max-width: 880px) {
-  .share-doc-body {
-    grid-template-columns: 1fr;
-    grid-template-rows: auto 1fr;
-  }
-
-  .share-doc-sidebar {
-    max-height: 26vh;
-    border-right: none;
-    border-bottom: 1px solid var(--border);
-  }
-
+  .share-doc-body,
   .share-dir-body {
     grid-template-columns: 1fr;
     grid-template-rows: auto 1fr;
   }
 
+  .share-doc-body.is-sidebar-collapsed,
+  .share-dir-body.is-sidebar-collapsed {
+    grid-template-columns: 1fr;
+    grid-template-rows: 0 1fr;
+  }
+
+  .share-doc-sidebar {
+    max-height: 26vh;
+    border-right: none;
+    border-bottom: 1px solid rgba(42, 56, 31, 0.08);
+  }
+
   .share-dir-sidebar {
     max-height: 36vh;
     border-right: none;
-    border-bottom: 1px solid var(--border);
+    border-bottom: 1px solid rgba(42, 56, 31, 0.08);
+  }
+
+  .share-doc-content,
+  .share-dir-content {
+    padding: 14px 14px 24px;
+  }
+
+  .share-paper {
+    width: 100%;
+    padding: 20px 18px 28px;
+    border-radius: 22px;
   }
 
   :deep(.sh-doc-name) {
     display: none;
+  }
+
+  :deep(.sh-right) {
+    gap: 6px;
   }
 }
 </style>

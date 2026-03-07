@@ -149,6 +149,7 @@
 import { computed, defineComponent, h, nextTick, onMounted, onUnmounted, ref, watch, type VNodeChild } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useDocsStore, type DocNode } from '@/stores/docs'
+import TreeNodeGlyph from '@/components/TreeNodeGlyph.vue'
 
 const docs = useDocsStore()
 const props = defineProps<{
@@ -679,19 +680,12 @@ const TreeNode: any = defineComponent({
           h(
             'span',
             { class: 'node-icon' },
-            isDir.value
-              ? h('svg', { width: '14', height: '14', viewBox: '0 0 16 16', fill: expanded.value ? '#e3b341' : '#a18735' }, [
-                  h('path', {
-                    d: expanded.value
-                      ? 'M.513 1.513A1.75 1.75 0 0 1 1.75 1h3.5c.55 0 1.07.26 1.4.7l.9 1.2a.25.25 0 0 0 .2.1H13.5A1.75 1.75 0 0 1 15.25 4.75v8a1.75 1.75 0 0 1-1.75 1.75H1.75A1.75 1.75 0 0 1 0 12.75V2.75c0-.464.184-.91.513-1.237Z'
-                      : 'M1.75 1A1.75 1.75 0 0 0 0 2.75v10.5C0 14.216.784 15 1.75 15h12.5A1.75 1.75 0 0 0 16 13.25v-8.5A1.75 1.75 0 0 0 14.25 3H7.5a.25.25 0 0 1-.2-.1l-.9-1.2C6.07 1.26 5.55 1 5 1Z',
-                  }),
-                ])
-              : h('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: isSelected ? 'var(--green3)' : 'var(--text3)' }, [
-                  h('path', {
-                    d: 'M2 1.75C2 .784 2.784 0 3.75 0h6.586c.464 0 .909.184 1.237.513l2.914 2.914c.329.328.513.773.513 1.237v9.586A1.75 1.75 0 0 1 13.25 16h-9.5A1.75 1.75 0 0 1 2 14.25Zm1.75-.25a.25.25 0 0 0-.25.25v12.5c0 .138.112.25.25.25h9.5a.25.25 0 0 0 .25-.25V6h-2.75A1.75 1.75 0 0 1 9 4.25V1.5Zm6.75.062V4.25c0 .138.112.25.25.25h2.688Z',
-                  }),
-                ])
+            h(TreeNodeGlyph, {
+              kind: isDir.value ? 'dir' : 'doc',
+              expanded: expanded.value,
+              active: isSelected,
+              size: 18,
+            })
           ),
 
           h('span', { class: 'node-label' }, node.name),
@@ -1002,7 +996,7 @@ const TreeNode: any = defineComponent({
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 16px;
+  width: 20px;
 }
 
 :deep(.node-label) {
