@@ -1,5 +1,5 @@
 <template>
-  <div class="sy-editor-shell">
+  <div class="sy-editor-shell" :class="{ 'is-fullscreen': isFullscreen }">
     <header class="sy-editor-header">
       <div class="sy-editor-header-inner">
         <div class="sy-doc-meta">
@@ -123,6 +123,7 @@ const isDirty = ref(false)
 const draft = ref(props.node.content || '')
 const assetUploadTask = ref<ManagedUploadTask | null>(null)
 const viewMode = ref<'source' | 'preview' | 'split'>('split')
+const isFullscreen = ref(false)
 let originalContent = props.node.content || ''
 let editor: Vditor | null = null
 let editorScrollEl: HTMLElement | null = null
@@ -227,6 +228,33 @@ function clearAssetUploadTask() {
   }
 }
 
+function syncFullscreenLock() {
+  document.body.classList.toggle('sy-editor-fullscreen-open', isFullscreen.value)
+  document.documentElement.classList.toggle('sy-editor-fullscreen-open', isFullscreen.value)
+}
+
+function fullscreenIconMarkup(active: boolean) {
+  return active
+    ? '<svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M5.25 2.75H2.75v2.5M10.75 2.75h2.5v2.5M5.25 13.25H2.75v-2.5M10.75 13.25h2.5v-2.5" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+    : '<svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M6 2.75H2.75V6M10 2.75h3.25V6M6 13.25H2.75V10M10 13.25h3.25V10" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+}
+
+function syncFullscreenToolbarButton() {
+  const button = editorRef.value?.querySelector('[data-type="sy-fullscreen"]') as HTMLElement | null
+  if (!button) return
+  button.innerHTML = fullscreenIconMarkup(isFullscreen.value)
+  button.setAttribute('aria-label', isFullscreen.value ? '退出全屏' : '进入全屏')
+}
+
+function toggleFullscreen() {
+  isFullscreen.value = !isFullscreen.value
+  syncFullscreenLock()
+  void nextTick().then(() => {
+    syncFullscreenToolbarButton()
+    bindScrollSync()
+  })
+}
+
 async function handleEditorUpload(files: File[]) {
   if (!editor) return '编辑器尚未完成初始化'
 
@@ -278,7 +306,15 @@ function buildToolbar() {
     '|',
     'undo',
     'redo',
-    'fullscreen',
+    {
+      name: 'sy-fullscreen',
+      tip: '进入全屏',
+      tipPosition: 'n',
+      icon: fullscreenIconMarkup(false),
+      click() {
+        toggleFullscreen()
+      },
+    },
   ] as const
 }
 
@@ -303,6 +339,10 @@ async function initEditor() {
     toolbar: buildToolbar() as unknown as any[],
     toolbarConfig: {
       pin: false,
+    },
+    resize: {
+      enable: false,
+      position: 'bottom',
     },
     counter: {
       enable: true,
@@ -342,6 +382,7 @@ async function initEditor() {
       syncDraftFromEditor()
       editor?.setPreviewMode('editor')
       void nextTick().then(() => {
+        syncFullscreenToolbarButton()
         bindScrollSync()
         syncPreviewScrollFromEditor()
       })
@@ -387,6 +428,11 @@ function handleSaveHotkey(event: KeyboardEvent) {
     event.preventDefault()
     void save()
   }
+
+  if (event.key === 'Escape' && isFullscreen.value) {
+    event.preventDefault()
+    toggleFullscreen()
+  }
 }
 
 watch(
@@ -424,6 +470,11 @@ watch(viewMode, async (mode) => {
   syncPreviewScrollFromEditor()
 })
 
+watch(isFullscreen, async () => {
+  await nextTick()
+  bindScrollSync()
+})
+
 onMounted(() => {
   void initEditor()
   window.addEventListener('beforeunload', handleBeforeUnload)
@@ -433,6 +484,10 @@ onMounted(() => {
 onUnmounted(() => {
   window.removeEventListener('beforeunload', handleBeforeUnload)
   window.removeEventListener('keydown', handleSaveHotkey)
+  if (isFullscreen.value) {
+    isFullscreen.value = false
+    syncFullscreenLock()
+  }
   editorScrollEl?.removeEventListener('scroll', syncPreviewScrollFromEditor)
   previewBodyRef.value?.removeEventListener('scroll', syncEditorScrollFromPreview)
   if (scrollUnlockFrame) {
@@ -447,6 +502,11 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+:global(html.sy-editor-fullscreen-open),
+:global(body.sy-editor-fullscreen-open) {
+  overflow: hidden;
+}
+
 .sy-editor-shell {
   --sy-paper: linear-gradient(180deg, #fbfdf8 0%, #f6f8ef 100%);
   --sy-line: rgba(31, 41, 27, 0.08);
@@ -467,6 +527,17 @@ onUnmounted(() => {
     radial-gradient(circle at top right, rgba(242, 235, 203, 0.36), transparent 28%),
     var(--sy-paper);
   color: var(--sy-text);
+}
+
+.sy-editor-shell.is-fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at top left, rgba(196, 214, 171, 0.24), transparent 36%),
+    radial-gradient(circle at top right, rgba(242, 235, 203, 0.36), transparent 28%),
+    var(--sy-paper);
 }
 
 .sy-editor-header {
@@ -681,6 +752,10 @@ onUnmounted(() => {
   padding: 20px 20px 26px;
 }
 
+.sy-editor-shell.is-fullscreen .sy-editor-stage {
+  padding: 12px 14px 16px;
+}
+
 .sy-editor-stage-inner {
   height: 100%;
   display: flex;
@@ -813,35 +888,187 @@ onUnmounted(() => {
 :deep(.vditor-toolbar) {
   position: relative;
   z-index: 1;
-  padding: 10px 14px;
+  display: flex;
+  align-items: center;
+  min-height: 54px;
+  padding: 0 18px 0 20px;
   border-bottom: none;
   background: transparent;
 }
 
 :deep(.vditor-toolbar__item) {
+  float: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 54px;
   color: var(--sy-text-soft);
 }
 
 :deep(.vditor-toolbar__item .vditor-tooltipped) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 30px;
   height: 30px;
   padding: 0;
   border-radius: 9px;
 }
 
-:deep(.vditor-toolbar__item:hover) {
+:deep(.vditor-toolbar__item .vditor-tooltipped::before) {
+  top: auto;
+  right: auto;
+  bottom: -5px;
+  left: 50%;
+  margin-right: 0;
+  margin-left: -5px;
+  color: rgba(33, 39, 28, 0.92);
+  border-top-color: transparent;
+  border-bottom-color: rgba(33, 39, 28, 0.92);
+}
+
+:deep(.vditor-toolbar__item .vditor-tooltipped::after) {
+  top: calc(100% + 9px);
+  right: auto;
+  bottom: auto;
+  left: 50%;
+  margin-right: 0;
+  margin-left: 0;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(33, 39, 28, 0.92);
+  color: #f7fbf3;
+  font-size: 11px;
+  line-height: 1.1;
+  white-space: nowrap;
+  box-shadow: 0 10px 22px rgba(28, 34, 24, 0.18);
+  transform: translateX(-50%);
+}
+
+:deep(.vditor-toolbar__item .vditor-panel),
+:deep(.vditor-toolbar__item .vditor-panel.vditor-panel--left),
+:deep(.vditor-toolbar__item .vditor-hint) {
+  top: calc(100% + 8px) !important;
+  left: 0;
+  right: auto;
+  z-index: 8;
+}
+
+:deep(.vditor-toolbar__item .vditor-panel.vditor-panel--arrow::before),
+:deep(.vditor-toolbar__item .vditor-panel.vditor-panel--left.vditor-panel--arrow::before),
+:deep(.vditor-toolbar__item .vditor-hint.vditor-panel--arrow::before) {
+  top: -14px;
+  left: 18px;
+  right: auto;
+}
+
+:deep(.vditor-toolbar__item .vditor-hint) {
+  min-width: 188px;
+  padding: 6px 0;
+  border-radius: 12px;
+  font-size: 13px;
+  line-height: 1.35;
+  box-shadow: 0 16px 30px rgba(34, 42, 28, 0.14);
+}
+
+:deep(.vditor-toolbar__item .vditor-hint button) {
+  padding: 8px 14px;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+:deep(.vditor-toolbar__item .vditor-menu--current.vditor-tooltipped::before),
+:deep(.vditor-toolbar__item .vditor-menu--current.vditor-tooltipped::after) {
+  display: none !important;
+}
+
+:deep(.vditor-toolbar__item:first-child .vditor-tooltipped::before) {
+  top: calc(100% + 4px);
+  right: auto;
+  bottom: auto;
+  left: 12px;
+  margin-left: 0;
+  display: block;
+}
+
+:deep(.vditor-toolbar__item:first-child .vditor-tooltipped::after) {
+  top: calc(100% + 9px);
+  right: auto;
+  bottom: auto;
+  left: 0;
+  transform: none;
+}
+
+:deep(.vditor-toolbar__item .vditor-tooltipped:hover),
+:deep(.vditor-toolbar__item .vditor-tooltipped:focus-visible) {
   background: rgba(111, 154, 79, 0.12);
   color: var(--sy-text);
 }
 
+:deep(.vditor-toolbar__item svg) {
+  width: 16px;
+  height: 16px;
+  transform-origin: center;
+}
+
+:deep(.vditor-toolbar__item [data-type='emoji'] svg) {
+  transform: scale(0.94);
+}
+
+:deep(.vditor-toolbar__item [data-type='headings'] svg),
+:deep(.vditor-toolbar__item [data-type='bold'] svg),
+:deep(.vditor-toolbar__item [data-type='italic'] svg),
+:deep(.vditor-toolbar__item [data-type='strike'] svg) {
+  transform: scale(0.86);
+}
+
+:deep(.vditor-toolbar__item [data-type='link'] svg),
+:deep(.vditor-toolbar__item [data-type='upload'] svg) {
+  transform: scale(0.94);
+}
+
+:deep(.vditor-toolbar__item [data-type='list'] svg),
+:deep(.vditor-toolbar__item [data-type='ordered-list'] svg),
+:deep(.vditor-toolbar__item [data-type='check'] svg),
+:deep(.vditor-toolbar__item [data-type='quote'] svg),
+:deep(.vditor-toolbar__item [data-type='line'] svg),
+:deep(.vditor-toolbar__item [data-type='code'] svg),
+:deep(.vditor-toolbar__item [data-type='inline-code'] svg),
+:deep(.vditor-toolbar__item [data-type='table'] svg),
+:deep(.vditor-toolbar__item [data-type='undo'] svg),
+:deep(.vditor-toolbar__item [data-type='redo'] svg),
+:deep(.vditor-toolbar__item [data-type='sy-fullscreen'] svg) {
+  transform: scale(1.04);
+}
+
+:deep(.vditor-toolbar__item [data-type='sy-fullscreen']) {
+  width: 32px;
+  height: 32px;
+}
+
+:deep(.vditor-toolbar__item [data-type='sy-fullscreen'] svg) {
+  width: 15px;
+  height: 15px;
+  transform: none;
+}
+
 :deep(.vditor-toolbar__divider) {
+  align-self: center;
+  height: 24px;
+  margin: 0 10px;
   border-left-color: rgba(88, 100, 75, 0.16);
 }
 
 :deep(.vditor-toolbar__item--current),
-:deep(.vditor-toolbar__item--current:hover) {
+:deep(.vditor-toolbar__item--current:hover),
+:deep(.vditor-toolbar__item--current .vditor-tooltipped),
+:deep(.vditor-toolbar__item--current .vditor-tooltipped:hover) {
   background: rgba(111, 154, 79, 0.18);
   color: #35501f;
+}
+
+:deep(.vditor-resize) {
+  display: none !important;
 }
 
 :deep(.vditor-content) {
@@ -861,9 +1088,16 @@ onUnmounted(() => {
 }
 
 :deep(.vditor-counter) {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 36px;
+  height: 28px;
   color: var(--sy-text-faint);
   background: rgba(255, 255, 255, 0.74);
-  margin: 12px 12px 0 0;
+  margin: 0 12px 0 auto;
+  border-radius: 8px;
 }
 
 @media (max-width: 980px) {

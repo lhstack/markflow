@@ -165,6 +165,7 @@ const password = ref('')
 const verifying = ref(false)
 const wrongPassword = ref(false)
 const selectedDoc = ref<ShareNode | null>(null)
+const persistedSelectedDocId = ref<number | null>(null)
 const shareToken = String(route.params.token || '')
 const shareSidebarOpen = ref(true)
 const shareSearchQuery = ref('')
@@ -200,16 +201,32 @@ function loadShareUiState() {
   shareSidebarOpen.value = true
   expandedDirIds.value = new Set()
   hasDirExpansionPreference.value = false
+  persistedSelectedDocId.value = null
   try {
     const raw = localStorage.getItem(getShareUiKey(shareToken))
     if (!raw) return
-    const parsed = JSON.parse(raw) as { sidebar_open?: boolean; expanded_dir_ids?: number[] }
+    const parsed = JSON.parse(raw) as {
+      sidebar_open?: boolean
+      expanded_dir_ids?: number[]
+      selected_doc_id?: number | string | null
+    }
     if (typeof parsed.sidebar_open === 'boolean') {
       shareSidebarOpen.value = parsed.sidebar_open
     }
     if (Array.isArray(parsed.expanded_dir_ids)) {
       expandedDirIds.value = new Set(parsed.expanded_dir_ids.filter((id) => typeof id === 'number'))
       hasDirExpansionPreference.value = true
+    }
+    if (
+      typeof parsed.selected_doc_id === 'number' && Number.isInteger(parsed.selected_doc_id)
+    ) {
+      persistedSelectedDocId.value = parsed.selected_doc_id
+    } else if (
+      typeof parsed.selected_doc_id === 'string' &&
+      parsed.selected_doc_id.trim() &&
+      Number.isInteger(Number(parsed.selected_doc_id))
+    ) {
+      persistedSelectedDocId.value = Number(parsed.selected_doc_id)
     }
   } catch {
     // ignore invalid cache
@@ -222,6 +239,7 @@ function persistShareUiState() {
     JSON.stringify({
       sidebar_open: shareSidebarOpen.value,
       expanded_dir_ids: Array.from(expandedDirIds.value),
+      selected_doc_id: selectedDoc.value?.id ?? persistedSelectedDocId.value ?? null,
     })
   )
 }
@@ -248,6 +266,8 @@ function isShareExpired(expiresAt?: string | null): boolean {
 function selectDoc(doc: ShareNode) {
   if (doc.node_type === 'doc') {
     selectedDoc.value = doc
+    persistedSelectedDocId.value = doc.id
+    persistShareUiState()
   }
 }
 
@@ -375,13 +395,17 @@ async function loadContent(pw?: string) {
 
     if (data.node.node_type === 'dir') {
       syncExpandedDirState(data.node.children || [])
-      const preservedSelectedId = selectedDoc.value?.id ?? null
+      const preservedSelectedId = persistedSelectedDocId.value ?? selectedDoc.value?.id ?? null
       selectedDoc.value =
         (preservedSelectedId ? findShareNodeById(data.node.children || [], preservedSelectedId) : null) ||
         firstDocFromTree(data.node.children || [])
+      persistedSelectedDocId.value = selectedDoc.value?.id ?? null
+      persistShareUiState()
       state.value = 'dir'
     } else {
       selectedDoc.value = data.node
+      persistedSelectedDocId.value = data.node.id
+      persistShareUiState()
       state.value = 'doc'
     }
   } catch (err: any) {

@@ -41,6 +41,35 @@ fn is_expired(expires_at: &Option<String>) -> bool {
     }
 }
 
+async fn delete_share_ids(db: &Database, share_ids: &[i64]) {
+    for share_id in share_ids {
+        if let Err(err) = sqlx::query("DELETE FROM shares WHERE id = ?")
+            .bind(share_id)
+            .execute(&db.pool)
+            .await
+        {
+            tracing::warn!("delete expired share {} failed: {}", share_id, err);
+        }
+    }
+}
+
+async fn cleanup_expired_doc_shares(db: &Database, user_id: i64, doc_id: i64) {
+    let shares: Vec<Share> = sqlx::query_as("SELECT * FROM shares WHERE user_id = ? AND doc_id = ?")
+        .bind(user_id)
+        .bind(doc_id)
+        .fetch_all(&db.pool)
+        .await
+        .unwrap_or_default();
+
+    let expired_ids: Vec<i64> = shares
+        .into_iter()
+        .filter(|share| is_expired(&share.expires_at))
+        .map(|share| share.id)
+        .collect();
+
+    delete_share_ids(db, &expired_ids).await;
+}
+
 #[derive(Deserialize)]
 pub struct CreateShareRequest {
     pub doc_id: i64,
@@ -79,6 +108,8 @@ pub async fn create_share(
         )
             .into_response();
     }
+
+    cleanup_expired_doc_shares(&db, claims.sub, body.doc_id).await;
 
     let token = generate_token();
     let password_hash = body.password.as_ref().map(|p| bcrypt::hash(p, 10).unwrap());
@@ -134,7 +165,19 @@ pub async fn list_shares(
     .await
     .unwrap_or_default();
 
-    let responses: Vec<ShareResponse> = shares.into_iter().map(ShareResponse::from).collect();
+    let mut expired_ids = Vec::new();
+    let mut active_shares = Vec::new();
+    for share in shares {
+        if is_expired(&share.expires_at) {
+            expired_ids.push(share.id);
+        } else {
+            active_shares.push(share);
+        }
+    }
+
+    delete_share_ids(&db, &expired_ids).await;
+
+    let responses: Vec<ShareResponse> = active_shares.into_iter().map(ShareResponse::from).collect();
     Json(json!({"shares": responses})).into_response()
 }
 
@@ -194,6 +237,7 @@ pub async fn get_share(
     };
 
     if is_expired(&share.expires_at) {
+        delete_share_ids(&db, &[share.id]).await;
         return (
             StatusCode::GONE,
             Json(json!({"error": "Share link expired"})),
@@ -258,6 +302,7 @@ pub async fn verify_share(
     };
 
     if is_expired(&share.expires_at) {
+        delete_share_ids(&db, &[share.id]).await;
         return (
             StatusCode::GONE,
             Json(json!({"error": "Share link expired"})),
@@ -304,6 +349,7 @@ pub async fn get_share_content(
     };
 
     if is_expired(&share.expires_at) {
+        delete_share_ids(&db, &[share.id]).await;
         return (
             StatusCode::GONE,
             Json(json!({"error": "Share link expired"})),
