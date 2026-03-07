@@ -35,6 +35,8 @@ struct FileConfig {
     jwt_secret: Option<String>,
     rust_log: Option<String>,
     upload_dir: Option<String>,
+    registration_enabled: Option<bool>,
+    upload_max_mb: Option<u64>,
     log_to_file: Option<bool>,
     log_dir: Option<String>,
     log_file_name: Option<String>,
@@ -356,6 +358,13 @@ async fn main() -> anyhow::Result<()> {
         "markflow_dev_secret_change_in_production",
     );
     let upload_dir = cfg_val("UPLOAD_DIR", file_cfg.upload_dir, "uploads");
+    let registration_enabled = cfg_bool(
+        "REGISTRATION_ENABLED",
+        file_cfg.registration_enabled,
+        true,
+    );
+    let upload_max_mb = cfg_u64("UPLOAD_MAX_MB", file_cfg.upload_max_mb, 20);
+    let upload_max_bytes = (upload_max_mb.saturating_mul(1024 * 1024)) as i64;
 
     let log_to_file = cfg_bool("LOG_TO_FILE", file_cfg.log_to_file, false);
     let log_dir = cfg_val("LOG_DIR", file_cfg.log_dir, "logs");
@@ -403,10 +412,12 @@ async fn main() -> anyhow::Result<()> {
     }
 
     tracing::info!(
-        "Resolved config: port={}, database={}, upload_dir={}, log_to_file={}, log_dir={}, file={}, rotate_size_mb={}, rotate_days={}, keep_days={}",
+        "Resolved config: port={}, database={}, upload_dir={}, registration_enabled={}, upload_max_mb={}, log_to_file={}, log_dir={}, file={}, rotate_size_mb={}, rotate_days={}, keep_days={}",
         port,
         database_url,
         upload_dir,
+        registration_enabled,
+        upload_max_mb,
         log_to_file,
         log_dir,
         log_file_name,
@@ -417,6 +428,17 @@ async fn main() -> anyhow::Result<()> {
 
     let db = Database::new(&database_url).await?;
     db.migrate().await?;
+    let settings = db
+        .bootstrap_system_settings(registration_enabled, upload_max_bytes)
+        .await?;
+    tracing::info!(
+        "System settings loaded: registration_enabled={}, upload_max_bytes={}",
+        settings.registration_enabled == 1,
+        settings.upload_max_bytes
+    );
+    if let Some(password) = db.ensure_super_admin().await? {
+        tracing::warn!("Initialized super admin account: username=admin password={}", password);
+    }
     let db = Arc::new(db);
 
     let cors = CorsLayer::new()
@@ -426,6 +448,7 @@ async fn main() -> anyhow::Result<()> {
 
     let api = Router::new()
         .route("/auth/captcha", get(routes::auth::get_captcha))
+        .route("/auth/public-settings", get(routes::admin::get_public_settings))
         .route("/auth/register", post(routes::auth::register))
         .route("/auth/login", post(routes::auth::login))
         .route("/auth/login/2fa", post(routes::auth::login_2fa))
@@ -468,6 +491,15 @@ async fn main() -> anyhow::Result<()> {
         .route("/s/:token", get(routes::shares::get_share))
         .route("/s/:token/verify", post(routes::shares::verify_share))
         .route("/s/:token/content", get(routes::shares::get_share_content));
+
+    let api = api
+        .route("/admin/system-settings", get(routes::admin::get_system_settings).put(routes::admin::update_system_settings))
+        .route("/admin/users", get(routes::admin::list_users).post(routes::admin::create_user))
+        .route("/admin/users/:id", delete(routes::admin::delete_user))
+        .route("/admin/users/:id/status", put(routes::admin::update_user_status))
+        .route("/admin/users/:id/password", put(routes::admin::reset_user_password))
+        .route("/admin/users/:id/2fa", put(routes::admin::update_user_2fa))
+        .route("/admin/users/:id/export", get(routes::admin::export_user_data));
 
     let app = Router::new()
         .route("/uploads/files/:id", get(routes::uploads::serve_upload))

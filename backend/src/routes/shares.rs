@@ -82,21 +82,15 @@ pub async fn create_share(
     headers: HeaderMap,
     Json(body): Json<CreateShareRequest>,
 ) -> impl IntoResponse {
-    let claims = match auth::extract_user_id(&headers) {
-        Some(c) => c,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "Unauthorized"})),
-            )
-                .into_response()
-        }
+    let user = match auth::require_user(&db, &headers).await {
+        Ok(user) => user,
+        Err(resp) => return resp,
     };
 
     let doc_exists: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM doc_nodes WHERE id = ? AND user_id = ?)")
             .bind(body.doc_id)
-            .bind(claims.sub)
+            .bind(user.id)
             .fetch_one(&db.pool)
             .await
             .unwrap_or(false);
@@ -109,7 +103,7 @@ pub async fn create_share(
             .into_response();
     }
 
-    cleanup_expired_doc_shares(&db, claims.sub, body.doc_id).await;
+    cleanup_expired_doc_shares(&db, user.id, body.doc_id).await;
 
     let token = generate_token();
     let password_hash = body.password.as_ref().map(|p| bcrypt::hash(p, 10).unwrap());
@@ -117,7 +111,7 @@ pub async fn create_share(
     let share_id = sqlx::query(
         "INSERT INTO shares (user_id, doc_id, token, password_hash, expires_at) VALUES (?, ?, ?, ?, ?)",
     )
-    .bind(claims.sub)
+    .bind(user.id)
     .bind(body.doc_id)
     .bind(&token)
     .bind(&password_hash)
@@ -145,22 +139,16 @@ pub async fn list_shares(
     headers: HeaderMap,
     Path(doc_id): Path<i64>,
 ) -> impl IntoResponse {
-    let claims = match auth::extract_user_id(&headers) {
-        Some(c) => c,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "Unauthorized"})),
-            )
-                .into_response()
-        }
+    let user = match auth::require_user(&db, &headers).await {
+        Ok(user) => user,
+        Err(resp) => return resp,
     };
 
     let shares: Vec<Share> = sqlx::query_as(
         "SELECT * FROM shares WHERE doc_id = ? AND user_id = ? ORDER BY created_at DESC",
     )
     .bind(doc_id)
-    .bind(claims.sub)
+    .bind(user.id)
     .fetch_all(&db.pool)
     .await
     .unwrap_or_default();
@@ -186,20 +174,14 @@ pub async fn delete_share(
     headers: HeaderMap,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
-    let claims = match auth::extract_user_id(&headers) {
-        Some(c) => c,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "Unauthorized"})),
-            )
-                .into_response()
-        }
+    let user = match auth::require_user(&db, &headers).await {
+        Ok(user) => user,
+        Err(resp) => return resp,
     };
 
     let result = sqlx::query("DELETE FROM shares WHERE id = ? AND user_id = ?")
         .bind(id)
-        .bind(claims.sub)
+        .bind(user.id)
         .execute(&db.pool)
         .await
         .unwrap();

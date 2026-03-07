@@ -11,6 +11,12 @@ rust_log = "markflow=info,tower_http=warn"
 # Upload root directory (relative to working dir or absolute path)
 upload_dir = "uploads"
 
+# Whether new user registration is enabled
+registration_enabled = true
+
+# Maximum upload size per file (MB)
+upload_max_mb = 20
+
 # Logging file output
 # Enable file logging: true/false
 log_to_file = true

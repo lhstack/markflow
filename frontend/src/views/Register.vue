@@ -16,72 +16,78 @@
       </div>
       
       <div class="auth-card">
-        <h2 class="auth-title">创建账号</h2>
-        <p class="auth-subtitle">开始你的文档管理之旅</p>
+        <template v-if="system.registrationEnabled">
+          <h2 class="auth-title">创建账号</h2>
+          <p class="auth-subtitle">开始你的文档管理之旅</p>
 
-        <div class="avatar-picker">
-          <div class="avatar-preview" @click="triggerFileInput">
-            <img v-if="avatarPreview" :src="avatarPreview" class="avatar-img" />
-            <el-icon v-else class="avatar-icon"><Camera /></el-icon>
-            <div class="avatar-overlay">
-              <el-icon><Camera /></el-icon>
+          <div class="avatar-picker">
+            <div class="avatar-preview" @click="triggerFileInput">
+              <img v-if="avatarPreview" :src="avatarPreview" class="avatar-img" />
+              <el-icon v-else class="avatar-icon"><Camera /></el-icon>
+              <div class="avatar-overlay">
+                <el-icon><Camera /></el-icon>
+              </div>
             </div>
+            <input ref="fileInput" type="file" accept="image/*" @change="handleAvatarChange" style="display: none" />
+            <p class="avatar-hint">点击上传头像（可选），最大 {{ system.uploadLimitLabel }}</p>
+            <el-progress
+              v-if="avatarUploadTask && avatarUploadTask.status === 'uploading'"
+              :percentage="avatarUploadTask.progress"
+              :stroke-width="8"
+            />
+            <p v-if="avatarUploadTask && avatarUploadTask.status === 'error'" class="avatar-error">
+              {{ avatarUploadTask.error || '上传失败' }}
+            </p>
           </div>
-          <input ref="fileInput" type="file" accept="image/*" @change="handleAvatarChange" style="display: none" />
-          <p class="avatar-hint">点击上传头像（可选）</p>
-          <el-progress
-            v-if="avatarUploadTask && avatarUploadTask.status === 'uploading'"
-            :percentage="avatarUploadTask.progress"
-            :stroke-width="8"
-          />
-          <p v-if="avatarUploadTask && avatarUploadTask.status === 'error'" class="avatar-error">
-            {{ avatarUploadTask.error || '上传失败' }}
-          </p>
-        </div>
 
-        <el-form :model="form" @submit.prevent="handleRegister" class="auth-form">
-          <el-form-item>
-            <el-input
-              v-model="form.username"
-              placeholder="用户名 (3-32位)"
-              size="large"
-              prefix-icon="User"
-            />
-          </el-form-item>
-          
-          <el-form-item>
-            <el-input
-              v-model="form.password"
-              type="password"
-              placeholder="密码 (至少6位)"
-              size="large"
-              prefix-icon="Lock"
-              show-password
-            />
-          </el-form-item>
+          <el-form :model="form" @submit.prevent="handleRegister" class="auth-form">
+            <el-form-item>
+              <el-input
+                v-model="form.username"
+                placeholder="用户名 (3-32位)"
+                size="large"
+                prefix-icon="User"
+              />
+            </el-form-item>
+            
+            <el-form-item>
+              <el-input
+                v-model="form.password"
+                type="password"
+                placeholder="密码 (至少6位)"
+                size="large"
+                prefix-icon="Lock"
+                show-password
+              />
+            </el-form-item>
 
-          <el-form-item>
-            <el-input
-              v-model="form.confirm"
-              type="password"
-              placeholder="确认密码"
-              size="large"
-              prefix-icon="Lock"
-              show-password
-            />
-          </el-form-item>
+            <el-form-item>
+              <el-input
+                v-model="form.confirm"
+                type="password"
+                placeholder="确认密码"
+                size="large"
+                prefix-icon="Lock"
+                show-password
+              />
+            </el-form-item>
 
-          <el-button
-            type="primary"
-            size="large"
-            class="auth-submit"
-            :loading="loading"
-            native-type="submit"
-            @click="handleRegister"
-          >
-            注册
-          </el-button>
-        </el-form>
+            <el-button
+              type="primary"
+              size="large"
+              class="auth-submit"
+              :loading="loading"
+              native-type="submit"
+              @click="handleRegister"
+            >
+              注册
+            </el-button>
+          </el-form>
+        </template>
+        <template v-else>
+          <h2 class="auth-title">注册已关闭</h2>
+          <p class="auth-subtitle">当前系统不允许新用户注册，请联系管理员。</p>
+        </template>
 
         <div class="auth-footer">
           已有账号？
@@ -93,16 +99,19 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
 import { createManagedUploadTask, removeManagedUpload, type ManagedUploadTask } from '@/utils/managedUploads'
 import request from '@/utils/request'
 import { uploadImage } from '@/utils/uploads'
+import { useSystemStore } from '@/stores/system'
+import { mapAuthErrorMessage } from '@/utils/authErrors'
 
 const router = useRouter()
 const auth = useAuthStore()
+const system = useSystemStore()
 const loading = ref(false)
 const avatarPreview = ref('')
 const avatarFile = ref<File | null>(null)
@@ -126,8 +135,8 @@ function handleAvatarChange(e: Event) {
     ElMessage.warning('请选择图片文件')
     return
   }
-  if (file.size > 2 * 1024 * 1024) {
-    ElMessage.warning('头像文件不能超过2MB')
+  if (file.size > system.uploadMaxBytes) {
+    ElMessage.warning(`头像文件不能超过 ${system.uploadLimitLabel}`)
     return
   }
   avatarFile.value = file
@@ -144,6 +153,10 @@ function handleAvatarChange(e: Event) {
 }
 
 async function handleRegister() {
+  if (!system.registrationEnabled) {
+    ElMessage.warning('当前已关闭注册功能')
+    return
+  }
   if (!form.value.username || !form.value.password) {
     ElMessage.warning('请填写必要信息')
     return
@@ -169,18 +182,22 @@ async function handleRegister() {
         const updated = await request.put('/auth/profile', { avatar: avatarUrl }) as any
         auth.updateUser({ avatar: updated.user.avatar })
       } catch (uploadErr: any) {
-        ElMessage.warning(uploadErr.response?.data?.error || '账号已创建，但头像上传失败')
+        ElMessage.warning(mapAuthErrorMessage(uploadErr.response?.data?.error, '账号已创建，但头像上传失败'))
       }
     }
 
     ElMessage.success('注册成功！')
     router.push('/')
   } catch (err: any) {
-    ElMessage.error(err.response?.data?.error || '注册失败')
+    ElMessage.error(mapAuthErrorMessage(err.response?.data?.error, '注册失败'))
   } finally {
     loading.value = false
   }
 }
+
+onMounted(() => {
+  void system.fetchPublicSettings().catch(() => {})
+})
 </script>
 
 <style scoped>

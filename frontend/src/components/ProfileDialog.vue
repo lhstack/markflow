@@ -96,6 +96,7 @@ import { ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Camera, UserFilled } from '@element-plus/icons-vue'
 import { useAuthStore } from '@/stores/auth'
+import { useSystemStore } from '@/stores/system'
 import request from '@/utils/request'
 import { createManagedUploadTask, removeManagedUpload, type ManagedUploadTask } from '@/utils/managedUploads'
 import { uploadImage } from '@/utils/uploads'
@@ -110,6 +111,7 @@ watch(() => props.modelValue, (v) => {
 watch(visible, (v) => emit('update:modelValue', v))
 
 const auth = useAuthStore()
+const system = useSystemStore()
 const fileInput = ref<HTMLInputElement>()
 const avatarPreview = ref('')
 const avatarChanged = ref(false)
@@ -134,8 +136,8 @@ function handleAvatarChange(e: Event) {
     ElMessage.warning('请选择图片文件')
     return
   }
-  if (file.size > 2 * 1024 * 1024) {
-    ElMessage.warning('头像文件不能超过2MB')
+  if (file.size > system.uploadMaxBytes) {
+    ElMessage.warning(`头像文件不能超过 ${system.uploadLimitLabel}`)
     return
   }
 

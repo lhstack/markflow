@@ -121,6 +121,26 @@ pub async fn register(
     Extension(db): Extension<Arc<Database>>,
     Json(body): Json<RegisterRequest>,
 ) -> impl IntoResponse {
+    let settings = match db.get_system_settings().await {
+        Ok(settings) => settings,
+        Err(err) => {
+            tracing::error!("load system settings for register failed: {}", err);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "Failed to load system settings"})),
+            )
+                .into_response();
+        }
+    };
+
+    if settings.registration_enabled != 1 {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "Registration is disabled"})),
+        )
+            .into_response();
+    }
+
     let username = body.username.trim().to_string();
     if username.len() < 3 || username.len() > 32 {
         return (
@@ -216,6 +236,14 @@ pub async fn login(
         }
     };
 
+    if user.is_active != 1 {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "User is disabled"})),
+        )
+            .into_response();
+    }
+
     if !bcrypt::verify(&body.password, &user.password_hash).unwrap_or(false) {
         return (
             StatusCode::UNAUTHORIZED,
@@ -300,6 +328,15 @@ pub async fn login_2fa(
         }
     };
 
+    if user.is_active != 1 {
+        clear_twofa_challenge(&body.challenge_id).await;
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "User is disabled"})),
+        )
+            .into_response();
+    }
+
     if user.totp_enabled != 1 {
         clear_twofa_challenge(&body.challenge_id).await;
         return (
@@ -326,30 +363,9 @@ pub async fn login_2fa(
 }
 
 pub async fn me(Extension(db): Extension<Arc<Database>>, headers: HeaderMap) -> impl IntoResponse {
-    let claims = match auth::extract_user_id(&headers) {
-        Some(c) => c,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "Unauthorized"})),
-            )
-                .into_response()
-        }
-    };
-
-    let user: Option<User> = sqlx::query_as("SELECT * FROM users WHERE id = ?")
-        .bind(&claims.sub)
-        .fetch_optional(&db.pool)
-        .await
-        .unwrap();
-
-    match user {
-        Some(u) => Json(json!({"user": UserInfo::from(u)})).into_response(),
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "User not found"})),
-        )
-            .into_response(),
+    match auth::require_user(&db, &headers).await {
+        Ok(user) => Json(json!({"user": UserInfo::from(user)})).into_response(),
+        Err(resp) => resp,
     }
 }
 
@@ -363,26 +379,20 @@ pub async fn update_profile(
     headers: HeaderMap,
     Json(body): Json<UpdateProfileRequest>,
 ) -> impl IntoResponse {
-    let claims = match auth::extract_user_id(&headers) {
-        Some(c) => c,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "Unauthorized"})),
-            )
-                .into_response()
-        }
+    let user = match auth::require_user(&db, &headers).await {
+        Ok(user) => user,
+        Err(resp) => return resp,
     };
 
-    sqlx::query("UPDATE users SET avatar = ? WHERE id = ?")
+    sqlx::query("UPDATE users SET avatar = ?, updated_at = datetime('now') WHERE id = ?")
         .bind(&body.avatar)
-        .bind(&claims.sub)
+        .bind(user.id)
         .execute(&db.pool)
         .await
         .unwrap();
 
     let user: User = sqlx::query_as("SELECT * FROM users WHERE id = ?")
-        .bind(&claims.sub)
+        .bind(user.id)
         .fetch_one(&db.pool)
         .await
         .unwrap();
@@ -401,22 +411,10 @@ pub async fn change_password(
     headers: HeaderMap,
     Json(body): Json<ChangePasswordRequest>,
 ) -> impl IntoResponse {
-    let claims = match auth::extract_user_id(&headers) {
-        Some(c) => c,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "Unauthorized"})),
-            )
-                .into_response()
-        }
+    let user = match auth::require_user(&db, &headers).await {
+        Ok(user) => user,
+        Err(resp) => return resp,
     };
-
-    let user: User = sqlx::query_as("SELECT * FROM users WHERE id = ?")
-        .bind(&claims.sub)
-        .fetch_one(&db.pool)
-        .await
-        .unwrap();
 
     if !bcrypt::verify(&body.old_password, &user.password_hash).unwrap_or(false) {
         return (
@@ -435,9 +433,9 @@ pub async fn change_password(
     }
 
     let new_hash = bcrypt::hash(&body.new_password, 10).unwrap();
-    sqlx::query("UPDATE users SET password_hash = ? WHERE id = ?")
+    sqlx::query("UPDATE users SET password_hash = ?, updated_at = datetime('now') WHERE id = ?")
         .bind(&new_hash)
-        .bind(&claims.sub)
+        .bind(user.id)
         .execute(&db.pool)
         .await
         .unwrap();
@@ -449,15 +447,9 @@ pub async fn setup_2fa(
     Extension(db): Extension<Arc<Database>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let claims = match auth::extract_user_id(&headers) {
-        Some(c) => c,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "Unauthorized"})),
-            )
-                .into_response()
-        }
+    let user = match auth::require_user(&db, &headers).await {
+        Ok(user) => user,
+        Err(resp) => return resp,
     };
 
     use totp_rs::{Algorithm, Secret, TOTP};
@@ -481,7 +473,7 @@ pub async fn setup_2fa(
         30,
         secret_bytes,
         Some("MarkFlow".to_string()),
-        claims.username.clone(),
+        user.username.clone(),
     ) {
         Ok(t) => t,
         Err(_) => {
@@ -496,9 +488,9 @@ pub async fn setup_2fa(
     let qr_b64 = totp.get_qr_base64().unwrap_or_default();
     let otpauth_url = totp.get_url();
 
-    sqlx::query("UPDATE users SET totp_secret = ? WHERE id = ?")
+    sqlx::query("UPDATE users SET totp_secret = ?, updated_at = datetime('now') WHERE id = ?")
         .bind(&secret_encoded)
-        .bind(&claims.sub)
+        .bind(user.id)
         .execute(&db.pool)
         .await
         .unwrap();
@@ -521,24 +513,12 @@ pub async fn confirm_2fa(
     headers: HeaderMap,
     Json(body): Json<CodeRequest>,
 ) -> impl IntoResponse {
-    let claims = match auth::extract_user_id(&headers) {
-        Some(c) => c,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "Unauthorized"})),
-            )
-                .into_response()
-        }
+    let user = match auth::require_user(&db, &headers).await {
+        Ok(user) => user,
+        Err(resp) => return resp,
     };
 
-    let user: User = sqlx::query_as("SELECT * FROM users WHERE id = ?")
-        .bind(&claims.sub)
-        .fetch_one(&db.pool)
-        .await
-        .unwrap();
-
-    let secret = user.totp_secret.unwrap_or_default();
+    let secret = user.totp_secret.clone().unwrap_or_default();
     if secret.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
@@ -555,8 +535,8 @@ pub async fn confirm_2fa(
             .into_response();
     }
 
-    sqlx::query("UPDATE users SET totp_enabled = 1 WHERE id = ?")
-        .bind(&claims.sub)
+    sqlx::query("UPDATE users SET totp_enabled = 1, updated_at = datetime('now') WHERE id = ?")
+        .bind(user.id)
         .execute(&db.pool)
         .await
         .unwrap();
@@ -569,24 +549,12 @@ pub async fn disable_2fa(
     headers: HeaderMap,
     Json(body): Json<CodeRequest>,
 ) -> impl IntoResponse {
-    let claims = match auth::extract_user_id(&headers) {
-        Some(c) => c,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "Unauthorized"})),
-            )
-                .into_response()
-        }
+    let user = match auth::require_user(&db, &headers).await {
+        Ok(user) => user,
+        Err(resp) => return resp,
     };
 
-    let user: User = sqlx::query_as("SELECT * FROM users WHERE id = ?")
-        .bind(&claims.sub)
-        .fetch_one(&db.pool)
-        .await
-        .unwrap();
-
-    let secret = user.totp_secret.unwrap_or_default();
+    let secret = user.totp_secret.clone().unwrap_or_default();
     if secret.is_empty() || user.totp_enabled == 0 {
         return (
             StatusCode::BAD_REQUEST,
@@ -603,8 +571,10 @@ pub async fn disable_2fa(
             .into_response();
     }
 
-    sqlx::query("UPDATE users SET totp_enabled = 0, totp_secret = NULL WHERE id = ?")
-        .bind(&claims.sub)
+    sqlx::query(
+        "UPDATE users SET totp_enabled = 0, totp_secret = NULL, updated_at = datetime('now') WHERE id = ?",
+    )
+        .bind(user.id)
         .execute(&db.pool)
         .await
         .unwrap();

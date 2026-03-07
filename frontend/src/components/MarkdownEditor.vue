@@ -108,6 +108,7 @@ import Vditor from 'vditor'
 import 'vditor/dist/index.css'
 
 import { useDocsStore, type DocNode } from '@/stores/docs'
+import { useSystemStore } from '@/stores/system'
 import VditorPreview from '@/components/VditorPreview.vue'
 import { createManagedUploadTask, removeManagedUpload, type ManagedUploadTask } from '@/utils/managedUploads'
 import { uploadFile, uploadImage } from '@/utils/uploads'
@@ -116,6 +117,7 @@ const props = defineProps<{ node: DocNode }>()
 const emit = defineEmits<{ share: [node: DocNode] }>()
 
 const docs = useDocsStore()
+const system = useSystemStore()
 const editorRef = ref<HTMLDivElement | null>(null)
 const previewBodyRef = ref<HTMLDivElement | null>(null)
 const saving = ref(false)
@@ -259,8 +261,8 @@ async function handleEditorUpload(files: File[]) {
   if (!editor) return '编辑器尚未完成初始化'
 
   for (const file of files) {
-    if (file.size > 20 * 1024 * 1024) {
-      return `文件 ${file.name} 超过 20MB 限制`
+    if (file.size > system.uploadMaxBytes) {
+      return `文件 ${file.name} 超过 ${system.uploadLimitLabel} 限制`
     }
 
     const isImage = file.type.startsWith('image/')
@@ -375,7 +377,7 @@ async function initEditor() {
     upload: {
       accept: 'image/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.zip,.rar,.7z,.txt,.md,.csv,.json',
       multiple: true,
-      max: 20 * 1024 * 1024,
+      max: system.uploadMaxBytes,
       handler: handleEditorUpload,
     },
     after() {

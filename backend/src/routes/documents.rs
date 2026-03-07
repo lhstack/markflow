@@ -81,18 +81,12 @@ pub async fn list_tree(
     headers: HeaderMap,
     Query(query): Query<ListTreeQuery>,
 ) -> impl IntoResponse {
-    let claims = match auth::extract_user_id(&headers) {
-        Some(c) => c,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "Unauthorized"})),
-            )
-                .into_response();
-        }
+    let user = match auth::require_user(&db, &headers).await {
+        Ok(user) => user,
+        Err(resp) => return resp,
     };
 
-    if !user_exists(&db, claims.sub).await {
+    if !user_exists(&db, user.id).await {
         return (
             StatusCode::UNAUTHORIZED,
             Json(json!({"error": "User does not exist"})),
@@ -101,7 +95,7 @@ pub async fn list_tree(
     }
 
     let nodes: Vec<DocNode> = if let Some(project_id) = query.project_id {
-        if !project_exists(&db, claims.sub, project_id).await {
+        if !project_exists(&db, user.id, project_id).await {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({"error": "项目不存在"})),
@@ -114,7 +108,7 @@ pub async fn list_tree(
              WHERE user_id = ? AND project_id = ?
              ORDER BY sort_order ASC, created_at ASC",
         )
-        .bind(claims.sub)
+        .bind(user.id)
         .bind(project_id)
         .fetch_all(&db.pool)
         .await
@@ -125,7 +119,7 @@ pub async fn list_tree(
              WHERE user_id = ?
              ORDER BY sort_order ASC, created_at ASC",
         )
-        .bind(claims.sub)
+        .bind(user.id)
         .fetch_all(&db.pool)
         .await
         .unwrap_or_default()
@@ -149,18 +143,12 @@ pub async fn create_node(
     headers: HeaderMap,
     Json(body): Json<CreateNodeRequest>,
 ) -> impl IntoResponse {
-    let claims = match auth::extract_user_id(&headers) {
-        Some(c) => c,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "Unauthorized"})),
-            )
-                .into_response();
-        }
+    let user = match auth::require_user(&db, &headers).await {
+        Ok(user) => user,
+        Err(resp) => return resp,
     };
 
-    if !user_exists(&db, claims.sub).await {
+    if !user_exists(&db, user.id).await {
         return (
             StatusCode::UNAUTHORIZED,
             Json(json!({"error": "User does not exist"})),
@@ -188,7 +176,7 @@ pub async fn create_node(
             "SELECT project_id FROM doc_nodes WHERE id = ? AND user_id = ? AND node_type = 'dir'",
         )
         .bind(pid)
-        .bind(claims.sub)
+        .bind(user.id)
         .fetch_optional(&db.pool)
         .await
         .unwrap_or(None);
@@ -227,7 +215,7 @@ pub async fn create_node(
             }
         };
 
-        if !project_exists(&db, claims.sub, project_id).await {
+        if !project_exists(&db, user.id, project_id).await {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({"error": "项目不存在"})),
@@ -243,7 +231,7 @@ pub async fn create_node(
          FROM doc_nodes
          WHERE user_id = ? AND parent_id IS ? AND project_id IS ?",
     )
-    .bind(claims.sub)
+    .bind(user.id)
     .bind(body.parent_id)
     .bind(resolved_project_id)
     .fetch_one(&db.pool)
@@ -255,7 +243,7 @@ pub async fn create_node(
          (user_id, project_id, parent_id, name, node_type, content, sort_order)
          VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
-    .bind(claims.sub)
+    .bind(user.id)
     .bind(resolved_project_id)
     .bind(body.parent_id)
     .bind(body.name.trim())
@@ -310,21 +298,15 @@ pub async fn get_node(
     headers: HeaderMap,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
-    let claims = match auth::extract_user_id(&headers) {
-        Some(c) => c,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "Unauthorized"})),
-            )
-                .into_response();
-        }
+    let user = match auth::require_user(&db, &headers).await {
+        Ok(user) => user,
+        Err(resp) => return resp,
     };
 
     let node: Option<DocNode> =
         sqlx::query_as("SELECT * FROM doc_nodes WHERE id = ? AND user_id = ?")
             .bind(id)
-            .bind(claims.sub)
+            .bind(user.id)
             .fetch_optional(&db.pool)
             .await
             .unwrap_or(None);
@@ -335,7 +317,7 @@ pub async fn get_node(
                 let doc_count: i64 = sqlx::query_scalar(
                     "SELECT COUNT(*) FROM doc_nodes WHERE user_id = ? AND node_type = 'doc' AND parent_id = ?",
                 )
-                .bind(claims.sub)
+                .bind(user.id)
                 .bind(id)
                 .fetch_one(&db.pool)
                 .await
@@ -344,7 +326,7 @@ pub async fn get_node(
                 let dir_count: i64 = sqlx::query_scalar(
                     "SELECT COUNT(*) FROM doc_nodes WHERE user_id = ? AND node_type = 'dir' AND parent_id = ?",
                 )
-                .bind(claims.sub)
+                .bind(user.id)
                 .bind(id)
                 .fetch_one(&db.pool)
                 .await
@@ -353,7 +335,7 @@ pub async fn get_node(
                 let children: Vec<DocNode> = sqlx::query_as(
                     "SELECT * FROM doc_nodes WHERE user_id = ? AND parent_id = ? ORDER BY sort_order ASC, created_at ASC",
                 )
-                .bind(claims.sub)
+                .bind(user.id)
                 .bind(id)
                 .fetch_all(&db.pool)
                 .await
@@ -407,21 +389,15 @@ pub async fn update_node(
     Path(id): Path<i64>,
     Json(body): Json<UpdateNodeRequest>,
 ) -> impl IntoResponse {
-    let claims = match auth::extract_user_id(&headers) {
-        Some(c) => c,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "Unauthorized"})),
-            )
-                .into_response();
-        }
+    let user = match auth::require_user(&db, &headers).await {
+        Ok(user) => user,
+        Err(resp) => return resp,
     };
 
     let node: Option<DocNode> =
         sqlx::query_as("SELECT * FROM doc_nodes WHERE id = ? AND user_id = ?")
             .bind(id)
-            .bind(claims.sub)
+            .bind(user.id)
             .fetch_optional(&db.pool)
             .await
             .unwrap_or(None);
@@ -460,20 +436,14 @@ pub async fn delete_node(
     headers: HeaderMap,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
-    let claims = match auth::extract_user_id(&headers) {
-        Some(c) => c,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "Unauthorized"})),
-            )
-                .into_response();
-        }
+    let user = match auth::require_user(&db, &headers).await {
+        Ok(user) => user,
+        Err(resp) => return resp,
     };
 
     let result = sqlx::query("DELETE FROM doc_nodes WHERE id = ? AND user_id = ?")
         .bind(id)
-        .bind(claims.sub)
+        .bind(user.id)
         .execute(&db.pool)
         .await
         .unwrap();
@@ -497,18 +467,12 @@ pub async fn move_node(
     Path(id): Path<i64>,
     Json(body): Json<MoveNodeRequest>,
 ) -> impl IntoResponse {
-    let claims = match auth::extract_user_id(&headers) {
-        Some(c) => c,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "Unauthorized"})),
-            )
-                .into_response();
-        }
+    let user = match auth::require_user(&db, &headers).await {
+        Ok(user) => user,
+        Err(resp) => return resp,
     };
 
-    if !user_exists(&db, claims.sub).await {
+    if !user_exists(&db, user.id).await {
         return (
             StatusCode::UNAUTHORIZED,
             Json(json!({"error": "User does not exist"})),
@@ -519,7 +483,7 @@ pub async fn move_node(
     let current_project_id: Option<Option<i64>> =
         sqlx::query_scalar("SELECT project_id FROM doc_nodes WHERE id = ? AND user_id = ?")
             .bind(id)
-            .bind(claims.sub)
+            .bind(user.id)
             .fetch_optional(&db.pool)
             .await
             .unwrap_or(None);
@@ -544,7 +508,7 @@ pub async fn move_node(
             "SELECT project_id FROM doc_nodes WHERE id = ? AND user_id = ? AND node_type = 'dir'",
         )
         .bind(new_parent)
-        .bind(claims.sub)
+        .bind(user.id)
         .fetch_optional(&db.pool)
         .await
         .unwrap_or(None);
@@ -578,9 +542,9 @@ pub async fn move_node(
             )
             SELECT EXISTS(SELECT 1 FROM desc WHERE id = ?)",
         )
-        .bind(claims.sub)
+        .bind(user.id)
         .bind(id)
-        .bind(claims.sub)
+        .bind(user.id)
         .bind(new_parent)
         .fetch_one(&db.pool)
         .await
@@ -606,7 +570,7 @@ pub async fn move_node(
     .bind(sort_order)
     .bind(current_project_id)
     .bind(id)
-    .bind(claims.sub)
+    .bind(user.id)
     .execute(&db.pool)
     .await;
 

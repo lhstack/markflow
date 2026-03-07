@@ -262,6 +262,29 @@ async fn store_upload_record(
     parsed: ParsedUpload,
     existing_id: Option<i64>,
 ) -> Result<UploadAsset, Response> {
+    let settings = match db.get_system_settings().await {
+        Ok(settings) => settings,
+        Err(err) => {
+            tracing::error!("load upload settings failed: {}", err);
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "Failed to load upload settings"})),
+            )
+                .into_response());
+        }
+    };
+
+    if parsed.bytes.len() as i64 > settings.upload_max_bytes {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({"error": format!(
+                "文件超过 {}MB 限制",
+                settings.upload_max_bytes / 1024 / 1024
+            )})),
+        )
+            .into_response());
+    }
+
     if matches!(
         parsed.kind.as_str(),
         "avatar" | "project-background" | "doc-image"
@@ -418,15 +441,9 @@ pub async fn upload_file(
     headers: HeaderMap,
     multipart: Multipart,
 ) -> impl IntoResponse {
-    let claims = match auth::extract_user_id(&headers) {
-        Some(c) => c,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "Unauthorized"})),
-            )
-                .into_response();
-        }
+    let user = match auth::require_user(&db, &headers).await {
+        Ok(user) => user,
+        Err(resp) => return resp,
     };
 
     let parsed = match parse_multipart(multipart).await {
@@ -434,7 +451,7 @@ pub async fn upload_file(
         Err(resp) => return resp,
     };
 
-    let asset = match store_upload_record(&db, claims.sub, parsed, None).await {
+    let asset = match store_upload_record(&db, user.id, parsed, None).await {
         Ok(asset) => asset,
         Err(resp) => return resp,
     };
@@ -449,21 +466,15 @@ pub async fn replace_upload(
     Path(id): Path<i64>,
     multipart: Multipart,
 ) -> impl IntoResponse {
-    let claims = match auth::extract_user_id(&headers) {
-        Some(c) => c,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "Unauthorized"})),
-            )
-                .into_response();
-        }
+    let user = match auth::require_user(&db, &headers).await {
+        Ok(user) => user,
+        Err(resp) => return resp,
     };
 
     let existing: Option<UploadAsset> =
         sqlx::query_as("SELECT * FROM uploads WHERE id = ? AND user_id = ?")
             .bind(id)
-            .bind(claims.sub)
+            .bind(user.id)
             .fetch_optional(&db.pool)
             .await
             .unwrap_or(None);
@@ -484,7 +495,7 @@ pub async fn replace_upload(
         Err(resp) => return resp,
     };
 
-    let asset = match store_upload_record(&db, claims.sub, parsed, Some(id)).await {
+    let asset = match store_upload_record(&db, user.id, parsed, Some(id)).await {
         Ok(asset) => asset,
         Err(resp) => return resp,
     };
@@ -497,21 +508,15 @@ pub async fn list_uploads(
     Extension(db): Extension<Arc<Database>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let claims = match auth::extract_user_id(&headers) {
-        Some(c) => c,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "Unauthorized"})),
-            )
-                .into_response();
-        }
+    let user = match auth::require_user(&db, &headers).await {
+        Ok(user) => user,
+        Err(resp) => return resp,
     };
 
     let assets: Vec<UploadAsset> = sqlx::query_as(
         "SELECT * FROM uploads WHERE user_id = ? ORDER BY updated_at DESC, created_at DESC, id DESC",
     )
-    .bind(claims.sub)
+    .bind(user.id)
     .fetch_all(&db.pool)
     .await
     .unwrap_or_default();
@@ -529,21 +534,15 @@ pub async fn delete_upload(
     headers: HeaderMap,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
-    let claims = match auth::extract_user_id(&headers) {
-        Some(c) => c,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "Unauthorized"})),
-            )
-                .into_response();
-        }
+    let user = match auth::require_user(&db, &headers).await {
+        Ok(user) => user,
+        Err(resp) => return resp,
     };
 
     let existing: Option<UploadAsset> =
         sqlx::query_as("SELECT * FROM uploads WHERE id = ? AND user_id = ?")
             .bind(id)
-            .bind(claims.sub)
+            .bind(user.id)
             .fetch_optional(&db.pool)
             .await
             .unwrap_or(None);
@@ -561,7 +560,7 @@ pub async fn delete_upload(
     let file_path = root.join(existing.stored_path.replace('\\', "/"));
 
     if let Err(err) = sqlx::query("UPDATE users SET avatar = NULL WHERE id = ? AND avatar = ?")
-        .bind(claims.sub)
+        .bind(user.id)
         .bind(&url)
         .execute(&db.pool)
         .await
@@ -572,7 +571,7 @@ pub async fn delete_upload(
     if let Err(err) = sqlx::query(
         "UPDATE projects SET background_image = NULL, updated_at = datetime('now') WHERE user_id = ? AND background_image = ?",
     )
-    .bind(claims.sub)
+    .bind(user.id)
     .bind(&url)
     .execute(&db.pool)
     .await
@@ -582,7 +581,7 @@ pub async fn delete_upload(
 
     if let Err(err) = sqlx::query("DELETE FROM uploads WHERE id = ? AND user_id = ?")
         .bind(id)
-        .bind(claims.sub)
+        .bind(user.id)
         .execute(&db.pool)
         .await
     {

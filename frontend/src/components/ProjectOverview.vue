@@ -107,6 +107,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import type { ProjectItem } from '@/stores/projects'
 import { createManagedUploadTask, removeManagedUpload, type ManagedUploadTask } from '@/utils/managedUploads'
 import { uploadImage } from '@/utils/uploads'
+import { useSystemStore } from '@/stores/system'
 
 const props = defineProps<{
   projects: ProjectItem[]
@@ -119,6 +120,7 @@ const emit = defineEmits<{
   update: [projectId: number, payload: { name: string; description: string; background_image: string }]
   delete: [projectId: number]
 }>()
+const system = useSystemStore()
 
 const gridContainer = ref<HTMLElement | null>(null)
 const cardsPerPage = ref(8)
@@ -194,8 +196,8 @@ async function handleBackgroundFileChange(event: Event) {
     ElMessage.warning('请选择图片文件')
     return
   }
-  if (file.size > 5 * 1024 * 1024) {
-    ElMessage.warning('图片大小不能超过 5MB')
+  if (file.size > system.uploadMaxBytes) {
+    ElMessage.warning(`图片大小不能超过 ${system.uploadLimitLabel}`)
     return
   }
 

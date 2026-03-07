@@ -136,10 +136,16 @@
     </el-dialog>
 
     <el-dialog v-model="showCreate" :title="createType === 'dir' ? '新建目录' : '新建文档'" width="320px" append-to-body destroy-on-close>
-      <el-input v-model="createName" :placeholder="createType === 'dir' ? '目录名称' : '文档标题'" @keydown.enter="confirmCreate" clearable />
+      <el-input
+        v-model="createName"
+        :placeholder="createType === 'dir' ? '目录名称' : '文档标题'"
+        :disabled="creating"
+        @keydown.enter="confirmCreate"
+        clearable
+      />
       <template #footer>
-        <el-button @click="showCreate = false">取消</el-button>
-        <el-button type="primary" @click="confirmCreate">创建</el-button>
+        <el-button :disabled="creating" @click="showCreate = false">取消</el-button>
+        <el-button type="primary" :loading="creating" @click="confirmCreate">创建</el-button>
       </template>
     </el-dialog>
   </div>
@@ -166,6 +172,7 @@ const showCreate = ref(false)
 const createName = ref('')
 const createType = ref<'doc' | 'dir'>('doc')
 const createParent = ref<number | null>(null)
+const creating = ref(false)
 const renameInput = ref()
 const expandedIds = ref<Set<number>>(new Set())
 const knownDirIds = ref<Set<number>>(new Set())
@@ -522,11 +529,13 @@ function createUnder(parentId: number, type: 'doc' | 'dir') {
 }
 
 async function confirmCreate() {
+  if (creating.value) return
   if (!createName.value.trim()) {
     ElMessage.warning('名称不能为空')
     return
   }
 
+  creating.value = true
   try {
     const node = await docs.createNode({
       name: createName.value.trim(),
@@ -546,6 +555,8 @@ async function confirmCreate() {
     selectNode(node)
   } catch {
     ElMessage.error('创建失败')
+  } finally {
+    creating.value = false
   }
 }
 

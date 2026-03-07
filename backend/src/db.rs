@@ -1,10 +1,13 @@
 use anyhow::Result;
+use rand::{distributions::Alphanumeric, Rng};
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
     FromRow, Row, SqlitePool,
 };
 use std::{collections::HashMap, str::FromStr};
 use uuid::Uuid;
+
+use crate::models::{SystemSettings, User};
 
 pub struct Database {
     pub pool: SqlitePool,
@@ -77,6 +80,7 @@ impl Database {
             self.migrate_text_primary_keys_to_integer().await?;
         }
 
+        self.ensure_user_columns().await?;
         self.ensure_doc_nodes_project_column().await?;
         self.backfill_existing_doc_project_ids().await?;
         self.create_indexes().await?;
@@ -94,7 +98,10 @@ impl Database {
                 avatar TEXT,
                 totp_secret TEXT,
                 totp_enabled INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                is_super_admin INTEGER NOT NULL DEFAULT 0,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
             )
         "#,
         )
@@ -178,6 +185,64 @@ impl Database {
         .execute(&self.pool)
         .await?;
 
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS system_settings (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                registration_enabled INTEGER NOT NULL DEFAULT 1,
+                upload_max_bytes INTEGER NOT NULL DEFAULT 20971520,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn ensure_user_columns(&self) -> Result<()> {
+        let columns = sqlx::query("PRAGMA table_info(users)")
+            .fetch_all(&self.pool)
+            .await?;
+
+        let has_is_super_admin = columns.iter().any(|col| {
+            col.try_get::<String, _>("name")
+                .map(|name| name == "is_super_admin")
+                .unwrap_or(false)
+        });
+        let has_is_active = columns.iter().any(|col| {
+            col.try_get::<String, _>("name")
+                .map(|name| name == "is_active")
+                .unwrap_or(false)
+        });
+        let has_updated_at = columns.iter().any(|col| {
+            col.try_get::<String, _>("name")
+                .map(|name| name == "updated_at")
+                .unwrap_or(false)
+        });
+
+        if !has_is_super_admin {
+            sqlx::query("ALTER TABLE users ADD COLUMN is_super_admin INTEGER NOT NULL DEFAULT 0")
+                .execute(&self.pool)
+                .await?;
+        }
+
+        if !has_is_active {
+            sqlx::query("ALTER TABLE users ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1")
+                .execute(&self.pool)
+                .await?;
+        }
+
+        if !has_updated_at {
+            sqlx::query(
+                "ALTER TABLE users ADD COLUMN updated_at TEXT NOT NULL DEFAULT (datetime('now'))",
+            )
+            .execute(&self.pool)
+            .await?;
+        }
+
         Ok(())
     }
 
@@ -207,6 +272,97 @@ impl Database {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    pub async fn bootstrap_system_settings(
+        &self,
+        registration_enabled: bool,
+        upload_max_bytes: i64,
+    ) -> Result<SystemSettings> {
+        if let Some(settings) = sqlx::query_as::<_, SystemSettings>(
+            "SELECT * FROM system_settings WHERE id = 1",
+        )
+        .fetch_optional(&self.pool)
+        .await?
+        {
+            return Ok(settings);
+        }
+
+        sqlx::query(
+            "INSERT INTO system_settings (id, registration_enabled, upload_max_bytes)
+             VALUES (1, ?, ?)",
+        )
+        .bind(if registration_enabled { 1 } else { 0 })
+        .bind(upload_max_bytes)
+        .execute(&self.pool)
+        .await?;
+
+        self.get_system_settings().await
+    }
+
+    pub async fn get_system_settings(&self) -> Result<SystemSettings> {
+        let settings = sqlx::query_as::<_, SystemSettings>(
+            "SELECT * FROM system_settings WHERE id = 1",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(settings)
+    }
+
+    pub async fn update_system_settings(
+        &self,
+        registration_enabled: bool,
+        upload_max_bytes: i64,
+    ) -> Result<SystemSettings> {
+        sqlx::query(
+            "UPDATE system_settings
+             SET registration_enabled = ?, upload_max_bytes = ?, updated_at = datetime('now')
+             WHERE id = 1",
+        )
+        .bind(if registration_enabled { 1 } else { 0 })
+        .bind(upload_max_bytes)
+        .execute(&self.pool)
+        .await?;
+
+        self.get_system_settings().await
+    }
+
+    pub async fn ensure_super_admin(&self) -> Result<Option<String>> {
+        let existing: Option<User> = sqlx::query_as("SELECT * FROM users WHERE username = 'admin'")
+            .fetch_optional(&self.pool)
+            .await?;
+
+        if let Some(user) = existing {
+            if user.is_super_admin != 1 || user.is_active != 1 {
+                sqlx::query(
+                    "UPDATE users
+                     SET is_super_admin = 1, is_active = 1, updated_at = datetime('now')
+                     WHERE id = ?",
+                )
+                .bind(user.id)
+                .execute(&self.pool)
+                .await?;
+            }
+            return Ok(None);
+        }
+
+        let password: String = rand::thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(20)
+            .map(char::from)
+            .collect();
+        let password_hash = bcrypt::hash(&password, 10)?;
+
+        sqlx::query(
+            "INSERT INTO users
+             (username, password_hash, avatar, totp_secret, totp_enabled, is_super_admin, is_active)
+             VALUES ('admin', ?, NULL, NULL, 0, 1, 1)",
+        )
+        .bind(password_hash)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(Some(password))
     }
 
     async fn uses_legacy_text_ids(&self) -> Result<bool> {
@@ -430,7 +586,10 @@ impl Database {
                 avatar TEXT,
                 totp_secret TEXT,
                 totp_enabled INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                is_super_admin INTEGER NOT NULL DEFAULT 0,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
             )
         "#,
         )
@@ -498,14 +657,16 @@ impl Database {
         let mut user_map = HashMap::new();
         for user in users {
             let new_id = sqlx::query(
-                "INSERT INTO users_new (username, password_hash, avatar, totp_secret, totp_enabled, created_at)
-                 VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO users_new
+                 (username, password_hash, avatar, totp_secret, totp_enabled, is_super_admin, is_active, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, 0, 1, ?, ?)",
             )
             .bind(&user.username)
             .bind(&user.password_hash)
             .bind(&user.avatar)
             .bind(&user.totp_secret)
             .bind(user.totp_enabled)
+            .bind(&user.created_at)
             .bind(&user.created_at)
             .execute(&mut *tx)
             .await?

@@ -58,6 +58,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import request from '@/utils/request'
+import { mapAuthErrorMessage } from '@/utils/authErrors'
 
 const PENDING_2FA_KEY = 'markflow.pending_2fa'
 
@@ -139,9 +140,9 @@ async function verify2FA() {
     clearPending()
     router.replace('/')
   } catch (e: any) {
-    const msg = e.response?.data?.error || '验证失败'
+    const msg = mapAuthErrorMessage(e.response?.data?.error, '验证失败')
     error.value = msg
-    if (msg.toLowerCase().includes('expired')) {
+    if (msg.includes('过期')) {
       clearPending()
     }
   } finally {

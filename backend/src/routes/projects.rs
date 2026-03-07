@@ -62,18 +62,12 @@ pub async fn list_projects(
     Extension(db): Extension<Arc<Database>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let claims = match auth::extract_user_id(&headers) {
-        Some(c) => c,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "Unauthorized"})),
-            )
-                .into_response();
-        }
+    let user = match auth::require_user(&db, &headers).await {
+        Ok(user) => user,
+        Err(resp) => return resp,
     };
 
-    if !user_exists(&db, claims.sub).await {
+    if !user_exists(&db, user.id).await {
         return (
             StatusCode::UNAUTHORIZED,
             Json(json!({"error": "User does not exist"})),
@@ -84,7 +78,7 @@ pub async fn list_projects(
     let projects: Vec<Project> = sqlx::query_as(
         "SELECT * FROM projects WHERE user_id = ? ORDER BY sort_order ASC, created_at ASC",
     )
-    .bind(claims.sub)
+    .bind(user.id)
     .fetch_all(&db.pool)
     .await
     .unwrap_or_default();
@@ -105,18 +99,12 @@ pub async fn create_project(
     headers: HeaderMap,
     Json(body): Json<CreateProjectRequest>,
 ) -> impl IntoResponse {
-    let claims = match auth::extract_user_id(&headers) {
-        Some(c) => c,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "Unauthorized"})),
-            )
-                .into_response();
-        }
+    let user = match auth::require_user(&db, &headers).await {
+        Ok(user) => user,
+        Err(resp) => return resp,
     };
 
-    if !user_exists(&db, claims.sub).await {
+    if !user_exists(&db, user.id).await {
         return (
             StatusCode::UNAUTHORIZED,
             Json(json!({"error": "User does not exist"})),
@@ -132,7 +120,7 @@ pub async fn create_project(
         )
             .into_response();
     }
-    if project_name_exists(&db, claims.sub, name, None).await {
+    if project_name_exists(&db, user.id, name, None).await {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({"error": "项目名称已存在"})),
@@ -142,7 +130,7 @@ pub async fn create_project(
 
     let max_order: i64 =
         sqlx::query_scalar("SELECT COALESCE(MAX(sort_order), -1) FROM projects WHERE user_id = ?")
-            .bind(claims.sub)
+            .bind(user.id)
             .fetch_one(&db.pool)
             .await
             .unwrap_or(-1);
@@ -159,7 +147,7 @@ pub async fn create_project(
         "INSERT INTO projects (user_id, name, description, background_image, sort_order)
          VALUES (?, ?, ?, ?, ?)",
     )
-    .bind(claims.sub)
+    .bind(user.id)
     .bind(name)
     .bind(&description)
     .bind(background_image)
@@ -214,21 +202,15 @@ pub async fn update_project(
     Path(id): Path<i64>,
     Json(body): Json<UpdateProjectRequest>,
 ) -> impl IntoResponse {
-    let claims = match auth::extract_user_id(&headers) {
-        Some(c) => c,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "Unauthorized"})),
-            )
-                .into_response();
-        }
+    let user = match auth::require_user(&db, &headers).await {
+        Ok(user) => user,
+        Err(resp) => return resp,
     };
 
     let existing: Option<Project> =
         sqlx::query_as("SELECT * FROM projects WHERE id = ? AND user_id = ?")
             .bind(id)
-            .bind(claims.sub)
+            .bind(user.id)
             .fetch_optional(&db.pool)
             .await
             .unwrap_or(None);
@@ -252,7 +234,7 @@ pub async fn update_project(
         )
             .into_response();
     }
-    if project_name_exists(&db, claims.sub, &name, Some(id)).await {
+    if project_name_exists(&db, user.id, &name, Some(id)).await {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({"error": "项目名称已存在"})),
@@ -281,7 +263,7 @@ pub async fn update_project(
     .bind(&description)
     .bind(&background_image)
     .bind(id)
-    .bind(claims.sub)
+    .bind(user.id)
     .execute(&db.pool)
     .await
     {
@@ -317,21 +299,15 @@ pub async fn delete_project(
     headers: HeaderMap,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
-    let claims = match auth::extract_user_id(&headers) {
-        Some(c) => c,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "Unauthorized"})),
-            )
-                .into_response();
-        }
+    let user = match auth::require_user(&db, &headers).await {
+        Ok(user) => user,
+        Err(resp) => return resp,
     };
 
     let project_exists: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM projects WHERE id = ? AND user_id = ?)")
             .bind(id)
-            .bind(claims.sub)
+            .bind(user.id)
             .fetch_one(&db.pool)
             .await
             .unwrap_or(false);
@@ -341,7 +317,7 @@ pub async fn delete_project(
     }
 
     let project_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM projects WHERE user_id = ?")
-        .bind(claims.sub)
+        .bind(user.id)
         .fetch_one(&db.pool)
         .await
         .unwrap_or(0);
@@ -372,7 +348,7 @@ pub async fn delete_project(
          ORDER BY sort_order ASC, created_at ASC
          LIMIT 1",
     )
-    .bind(claims.sub)
+    .bind(user.id)
     .bind(id)
     .fetch_one(&mut *tx)
     .await
@@ -393,7 +369,7 @@ pub async fn delete_project(
          WHERE user_id = ? AND project_id = ?",
     )
     .bind(fallback_project_id)
-    .bind(claims.sub)
+    .bind(user.id)
     .bind(id)
     .execute(&mut *tx)
     .await
@@ -408,7 +384,7 @@ pub async fn delete_project(
 
     if let Err(e) = sqlx::query("DELETE FROM projects WHERE id = ? AND user_id = ?")
         .bind(id)
-        .bind(claims.sub)
+        .bind(user.id)
         .execute(&mut *tx)
         .await
     {

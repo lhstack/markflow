@@ -76,6 +76,14 @@
                 <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="flex-shrink:0"><path d="M4.75 1A2.75 2.75 0 0 0 2 3.75v7.5A3.75 3.75 0 0 0 5.75 15h4.5A3.75 3.75 0 0 0 14 11.25v-6.5a2.75 2.75 0 0 0-5.5 0v5.75a1.25 1.25 0 0 0 2.5 0V5.75a.75.75 0 0 1 1.5 0v4.75a2.75 2.75 0 0 1-5.5 0V4.75a4.25 4.25 0 0 1 8.5 0v6.5A5.25 5.25 0 0 1 10.25 16h-4.5A5.25 5.25 0 0 1 .5 10.75v-7A2.75 2.75 0 0 1 3.25 1h1.5a.75.75 0 0 1 0 1.5Z"/></svg>
                 附件管理
               </el-dropdown-item>
+              <el-dropdown-item v-if="auth.user?.is_super_admin" command="system">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="flex-shrink:0"><path d="M7.53 1.106a.75.75 0 0 1 .94 0l1.02.82a1.5 1.5 0 0 0 1.222.294l1.283-.267a.75.75 0 0 1 .814.472l.485 1.22a1.5 1.5 0 0 0 .9.875l1.232.417a.75.75 0 0 1 .49.803l-.15 1.302a1.5 1.5 0 0 0 .403 1.19l.887.965a.75.75 0 0 1 0 1.012l-.887.965a1.5 1.5 0 0 0-.404 1.19l.151 1.302a.75.75 0 0 1-.49.803l-1.232.417a1.5 1.5 0 0 0-.9.875l-.485 1.22a.75.75 0 0 1-.814.472l-1.283-.267a1.5 1.5 0 0 0-1.222.294l-1.02.82a.75.75 0 0 1-.94 0l-1.02-.82a1.5 1.5 0 0 0-1.222-.294l-1.283.267a.75.75 0 0 1-.814-.472l-.485-1.22a1.5 1.5 0 0 0-.9-.875l-1.232-.417a.75.75 0 0 1-.49-.803l.15-1.302a1.5 1.5 0 0 0-.403-1.19l-.887-.965a.75.75 0 0 1 0-1.012l.887-.965a1.5 1.5 0 0 0 .404-1.19l-.151-1.302a.75.75 0 0 1 .49-.803l1.232-.417a1.5 1.5 0 0 0 .9-.875l.485-1.22a.75.75 0 0 1 .814-.472l1.283.267a1.5 1.5 0 0 0 1.222-.294Zm.47 4.144a2.75 2.75 0 1 0 0 5.5 2.75 2.75 0 0 0 0-5.5Z"/></svg>
+                系统配置
+              </el-dropdown-item>
+              <el-dropdown-item v-if="auth.user?.is_super_admin" command="users">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="flex-shrink:0"><path d="M5.5 5a2.5 2.5 0 1 1 5 0 2.5 2.5 0 0 1-5 0ZM8 8.75A5.75 5.75 0 0 0 2.25 14.5a.75.75 0 0 0 1.5 0 4.25 4.25 0 0 1 8.5 0 .75.75 0 0 0 1.5 0A5.75 5.75 0 0 0 8 8.75Z"/></svg>
+                用户管理
+              </el-dropdown-item>
               <el-dropdown-item command="logout" divided>
                 <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="flex-shrink:0"><path d="M2 2.75C2 1.784 2.784 1 3.75 1h4.5a.75.75 0 0 1 0 1.5h-4.5a.25.25 0 0 0-.25.25v10.5c0 .138.112.25.25.25h4.5a.75.75 0 0 1 0 1.5h-4.5A1.75 1.75 0 0 1 2 13.25Zm10.44 4.5-1.97-1.97a.749.749 0 0 1 .326-1.275.749.749 0 0 1 .734.215l3.25 3.25a.75.75 0 0 1 0 1.06l-3.25 3.25a.749.749 0 0 1-1.275-.326.749.749 0 0 1 .215-.734l1.97-1.97H6.75a.75.75 0 0 1 0-1.5Z"/></svg>
                 退出登录
@@ -125,6 +133,8 @@
     <!-- Dialogs -->
     <ProfileDialog v-model="showProfile" />
     <AttachmentManagerDialog v-model="showAttachments" />
+    <SystemSettingsDialog v-model="showSystemSettings" />
+    <UserManagementDialog v-model="showUserManagement" />
     <ShareDialog v-if="shareTarget" v-model="showShare" :node="shareTarget" />
 
     <!-- Password dialog -->
@@ -155,15 +165,19 @@ import DirStats from '@/components/DirStats.vue'
 import ShareDialog from '@/components/ShareDialog.vue'
 import ProfileDialog from '@/components/ProfileDialog.vue'
 import AttachmentManagerDialog from '@/components/AttachmentManagerDialog.vue'
+import SystemSettingsDialog from '@/components/SystemSettingsDialog.vue'
+import UserManagementDialog from '@/components/UserManagementDialog.vue'
 import WelcomeScreen from '@/components/WelcomeScreen.vue'
 import ProjectOverview from '@/components/ProjectOverview.vue'
 import request from '@/utils/request'
+import { useSystemStore } from '@/stores/system'
 
 const router = useRouter()
 const route = useRoute()
 const auth = useAuthStore()
 const docs = useDocsStore()
 const projects = useProjectsStore()
+const system = useSystemStore()
 
 const HOME_SIDEBAR_KEY = 'markflow.home.sidebar_open'
 const HOME_LAST_PROJECT_KEY = 'markflow.home.last_project'
@@ -214,6 +228,8 @@ const showProfile = ref(false)
 const showAttachments = ref(false)
 const showShare = ref(false)
 const showPwChange = ref(false)
+const showSystemSettings = ref(false)
+const showUserManagement = ref(false)
 const shareTarget = ref<DocNode | null>(null)
 const changingPw = ref(false)
 const pwForm = ref({ old: '', new: '', confirm: '' })
@@ -318,6 +334,8 @@ async function restoreHomeState() {
 }
 
 onMounted(async () => {
+  await system.fetchPublicSettings().catch(() => {})
+  await auth.refreshUser().catch(() => {})
   await restoreHomeState()
   restoringHomeState.value = false
   persistHomeCache()
@@ -341,6 +359,8 @@ function handleUserCmd(cmd: string) {
   if (cmd === 'profile') showProfile.value = true
   else if (cmd === 'password') showPwChange.value = true
   else if (cmd === 'attachments') showAttachments.value = true
+  else if (cmd === 'system') showSystemSettings.value = true
+  else if (cmd === 'users') showUserManagement.value = true
   else if (cmd === 'logout') {
     ElMessageBox.confirm('确认退出登录？', '提示', {
       type: 'warning', confirmButtonText: '退出', cancelButtonText: '取消'

@@ -7,6 +7,8 @@ export interface UserInfo {
   username: string
   avatar?: string
   totp_enabled: boolean
+  is_super_admin: boolean
+  is_active: boolean
 }
 
 export const useAuthStore = defineStore('auth', () => {
@@ -36,5 +38,12 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
-  return { token, user, isLoggedIn, setAuth, logout, updateUser }
+  async function refreshUser() {
+    if (!token.value) return null
+    const data = await request.get('/auth/me') as any
+    updateUser(data.user)
+    return data.user as UserInfo
+  }
+
+  return { token, user, isLoggedIn, setAuth, logout, updateUser, refreshUser }
 })

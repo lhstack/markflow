@@ -26,6 +26,14 @@ request.interceptors.response.use(
         window.location.href = '/login'
       }
     }
+    if (error.response?.status === 403 && error.response?.data?.error === 'User is disabled') {
+      const path = window.location.pathname
+      if (!path.startsWith('/login') && !path.startsWith('/register') && !path.startsWith('/s/')) {
+        localStorage.removeItem('token')
+        localStorage.removeItem('user')
+        window.location.href = '/login'
+      }
+    }
     return Promise.reject(error)
   }
 )

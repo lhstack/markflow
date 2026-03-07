@@ -58,7 +58,12 @@
         </button>
 
         <div class="auth-footer">
-          还没有账号？<router-link to="/register">立即注册</router-link>
+          <template v-if="system.registrationEnabled">
+            还没有账号？<router-link to="/register">立即注册</router-link>
+          </template>
+          <template v-else>
+            当前已关闭用户注册
+          </template>
         </div>
       </div>
     </div>
@@ -70,11 +75,14 @@ import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import request from '@/utils/request'
+import { useSystemStore } from '@/stores/system'
+import { mapAuthErrorMessage } from '@/utils/authErrors'
 
 const PENDING_2FA_KEY = 'markflow.pending_2fa'
 
 const router = useRouter()
 const auth = useAuthStore()
+const system = useSystemStore()
 
 const form = ref({ username: '', password: '', captcha: '' })
 const captchaId = ref('')
@@ -122,7 +130,7 @@ async function login() {
     sessionStorage.removeItem(PENDING_2FA_KEY)
     router.push('/')
   } catch (e: any) {
-    const msg = e.response?.data?.error || '登录失败'
+    const msg = mapAuthErrorMessage(e.response?.data?.error, '登录失败')
     error.value = msg
     refreshCaptcha()
   } finally {
@@ -130,7 +138,10 @@ async function login() {
   }
 }
 
-onMounted(refreshCaptcha)
+onMounted(async () => {
+  await system.fetchPublicSettings().catch(() => {})
+  await refreshCaptcha()
+})
 </script>
 
 <style scoped>

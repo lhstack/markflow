@@ -9,7 +9,19 @@ pub struct User {
     pub avatar: Option<String>,
     pub totp_secret: Option<String>,
     pub totp_enabled: i64,
+    pub is_super_admin: i64,
+    pub is_active: i64,
     pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct SystemSettings {
+    pub id: i64,
+    pub registration_enabled: i64,
+    pub upload_max_bytes: i64,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -69,6 +81,8 @@ pub struct UserInfo {
     pub username: String,
     pub avatar: Option<String>,
     pub totp_enabled: bool,
+    pub is_super_admin: bool,
+    pub is_active: bool,
 }
 
 impl From<User> for UserInfo {
@@ -78,6 +92,58 @@ impl From<User> for UserInfo {
             username: u.username,
             avatar: u.avatar,
             totp_enabled: u.totp_enabled == 1,
+            is_super_admin: u.is_super_admin == 1,
+            is_active: u.is_active == 1,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SystemSettingsResponse {
+    pub registration_enabled: bool,
+    pub upload_max_bytes: i64,
+    pub upload_max_mb: i64,
+    pub updated_at: String,
+}
+
+impl From<SystemSettings> for SystemSettingsResponse {
+    fn from(settings: SystemSettings) -> Self {
+        Self {
+            registration_enabled: settings.registration_enabled == 1,
+            upload_max_bytes: settings.upload_max_bytes,
+            upload_max_mb: settings.upload_max_bytes / 1024 / 1024,
+            updated_at: settings.updated_at,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AdminUserResponse {
+    pub id: i64,
+    pub username: String,
+    pub avatar: Option<String>,
+    pub totp_enabled: bool,
+    pub has_totp_secret: bool,
+    pub is_active: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl From<User> for AdminUserResponse {
+    fn from(user: User) -> Self {
+        Self {
+            id: user.id,
+            username: user.username,
+            avatar: user.avatar,
+            totp_enabled: user.totp_enabled == 1,
+            has_totp_secret: user
+                .totp_secret
+                .as_deref()
+                .map(|secret| !secret.trim().is_empty())
+                .unwrap_or(false),
+            is_active: user.is_active == 1,
+            created_at: user.created_at,
+            updated_at: user.updated_at,
         }
     }
 }

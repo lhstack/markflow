@@ -1,6 +1,6 @@
 services:
   markflow:
-    image: lhstack/markflow:latest
+    image: lhstack/markflow:1.0.1
     container_name: markflow
     restart: unless-stopped
     ports:
@@ -10,6 +10,9 @@ services:
       DATABASE_URL: "sqlite:data/markflow.db"
       JWT_SECRET: "change_me_to_a_long_random_string_in_production"
       RUST_LOG: "markflow=info,tower_http=warn"
+      UPLOAD_DIR: "uploads"
+      REGISTRATION_ENABLED: "true"
+      UPLOAD_MAX_MB: "20"
       LOG_TO_FILE: "true"
       LOG_DIR: "logs"
       LOG_FILE_NAME: "markflow.log"
@@ -18,6 +21,7 @@ services:
       LOG_KEEP_DAYS: "14"
     volumes:
       - ./data:/app/data
+      - ./uploads:/app/uploads
       - ./logs:/app/logs
     cpus: "2.0"
     mem_limit: "256m"

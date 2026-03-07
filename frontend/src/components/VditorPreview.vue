@@ -27,6 +27,40 @@ const emit = defineEmits<{
 const previewRef = ref<HTMLDivElement | null>(null)
 let renderTimer: number | null = null
 
+function handlePreviewLinkClick(event: MouseEvent) {
+  const host = previewRef.value
+  const target = event.target
+  if (!host || !(target instanceof HTMLElement)) return
+
+  const link = target.closest('a') as HTMLAnchorElement | null
+  if (!link || !host.contains(link)) return
+
+  const href = link.getAttribute('href')?.trim()
+  if (!href) return
+
+  if (href.startsWith('#')) {
+    event.preventDefault()
+    const targetId = decodeURIComponent(href.slice(1))
+    const heading = targetId ? host.querySelector<HTMLElement>(`#${CSS.escape(targetId)}`) : null
+    heading?.scrollIntoView({ block: 'start', behavior: 'smooth' })
+    return
+  }
+
+  event.preventDefault()
+  window.open(link.href || href, '_blank', 'noopener,noreferrer')
+}
+
+function normalizePreviewLinks() {
+  if (!previewRef.value) return
+
+  previewRef.value.querySelectorAll<HTMLAnchorElement>('a[href]').forEach((link) => {
+    const href = link.getAttribute('href')?.trim()
+    if (!href || href.startsWith('#')) return
+    link.target = '_blank'
+    link.rel = 'noopener noreferrer'
+  })
+}
+
 async function renderPreview() {
   await nextTick()
   if (!previewRef.value) return
@@ -54,6 +88,8 @@ async function renderPreview() {
       lineNumber: false,
     },
   })
+
+  normalizePreviewLinks()
 
   const headings = Array.from(
     previewRef.value.querySelectorAll<HTMLElement>('.vditor-reset h1, .vditor-reset h2, .vditor-reset h3, .vditor-reset h4, .vditor-reset h5, .vditor-reset h6')
@@ -83,6 +119,7 @@ watch(() => props.markdown, () => {
 }, { immediate: true })
 
 onMounted(() => {
+  previewRef.value?.addEventListener('click', handlePreviewLinkClick)
   queueRenderPreview()
 })
 
@@ -90,6 +127,7 @@ onBeforeUnmount(() => {
   if (renderTimer) {
     window.clearTimeout(renderTimer)
   }
+  previewRef.value?.removeEventListener('click', handlePreviewLinkClick)
 })
 </script>
 

@@ -72,7 +72,6 @@
         <main
           ref="shareContentRef"
           class="share-doc-content"
-          :class="{ 'has-floating-toc': showFloatingToc && tocPanelOpen, 'has-toc-tab': showFloatingToc && !tocPanelOpen }"
         >
           <article ref="previewArticleRef" class="share-paper">
             <div class="share-paper-head">
@@ -179,7 +178,6 @@
         <main
           ref="shareContentRef"
           class="share-dir-content"
-          :class="{ 'has-floating-toc': showFloatingToc && tocPanelOpen, 'has-toc-tab': showFloatingToc && !tocPanelOpen }"
         >
           <article v-if="selectedDoc" ref="previewArticleRef" class="share-paper">
             <div class="share-paper-head">
@@ -1265,16 +1263,6 @@ const ShareTreeNav = defineComponent({
   padding: 24px 24px 40px;
 }
 
-.share-doc-content.has-floating-toc,
-.share-dir-content.has-floating-toc {
-  padding-right: 320px;
-}
-
-.share-doc-content.has-toc-tab,
-.share-dir-content.has-toc-tab {
-  padding-right: 82px;
-}
-
 .share-paper {
   width: min(1440px, 100%);
   margin: 0 auto;
@@ -1586,13 +1574,6 @@ const ShareTreeNav = defineComponent({
   .share-doc-content,
   .share-dir-content {
     padding: 14px 14px 24px;
-  }
-
-  .share-doc-content.has-floating-toc,
-  .share-dir-content.has-floating-toc,
-  .share-doc-content.has-toc-tab,
-  .share-dir-content.has-toc-tab {
-    padding-right: 14px;
   }
 
   .share-paper {
