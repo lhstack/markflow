@@ -361,8 +361,8 @@ async function initEditor() {
         mark: true,
         footnotes: true,
         autoSpace: true,
-        codeBlockPreview: true,
-        mathBlockPreview: true,
+        codeBlockPreview: false,
+        mathBlockPreview: false,
       },
       hljs: {
         style: 'github',

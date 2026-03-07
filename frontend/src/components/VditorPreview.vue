@@ -11,9 +11,17 @@ import 'vditor/dist/index.css'
 
 const props = defineProps<{
   markdown: string
+  renderKey?: string | number
+  clearBeforeRender?: boolean
 }>()
+
+interface PreviewHeading {
+  text: string
+  level: number
+}
+
 const emit = defineEmits<{
-  rendered: []
+  rendered: [{ key?: string | number; headings: PreviewHeading[] }]
 }>()
 
 const previewRef = ref<HTMLDivElement | null>(null)
@@ -22,6 +30,9 @@ let renderTimer: number | null = null
 async function renderPreview() {
   await nextTick()
   if (!previewRef.value) return
+  if (props.clearBeforeRender) {
+    previewRef.value.innerHTML = ''
+  }
 
   Vditor.preview(previewRef.value, props.markdown || '', {
     mode: 'light',
@@ -43,7 +54,18 @@ async function renderPreview() {
       lineNumber: false,
     },
   })
-  emit('rendered')
+
+  const headings = Array.from(
+    previewRef.value.querySelectorAll<HTMLElement>('.vditor-reset h1, .vditor-reset h2, .vditor-reset h3, .vditor-reset h4, .vditor-reset h5, .vditor-reset h6')
+  ).map((heading) => ({
+    text: heading.textContent?.trim() || '',
+    level: Number(heading.tagName.slice(1)) || 1,
+  }))
+
+  emit('rendered', {
+    key: props.renderKey,
+    headings,
+  })
 }
 
 function queueRenderPreview() {
@@ -90,9 +112,12 @@ onBeforeUnmount(() => {
 :deep(.vditor-reset h1),
 :deep(.vditor-reset h2),
 :deep(.vditor-reset h3),
-:deep(.vditor-reset h4) {
+:deep(.vditor-reset h4),
+:deep(.vditor-reset h5),
+:deep(.vditor-reset h6) {
   color: #13161d;
   letter-spacing: -0.02em;
+  scroll-margin-top: 28px;
 }
 
 :deep(.vditor-reset h1) {

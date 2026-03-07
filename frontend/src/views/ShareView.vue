@@ -69,14 +69,75 @@
             </div>
           </div>
         </aside>
-        <main class="share-doc-content">
-          <article class="share-paper">
+        <main
+          ref="shareContentRef"
+          class="share-doc-content"
+          :class="{ 'has-floating-toc': showFloatingToc && tocPanelOpen, 'has-toc-tab': showFloatingToc && !tocPanelOpen }"
+        >
+          <article ref="previewArticleRef" class="share-paper">
             <div class="share-paper-head">
               <div class="share-paper-kicker">SHARED NOTE</div>
               <h1>{{ content?.name || '未命名文档' }}</h1>
             </div>
-            <VditorPreview :markdown="content?.content || ''" />
+            <VditorPreview
+              :key="currentPreviewIdentity"
+              :render-key="currentPreviewIdentity"
+              :clear-before-render="true"
+              :markdown="content?.content || ''"
+              @rendered="handlePreviewRendered"
+            />
           </article>
+          <aside
+            v-if="showFloatingToc"
+            class="floating-toc"
+            :class="{ collapsed: !tocPanelOpen }"
+          >
+            <button
+              v-if="!tocPanelOpen"
+              class="floating-toc-tab"
+              title="展开目录"
+              aria-label="展开目录"
+              @click="toggleTocPanel"
+            >
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                <path d="M2 3.25c0-.414.336-.75.75-.75h10.5a.75.75 0 0 1 0 1.5H2.75A.75.75 0 0 1 2 3.25Zm0 4c0-.414.336-.75.75-.75h7.5a.75.75 0 0 1 0 1.5h-7.5A.75.75 0 0 1 2 7.25Zm0 4c0-.414.336-.75.75-.75h5.5a.75.75 0 0 1 0 1.5h-5.5A.75.75 0 0 1 2 11.25Zm10.47-2.78a.75.75 0 0 1 1.06 0l1.72 1.72a.75.75 0 0 1 0 1.06l-1.72 1.72a.75.75 0 1 1-1.06-1.06l.44-.44H10.5a.75.75 0 0 1 0-1.5h2.41l-.44-.44a.75.75 0 0 1 0-1.06Z"/>
+              </svg>
+              <span>目录</span>
+            </button>
+            <template v-else>
+              <div class="floating-toc-head">
+                <div>
+                  <div class="floating-toc-kicker">Outline</div>
+                  <div class="floating-toc-title">文档目录</div>
+                </div>
+                <button
+                  class="floating-toc-toggle"
+                  title="收起目录"
+                  aria-label="收起目录"
+                  @click="toggleTocPanel"
+                >
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                    <path d="M9.78 3.22a.75.75 0 0 1 0 1.06L6.06 8l3.72 3.72a.75.75 0 1 1-1.06 1.06L4.47 8.53a.75.75 0 0 1 0-1.06l4.25-4.25a.75.75 0 0 1 1.06 0Z"/>
+                  </svg>
+                </button>
+              </div>
+              <div v-if="tocItems.length" class="floating-toc-list">
+                <button
+                  v-for="item in tocItems"
+                  :key="item.id"
+                  class="floating-toc-item"
+                  :class="[`level-${item.level}`, { active: item.id === selectedTocId }]"
+                  @click="scrollToHeading(item)"
+                >
+                  <span class="floating-toc-bullet"></span>
+                  <span class="floating-toc-text">{{ item.text }}</span>
+                </button>
+              </div>
+              <div v-else class="floating-toc-empty">
+                {{ tocReady ? '当前预览内容里没有可识别的标题' : '正在识别目录...' }}
+              </div>
+            </template>
+          </aside>
         </main>
       </div>
     </div>
@@ -115,18 +176,79 @@
             </div>
           </div>
         </aside>
-        <main class="share-dir-content">
-          <article v-if="selectedDoc" class="share-paper">
+        <main
+          ref="shareContentRef"
+          class="share-dir-content"
+          :class="{ 'has-floating-toc': showFloatingToc && tocPanelOpen, 'has-toc-tab': showFloatingToc && !tocPanelOpen }"
+        >
+          <article v-if="selectedDoc" ref="previewArticleRef" class="share-paper">
             <div class="share-paper-head">
               <div class="share-paper-kicker">SHARED NOTE</div>
               <h1>{{ selectedDoc.name }}</h1>
             </div>
-            <VditorPreview :markdown="selectedDoc.content || ''" />
+            <VditorPreview
+              :key="currentPreviewIdentity"
+              :render-key="currentPreviewIdentity"
+              :clear-before-render="true"
+              :markdown="selectedDoc.content || ''"
+              @rendered="handlePreviewRendered"
+            />
           </article>
           <div v-else class="dir-placeholder">
             <el-icon><Folder /></el-icon>
             <p>从左侧选择文档查看</p>
           </div>
+          <aside
+            v-if="showFloatingToc"
+            class="floating-toc"
+            :class="{ collapsed: !tocPanelOpen }"
+          >
+            <button
+              v-if="!tocPanelOpen"
+              class="floating-toc-tab"
+              title="展开目录"
+              aria-label="展开目录"
+              @click="toggleTocPanel"
+            >
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                <path d="M2 3.25c0-.414.336-.75.75-.75h10.5a.75.75 0 0 1 0 1.5H2.75A.75.75 0 0 1 2 3.25Zm0 4c0-.414.336-.75.75-.75h7.5a.75.75 0 0 1 0 1.5h-7.5A.75.75 0 0 1 2 7.25Zm0 4c0-.414.336-.75.75-.75h5.5a.75.75 0 0 1 0 1.5h-5.5A.75.75 0 0 1 2 11.25Zm10.47-2.78a.75.75 0 0 1 1.06 0l1.72 1.72a.75.75 0 0 1 0 1.06l-1.72 1.72a.75.75 0 1 1-1.06-1.06l.44-.44H10.5a.75.75 0 0 1 0-1.5h2.41l-.44-.44a.75.75 0 0 1 0-1.06Z"/>
+              </svg>
+              <span>目录</span>
+            </button>
+            <template v-else>
+              <div class="floating-toc-head">
+                <div>
+                  <div class="floating-toc-kicker">Outline</div>
+                  <div class="floating-toc-title">文档目录</div>
+                </div>
+                <button
+                  class="floating-toc-toggle"
+                  title="收起目录"
+                  aria-label="收起目录"
+                  @click="toggleTocPanel"
+                >
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                    <path d="M9.78 3.22a.75.75 0 0 1 0 1.06L6.06 8l3.72 3.72a.75.75 0 1 1-1.06 1.06L4.47 8.53a.75.75 0 0 1 0-1.06l4.25-4.25a.75.75 0 0 1 1.06 0Z"/>
+                  </svg>
+                </button>
+              </div>
+              <div v-if="tocItems.length" class="floating-toc-list">
+                <button
+                  v-for="item in tocItems"
+                  :key="item.id"
+                  class="floating-toc-item"
+                  :class="[`level-${item.level}`, { active: item.id === selectedTocId }]"
+                  @click="scrollToHeading(item)"
+                >
+                  <span class="floating-toc-bullet"></span>
+                  <span class="floating-toc-text">{{ item.text }}</span>
+                </button>
+              </div>
+              <div v-else class="floating-toc-empty">
+                {{ tocReady ? '当前预览内容里没有可识别的标题' : '正在识别目录...' }}
+              </div>
+            </template>
+          </aside>
         </main>
       </div>
     </div>
@@ -134,7 +256,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, defineComponent, h, onMounted, ref } from 'vue'
+import { computed, defineComponent, h, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import request from '@/utils/request'
 import { useRoute } from 'vue-router'
 import VditorPreview from '@/components/VditorPreview.vue'
@@ -158,6 +280,18 @@ interface ShareNode {
   children?: ShareNode[]
 }
 
+interface TocItem {
+  id: string
+  text: string
+  level: number
+  order: number
+}
+
+interface PreviewRenderedPayload {
+  key?: string | number
+  headings: Array<{ text: string; level: number }>
+}
+
 const state = ref<ShareState>('loading')
 const shareInfo = ref<ShareInfo | null>(null)
 const content = ref<ShareNode | null>(null)
@@ -173,6 +307,14 @@ const expandedDirIds = ref<Set<number>>(new Set())
 const shareDirStateInitialized = ref(false)
 const hasDirExpansionPreference = ref(false)
 const readonlyExpandedIds = new Set<number>()
+const shareContentRef = ref<HTMLElement | null>(null)
+const previewArticleRef = ref<HTMLElement | null>(null)
+const tocPanelOpen = ref(true)
+const tocItems = ref<TocItem[]>([])
+const activeTocId = ref('')
+const selectedTocId = ref('')
+const tocReady = ref(false)
+let tocRetryTimer: number | null = null
 
 const SHARE_PASSWORD_KEY_PREFIX = 'markflow.share.password.'
 const SHARE_UI_KEY_PREFIX = 'markflow.share.ui.'
@@ -209,6 +351,7 @@ function loadShareUiState() {
       sidebar_open?: boolean
       expanded_dir_ids?: number[]
       selected_doc_id?: number | string | null
+      toc_open?: boolean
     }
     if (typeof parsed.sidebar_open === 'boolean') {
       shareSidebarOpen.value = parsed.sidebar_open
@@ -228,6 +371,9 @@ function loadShareUiState() {
     ) {
       persistedSelectedDocId.value = Number(parsed.selected_doc_id)
     }
+    if (typeof parsed.toc_open === 'boolean') {
+      tocPanelOpen.value = parsed.toc_open
+    }
   } catch {
     // ignore invalid cache
   }
@@ -240,12 +386,148 @@ function persistShareUiState() {
       sidebar_open: shareSidebarOpen.value,
       expanded_dir_ids: Array.from(expandedDirIds.value),
       selected_doc_id: selectedDoc.value?.id ?? persistedSelectedDocId.value ?? null,
+      toc_open: tocPanelOpen.value,
     })
   )
 }
 
 function toggleShareSidebar() {
   shareSidebarOpen.value = !shareSidebarOpen.value
+  persistShareUiState()
+}
+
+function slugifyHeading(text: string) {
+  return text
+    .trim()
+    .toLowerCase()
+    .replace(/[\s\W-]+/g, '-')
+    .replace(/^-+|-+$/g, '') || 'section'
+}
+
+function updateActiveTocByScroll() {
+  const container = shareContentRef.value
+  const headings = getPreviewHeadings()
+  if (!container || !headings.length || !tocItems.value.length) {
+    activeTocId.value = ''
+    return
+  }
+
+  const containerTop = container.getBoundingClientRect().top
+  let current = headings[0]
+  for (const heading of headings) {
+    if (heading.getBoundingClientRect().top - containerTop <= 104) current = heading
+    else break
+  }
+  activeTocId.value = current.id
+}
+
+function refreshTocFromPreview() {
+  const headings = getPreviewHeadings()
+  if (!headings.length) {
+    tocItems.value = []
+    activeTocId.value = ''
+    selectedTocId.value = ''
+    return false
+  }
+
+  const counts = new Map<string, number>()
+  tocItems.value = headings.map((heading, index) => {
+    const text = heading.textContent?.trim() || `标题 ${index + 1}`
+    const level = Number(heading.tagName.slice(1)) || 1
+    const baseId = slugifyHeading(text)
+    const count = counts.get(baseId) || 0
+    counts.set(baseId, count + 1)
+    const nextId = count === 0 ? baseId : `${baseId}-${count + 1}`
+    heading.id = nextId
+    return { id: nextId, text, level, order: index }
+  })
+  if (!selectedTocId.value || !tocItems.value.some((item) => item.id === selectedTocId.value)) {
+    selectedTocId.value = tocItems.value[0]?.id || ''
+  }
+  updateActiveTocByScroll()
+  return true
+}
+
+function clearTocRetryTimer() {
+  if (tocRetryTimer !== null) {
+    window.clearTimeout(tocRetryTimer)
+    tocRetryTimer = null
+  }
+}
+
+function scheduleTocRefresh(attempt = 0) {
+  clearTocRetryTimer()
+  tocRetryTimer = window.setTimeout(() => {
+    const found = refreshTocFromPreview()
+    if (found || attempt >= 8) {
+      tocReady.value = true
+      return
+    }
+    scheduleTocRefresh(attempt + 1)
+  }, 80)
+}
+
+function getPreviewHeadings() {
+  const article = previewArticleRef.value
+  if (!article) return [] as HTMLElement[]
+  return Array.from(
+    article.querySelectorAll<HTMLElement>('.vditor-reset h1, .vditor-reset h2, .vditor-reset h3, .vditor-reset h4, .vditor-reset h5, .vditor-reset h6')
+  )
+}
+
+function scrollToHeading(item: TocItem) {
+  const headings = getPreviewHeadings()
+  const target = headings[item.order]
+  if (!target) return
+  selectedTocId.value = item.id
+  target.scrollIntoView({
+    behavior: 'smooth',
+    block: 'start',
+    inline: 'nearest',
+  })
+  activeTocId.value = item.id
+}
+
+function handlePreviewRendered(payload?: PreviewRenderedPayload) {
+  void nextTick().then(() => {
+    if (payload?.key !== undefined && payload.key !== currentPreviewIdentity.value) {
+      return
+    }
+    if (payload?.headings) {
+      const headings = getPreviewHeadings()
+      const counts = new Map<string, number>()
+      tocItems.value = headings.map((heading, index) => {
+        const source = payload.headings[index]
+        const text = source?.text || heading.textContent?.trim() || `标题 ${index + 1}`
+        const level = source?.level || Number(heading.tagName.slice(1)) || 1
+        const baseId = slugifyHeading(text)
+        const count = counts.get(baseId) || 0
+        counts.set(baseId, count + 1)
+        const nextId = count === 0 ? baseId : `${baseId}-${count + 1}`
+        heading.id = nextId
+        return { id: nextId, text, level, order: index }
+      })
+      if (!selectedTocId.value || !tocItems.value.some((item) => item.id === selectedTocId.value)) {
+        selectedTocId.value = tocItems.value[0]?.id || ''
+      }
+      tocReady.value = true
+      clearTocRetryTimer()
+      updateActiveTocByScroll()
+      if (tocItems.value.length) return
+    }
+    const found = refreshTocFromPreview()
+    if (found) {
+      tocReady.value = true
+      clearTocRetryTimer()
+      return
+    }
+    tocReady.value = false
+    scheduleTocRefresh()
+  })
+}
+
+function toggleTocPanel() {
+  tocPanelOpen.value = !tocPanelOpen.value
   persistShareUiState()
 }
 
@@ -448,8 +730,61 @@ async function verifyPassword() {
 
 onMounted(async () => {
   loadShareUiState()
+  shareContentRef.value?.addEventListener('scroll', updateActiveTocByScroll, { passive: true })
   await loadShareInfo()
 })
+
+onBeforeUnmount(() => {
+  shareContentRef.value?.removeEventListener('scroll', updateActiveTocByScroll)
+  clearTocRetryTimer()
+})
+
+watch(shareContentRef, (next, prev) => {
+  prev?.removeEventListener('scroll', updateActiveTocByScroll)
+  next?.addEventListener('scroll', updateActiveTocByScroll, { passive: true })
+})
+
+watch(() => state.value, () => {
+  if (state.value !== 'doc' && state.value !== 'dir') {
+    tocItems.value = []
+    activeTocId.value = ''
+    selectedTocId.value = ''
+    tocReady.value = false
+    clearTocRetryTimer()
+  }
+})
+
+watch(() => selectedDoc.value?.id, () => {
+  tocItems.value = []
+  activeTocId.value = ''
+  selectedTocId.value = ''
+  tocReady.value = false
+  clearTocRetryTimer()
+})
+
+const currentPreviewMarkdown = computed(() => {
+  if (state.value === 'dir') return selectedDoc.value?.content || ''
+  if (state.value === 'doc') return content.value?.content || ''
+  return ''
+})
+
+const currentPreviewIdentity = computed(() => {
+  if (state.value === 'dir') return `dir:${selectedDoc.value?.id ?? 'none'}`
+  if (state.value === 'doc') return `doc:${content.value?.id ?? 'none'}`
+  return 'none'
+})
+
+watch(currentPreviewMarkdown, () => {
+  tocItems.value = []
+  activeTocId.value = ''
+  selectedTocId.value = ''
+  tocReady.value = false
+  clearTocRetryTimer()
+})
+
+const showFloatingToc = computed(() =>
+  (state.value === 'doc' || state.value === 'dir') && currentPreviewMarkdown.value.trim().length > 0
+)
 
 const MarkFlowLogo = defineComponent({
   render() {
@@ -925,8 +1260,19 @@ const ShareTreeNav = defineComponent({
 
 .share-doc-content,
 .share-dir-content {
+  position: relative;
   overflow-y: auto;
   padding: 24px 24px 40px;
+}
+
+.share-doc-content.has-floating-toc,
+.share-dir-content.has-floating-toc {
+  padding-right: 320px;
+}
+
+.share-doc-content.has-toc-tab,
+.share-dir-content.has-toc-tab {
+  padding-right: 82px;
 }
 
 .share-paper {
@@ -975,6 +1321,169 @@ const ShareTreeNav = defineComponent({
 .dir-placeholder .el-icon {
   font-size: 46px;
   opacity: 0.45;
+}
+
+.floating-toc {
+  position: fixed;
+  top: calc(var(--header-height) + 22px);
+  right: 18px;
+  z-index: 90;
+  width: 270px;
+  max-height: calc(100vh - var(--header-height) - 40px);
+  border: 1px solid rgba(50, 64, 38, 0.08);
+  border-radius: 22px;
+  background: rgba(252, 253, 248, 0.92);
+  backdrop-filter: blur(16px);
+  box-shadow:
+    0 20px 44px rgba(49, 64, 39, 0.14),
+    inset 0 1px 0 rgba(255, 255, 255, 0.7);
+  overflow: hidden;
+}
+
+.floating-toc.collapsed {
+  width: auto;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+  overflow: visible;
+}
+
+.floating-toc-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 42px;
+  padding: 0 12px;
+  border: 1px solid rgba(82, 110, 60, 0.16);
+  border-radius: 999px;
+  background: rgba(250, 252, 246, 0.96);
+  color: #4b6135;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  box-shadow: 0 16px 34px rgba(49, 64, 39, 0.16);
+}
+
+.floating-toc-tab:hover,
+.floating-toc-toggle:hover {
+  background: rgba(237, 244, 228, 0.98);
+  color: #2f4a1a;
+}
+
+.floating-toc-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 16px 16px 12px;
+  border-bottom: 1px solid rgba(53, 67, 40, 0.08);
+}
+
+.floating-toc-kicker {
+  font-size: 10px;
+  line-height: 1;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: #8b9784;
+}
+
+.floating-toc-title {
+  margin-top: 6px;
+  font-size: 15px;
+  font-weight: 700;
+  color: #1f2819;
+}
+
+.floating-toc-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid rgba(82, 110, 60, 0.14);
+  border-radius: 10px;
+  background: rgba(247, 250, 242, 0.88);
+  color: #5c6d4f;
+  cursor: pointer;
+}
+
+.floating-toc-list {
+  max-height: calc(100vh - var(--header-height) - 126px);
+  overflow-y: auto;
+  padding: 10px 10px 14px;
+}
+
+.floating-toc-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 34px;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 12px;
+  background: transparent;
+  color: #53614a;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color 0.15s ease,
+    color 0.15s ease,
+    transform 0.15s ease;
+}
+
+.floating-toc-item:hover {
+  background: rgba(111, 154, 79, 0.1);
+  color: #2f4a1a;
+}
+
+.floating-toc-item.active {
+  background: rgba(111, 154, 79, 0.16);
+  color: #274412;
+}
+
+.floating-toc-item.level-2 {
+  padding-left: 22px;
+}
+
+.floating-toc-item.level-3 {
+  padding-left: 34px;
+}
+
+.floating-toc-item.level-4,
+.floating-toc-item.level-5,
+.floating-toc-item.level-6 {
+  padding-left: 46px;
+}
+
+.floating-toc-bullet {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(113, 145, 86, 0.44);
+  flex-shrink: 0;
+}
+
+.floating-toc-item.active .floating-toc-bullet {
+  background: #5d8c37;
+  box-shadow: 0 0 0 4px rgba(111, 154, 79, 0.14);
+}
+
+.floating-toc-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.floating-toc-empty {
+  padding: 18px 16px 20px;
+  font-size: 12px;
+  color: var(--text3);
 }
 
 :deep(.share-tree-nav) {
@@ -1079,10 +1588,21 @@ const ShareTreeNav = defineComponent({
     padding: 14px 14px 24px;
   }
 
+  .share-doc-content.has-floating-toc,
+  .share-dir-content.has-floating-toc,
+  .share-doc-content.has-toc-tab,
+  .share-dir-content.has-toc-tab {
+    padding-right: 14px;
+  }
+
   .share-paper {
     width: 100%;
     padding: 20px 18px 28px;
     border-radius: 22px;
+  }
+
+  .floating-toc {
+    display: none;
   }
 
   :deep(.sh-doc-name) {
