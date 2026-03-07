@@ -126,6 +126,13 @@ npm run dev
 
 前端通过 Vite 代理把 `/api` 转发到 `http://localhost:3000`。
 
+补充说明：
+
+- 前端构建前会自动准备离线资源，把 `vditor/dist` 复制到 `frontend/public/vendor/vditor/dist`
+- `Vditor` 编辑器和预览渲染都走本地 `/vendor/vditor` 资源，不依赖外网 CDN
+- `Element Plus`、`@element-plus/icons-vue` 等前端依赖通过 npm/bun 本地安装后直接参与打包
+- 已移除 `Google Fonts` 外链，运行时不再请求 `fonts.googleapis.com` / `fonts.gstatic.com`
+
 ## 一体化发布（单进程）
 
 发布前先构建前端：

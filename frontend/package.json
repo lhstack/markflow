@@ -4,9 +4,10 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "vue-tsc && vite build",
-    "preview": "vite preview"
+    "prepare:assets": "node ./scripts/prepare-offline-assets.mjs",
+    "dev": "node ./scripts/prepare-offline-assets.mjs && vite",
+    "build": "node ./scripts/prepare-offline-assets.mjs && vue-tsc && vite build",
+    "preview": "node ./scripts/prepare-offline-assets.mjs && vite preview"
   },
   "dependencies": {
     "@codemirror/commands": "^6.0.0",

@@ -1,6 +1,7 @@
 <template>
   <div class="vditor-preview-shell">
     <div ref="previewRef" class="vditor-preview-host"></div>
+    <pre v-if="renderError" class="vditor-preview-fallback">{{ markdown }}</pre>
   </div>
 </template>
 
@@ -8,6 +9,7 @@
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import Vditor from 'vditor'
 import 'vditor/dist/index.css'
+import { VDITOR_CDN } from '@/utils/vditor'
 
 const props = defineProps<{
   markdown: string
@@ -25,6 +27,7 @@ const emit = defineEmits<{
 }>()
 
 const previewRef = ref<HTMLDivElement | null>(null)
+const renderError = ref(false)
 let renderTimer: number | null = null
 
 function handlePreviewLinkClick(event: MouseEvent) {
@@ -67,41 +70,53 @@ async function renderPreview() {
   if (props.clearBeforeRender) {
     previewRef.value.innerHTML = ''
   }
+  renderError.value = false
 
-  Vditor.preview(previewRef.value, props.markdown || '', {
-    mode: 'light',
-    lang: 'zh_CN',
-    icon: 'material',
-    theme: {
-      current: 'light',
-    },
-    markdown: {
-      toc: true,
-      mark: true,
-      footnotes: true,
-      autoSpace: true,
-      codeBlockPreview: true,
-      mathBlockPreview: true,
-    },
-    hljs: {
-      style: 'github',
-      lineNumber: false,
-    },
-  })
+  try {
+    Vditor.preview(previewRef.value, props.markdown || '', {
+      cdn: VDITOR_CDN,
+      mode: 'light',
+      lang: 'zh_CN',
+      icon: 'material',
+      theme: {
+        current: 'light',
+      },
+      markdown: {
+        toc: true,
+        mark: true,
+        footnotes: true,
+        autoSpace: true,
+        codeBlockPreview: true,
+        mathBlockPreview: true,
+      },
+      hljs: {
+        style: 'github',
+        lineNumber: false,
+      },
+    })
 
-  normalizePreviewLinks()
+    normalizePreviewLinks()
 
-  const headings = Array.from(
-    previewRef.value.querySelectorAll<HTMLElement>('.vditor-reset h1, .vditor-reset h2, .vditor-reset h3, .vditor-reset h4, .vditor-reset h5, .vditor-reset h6')
-  ).map((heading) => ({
-    text: heading.textContent?.trim() || '',
-    level: Number(heading.tagName.slice(1)) || 1,
-  }))
+    const headings = Array.from(
+      previewRef.value.querySelectorAll<HTMLElement>('.vditor-reset h1, .vditor-reset h2, .vditor-reset h3, .vditor-reset h4, .vditor-reset h5, .vditor-reset h6')
+    ).map((heading) => ({
+      text: heading.textContent?.trim() || '',
+      level: Number(heading.tagName.slice(1)) || 1,
+    }))
 
-  emit('rendered', {
-    key: props.renderKey,
-    headings,
-  })
+    emit('rendered', {
+      key: props.renderKey,
+      headings,
+    })
+  } catch (error) {
+    console.error('Vditor preview render failed', error)
+    renderError.value = true
+    previewRef.value.innerHTML = ''
+    emit('rendered', {
+      key: props.renderKey,
+      headings: [],
+    })
+  }
 }
 
 function queueRenderPreview() {
@@ -140,8 +155,21 @@ onBeforeUnmount(() => {
   min-height: 120px;
 }
 
+.vditor-preview-fallback {
+  margin: 0;
+  padding: 16px 18px;
+  border-radius: 16px;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  background: #f8fbf5;
+  color: #334155;
+  font-size: 13px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 :deep(.vditor-reset) {
-  font-family: "Avenir Next", "PingFang SC", "Noto Sans SC", sans-serif;
+  font-family: var(--font);
   color: #23262f;
   line-height: 1.8;
   font-size: 15px;
@@ -188,7 +216,7 @@ onBeforeUnmount(() => {
   padding: 0.18rem 0.38rem;
   background: #f0f4e8;
   color: #486032;
-  font-family: "JetBrains Mono", "Fira Code", monospace;
+  font-family: var(--mono);
 }
 
 :deep(.vditor-reset pre) {
@@ -203,7 +231,7 @@ onBeforeUnmount(() => {
 :deep(.vditor-reset pre code) {
   display: block;
   padding: 1rem 1.1rem !important;
-  font-family: "JetBrains Mono", "Fira Code", monospace;
+  font-family: var(--mono);
 }
 
 :deep(.vditor-reset table) {

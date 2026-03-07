@@ -109,6 +109,7 @@ import 'vditor/dist/index.css'
 
 import { useDocsStore, type DocNode } from '@/stores/docs'
 import { useSystemStore } from '@/stores/system'
+import { VDITOR_CDN } from '@/utils/vditor'
 import VditorPreview from '@/components/VditorPreview.vue'
 import { createManagedUploadTask, removeManagedUpload, type ManagedUploadTask } from '@/utils/managedUploads'
 import { uploadFile, uploadImage } from '@/utils/uploads'
@@ -331,6 +332,8 @@ async function initEditor() {
 
   editor = new Vditor(editorRef.value, {
     value: draft.value,
+    cdn: VDITOR_CDN,
+    tab: '    ',
     mode: 'sv',
     theme: 'classic',
     icon: 'material',
@@ -660,7 +663,7 @@ onUnmounted(() => {
 }
 
 .save-btn kbd {
-  font-family: "JetBrains Mono", "Fira Code", monospace;
+  font-family: var(--mono);
   font-size: 11px;
   border-radius: 6px;
   padding: 2px 5px;
@@ -1079,10 +1082,13 @@ onUnmounted(() => {
 
 :deep(.vditor-sv) {
   padding: 28px 30px 72px;
-  font-size: 15px;
-  line-height: 1.9;
+  font-family: var(--mono);
+  font-size: 14px;
+  line-height: 1.75;
   color: #232a21;
   background: rgba(255, 255, 255, 0.74);
+  tab-size: 4;
+  -moz-tab-size: 4;
 }
 
 :deep(.vditor-sv:focus) {

@@ -933,7 +933,7 @@ const ShareTreeNav = defineComponent({
     radial-gradient(circle at top right, rgba(240, 230, 190, 0.26), transparent 24%),
     linear-gradient(180deg, #f7f9f3 0%, #eef3e7 100%);
   color: var(--text);
-  font-family: "Avenir Next", "PingFang SC", "Noto Sans SC", sans-serif;
+  font-family: var(--font);
 }
 
 .share-center {
