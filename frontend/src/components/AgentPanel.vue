@@ -336,6 +336,7 @@ import {
 type PageScope = 'overview' | 'editor' | 'dir'
 type DocType = 'doc' | 'dir' | null
 type SessionRole = 'user' | 'assistant'
+type RequestRole = SessionRole | 'system'
 type StreamAction = 'chat' | 'append' | 'replace'
 type RouteKind = 'overview' | 'project' | 'doc'
 
@@ -349,6 +350,11 @@ interface AgentMessage {
   role: SessionRole
   content: string
   reasoning?: string
+}
+
+interface AgentRequestMessage {
+  role: RequestRole
+  content: string
 }
 
 interface AgentSession {
@@ -422,6 +428,11 @@ interface ProviderDetailResponse {
   custom_models?: string[]
   is_active?: boolean
 }
+
+const REQUEST_RECENT_MESSAGE_COUNT = 8
+const REQUEST_SUMMARY_TRIGGER_CHARS = 6000
+const REQUEST_SUMMARY_MAX_ITEMS = 6
+const REQUEST_SUMMARY_ITEM_CHARS = 240
 
 const props = defineProps<{
   pageScope: PageScope
@@ -1201,8 +1212,77 @@ function currentDocContent() {
   return getAgentEditorSnapshot(props.docId) ?? props.docContent ?? ''
 }
 
+function compactMessageText(content: string, maxChars = REQUEST_SUMMARY_ITEM_CHARS) {
+  const compact = content.replace(/\s+/g, ' ').trim()
+  if (!compact) return ''
+  if (compact.length <= maxChars) return compact
+  return `${compact.slice(0, maxChars)}...`
+}
+
+function buildHistorySummary(messages: AgentMessage[]) {
+  const userItems: string[] = []
+  const assistantItems: string[] = []
+
+  for (const message of messages) {
+    const compact = compactMessageText(message.content)
+    if (!compact) continue
+
+    if (message.role === 'user') {
+      if (userItems.length < REQUEST_SUMMARY_MAX_ITEMS) {
+        userItems.push(`- ${compact}`)
+      }
+      continue
+    }
+
+    if (assistantItems.length < REQUEST_SUMMARY_MAX_ITEMS) {
+      assistantItems.push(`- ${compact}`)
+    }
+  }
+
+  if (!userItems.length && !assistantItems.length) return ''
+
+  const parts = ['以下是当前会话中较早消息的摘要，请基于此继续对话，不要假设摘要之外的旧细节仍然准确。']
+  if (userItems.length) {
+    parts.push('较早的用户诉求与补充：')
+    parts.push(...userItems)
+  }
+  if (assistantItems.length) {
+    parts.push('较早的助手答复与已完成事项：')
+    parts.push(...assistantItems)
+  }
+  return parts.join('\n')
+}
+
+function buildConversationMessages(messages: AgentMessage[]): AgentRequestMessage[] {
+  const nonEmptyMessages = messages
+    .map((message) => ({
+      ...message,
+      content: message.content.trim(),
+    }))
+    .filter((message) => Boolean(message.content))
+  const normalized = nonEmptyMessages.map((message) => ({
+    role: message.role,
+    content: message.content,
+  }))
+
+  if (!normalized.length) return []
+
+  const totalChars = normalized.reduce((sum, message) => sum + message.content.length, 0)
+  if (normalized.length <= REQUEST_RECENT_MESSAGE_COUNT || totalChars <= REQUEST_SUMMARY_TRIGGER_CHARS) {
+    return normalized
+  }
+
+  const recentMessages = normalized.slice(-REQUEST_RECENT_MESSAGE_COUNT)
+  const olderMessages = nonEmptyMessages.slice(0, Math.max(0, normalized.length - REQUEST_RECENT_MESSAGE_COUNT))
+  const summary = buildHistorySummary(olderMessages)
+
+  return summary
+    ? [{ role: 'system', content: summary }, ...recentMessages]
+    : recentMessages
+}
+
 function buildRequestBody(
-  messages: AgentMessage[],
+  messages: AgentRequestMessage[],
   provider: AgentProvider,
   model: string,
   options: {
@@ -1358,14 +1438,9 @@ async function sendMessage() {
   let inThinkBlock = false
   let streamCompleted = false
   let streamFailed = false
-  let previousResponseId: string | null = null
-  previousResponseId = session.previousResponseId
   let pendingToolOutputs: AgentToolOutputPayload[] | null = null
   let streamAborted = false
-  const canUseIncrementalMessages = Boolean(previousResponseId)
-  const requestMessages = canUseIncrementalMessages
-    ? session.messages.slice(session.lastSyncedMessageCount)
-    : session.messages
+  const requestMessages = buildConversationMessages(session.messages)
   const renderQueue: Array<{ type: 'message' | 'reasoning'; content: string }> = []
   let renderLoop: Promise<void> | null = null
   let consumeAssistantText = (_rawChunk: string, _force = false) => {}
@@ -1593,7 +1668,7 @@ async function sendMessage() {
         },
         signal: abortController.signal,
         body: JSON.stringify(buildRequestBody(requestMessages, provider, session.model.trim(), {
-          previousResponseId,
+          previousResponseId: null,
           toolOutputs: pendingToolOutputs,
         })),
       })
@@ -1637,10 +1712,6 @@ async function sendMessage() {
             }
           } else if (parsed.event === 'message.completed') {
             const completedContent = parsed.data.content || ''
-            const completedResponseId = typeof parsed.data.response_id === 'string' ? parsed.data.response_id.trim() : ''
-            if (completedResponseId) {
-              previousResponseId = completedResponseId
-            }
             if (!cycleReceivedDelta && completedContent) {
               enqueueRenderJob('message', completedContent)
             }
@@ -1664,7 +1735,6 @@ async function sendMessage() {
         throw new Error('模型请求了工具调用，但缺少 response_id')
       }
 
-      previousResponseId = toolResponseId
       pendingToolOutputs = await executeAgentToolCalls(requiredToolCalls)
     }
   } catch (error: any) {
@@ -1692,12 +1762,8 @@ async function sendMessage() {
     }
     assistantMessage.content = liveAssistantContent.value
     assistantMessage.reasoning = liveAssistantReasoning.value
-    session.previousResponseId = previousResponseId
-    if (!streamFailed && !streamAborted && previousResponseId) {
-      session.lastSyncedMessageCount = session.messages.length
-    } else if (!previousResponseId) {
-      session.lastSyncedMessageCount = 0
-    }
+    session.previousResponseId = null
+    session.lastSyncedMessageCount = 0
     session.updatedAt = Date.now()
     streaming.value = false
     streamingAssistantId.value = ''
