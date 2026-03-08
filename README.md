@@ -170,6 +170,7 @@ cargo build --release
 port = "3000"
 database_url = "sqlite:markflow.db"
 jwt_secret = "change_me_to_a_long_random_string_in_production"
+share_password_secret = "change_me_to_a_long_random_string_for_share_password_encryption"
 rust_log = "markflow=info,tower_http=warn"
 upload_dir = "uploads"
 
@@ -188,6 +189,7 @@ upload_max_mb = 20
 - `PORT`
 - `DATABASE_URL`
 - `JWT_SECRET`
+- `SHARE_PASSWORD_SECRET`
 - `RUST_LOG`
 - `UPLOAD_DIR`
 - `LOG_TO_FILE`
@@ -215,7 +217,10 @@ upload_max_mb = 20
 - 文档根节点归属项目（`doc_nodes.project_id`）
 - 上传文件默认保存在 `uploads/<user_id>/<yyyyMMdd>/`
 - 头像、项目背景图使用上传接口保存文件并在表中存 URL
-- 分享密码仅存哈希，不存明文
+- 分享密码使用两种形式保存：
+  - `password_hash` 用于访问校验
+  - `password_ciphertext` 用于拥有者后续再次复制分享链接密码
+- 分享密码不会以明文直接落库，而是通过 `SHARE_PASSWORD_SECRET` / `share_password_secret` 进行服务端加密后保存
 
 ## API 摘要（均以 `/api` 开头）
 
@@ -253,10 +258,12 @@ Shares：
 
 - `POST /api/shares`
 - `GET /api/shares/doc/:doc_id`
+- `GET /api/shares/:id/password`
 - `DELETE /api/shares/:id`
 - `GET /api/s/:token`
 - `POST /api/s/:token/verify`
 - `GET /api/s/:token/content`
+- `GET /api/s/:token/nodes/:node_id/content`
 
 Admin：
 

@@ -57,6 +57,7 @@ pub struct Share {
     pub doc_id: i64,
     pub token: String,
     pub password_hash: Option<String>,
+    pub password_ciphertext: Option<String>,
     pub expires_at: Option<String>,
     pub created_at: String,
 }
@@ -177,6 +178,21 @@ impl DocNodeResponse {
             children: vec![],
         }
     }
+
+    pub fn from_node_meta(node: DocNode) -> Self {
+        Self {
+            id: node.id,
+            project_id: node.project_id,
+            parent_id: node.parent_id,
+            name: node.name,
+            node_type: node.node_type,
+            content: None,
+            sort_order: node.sort_order,
+            created_at: node.created_at,
+            updated_at: node.updated_at,
+            children: vec![],
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -210,6 +226,7 @@ pub struct ShareResponse {
     pub doc_id: i64,
     pub token: String,
     pub has_password: bool,
+    pub can_copy_password: bool,
     pub expires_at: Option<String>,
     pub created_at: String,
 }
@@ -221,6 +238,7 @@ impl From<Share> for ShareResponse {
             doc_id: s.doc_id,
             token: s.token,
             has_password: s.password_hash.is_some(),
+            can_copy_password: s.password_ciphertext.is_some(),
             expires_at: s.expires_at,
             created_at: s.created_at,
         }

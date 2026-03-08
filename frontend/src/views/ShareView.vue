@@ -546,9 +546,10 @@ function isShareExpired(expiresAt?: string | null): boolean {
 
 function selectDoc(doc: ShareNode) {
   if (doc.node_type === 'doc') {
-    selectedDoc.value = doc
+    selectedDoc.value = { ...doc, content: selectedDoc.value?.id === doc.id ? selectedDoc.value.content : undefined }
     persistedSelectedDocId.value = doc.id
     persistShareUiState()
+    void loadSharedDocContent(doc.id, password.value || undefined)
   }
 }
 
@@ -668,21 +669,24 @@ async function loadContent(pw?: string) {
   }
 
   try {
-    const headers: Record<string, string> = {}
-    if (pw) headers['X-Share-Password'] = pw
+    const headers = buildShareHeaders(pw)
 
     const data = (await request.get(`/s/${route.params.token}/content`, { headers })) as { node: ShareNode }
     content.value = data.node
 
     if (data.node.node_type === 'dir') {
+      state.value = 'dir'
       syncExpandedDirState(data.node.children || [])
       const preservedSelectedId = persistedSelectedDocId.value ?? selectedDoc.value?.id ?? null
-      selectedDoc.value =
+      const nextSelected =
         (preservedSelectedId ? findShareNodeById(data.node.children || [], preservedSelectedId) : null) ||
         firstDocFromTree(data.node.children || [])
-      persistedSelectedDocId.value = selectedDoc.value?.id ?? null
+      selectedDoc.value = nextSelected ? { ...nextSelected, content: undefined } : null
+      persistedSelectedDocId.value = nextSelected?.id ?? null
       persistShareUiState()
-      state.value = 'dir'
+      if (nextSelected?.id) {
+        await loadSharedDocContent(nextSelected.id, pw)
+      }
     } else {
       selectedDoc.value = data.node
       persistedSelectedDocId.value = data.node.id
@@ -698,6 +702,35 @@ async function loadContent(pw?: string) {
       state.value = 'password'
     } else {
       state.value = 'notfound'
+    }
+  }
+}
+
+function buildShareHeaders(pw?: string) {
+  const headers: Record<string, string> = {}
+  if (pw) headers['X-Share-Password'] = pw
+  return headers
+}
+
+async function loadSharedDocContent(docId: number, pw?: string) {
+  try {
+    const data = (await request.get(`/s/${route.params.token}/nodes/${docId}/content`, {
+      headers: buildShareHeaders(pw),
+    })) as { node: ShareNode }
+    selectedDoc.value = data.node
+    persistedSelectedDocId.value = data.node.id
+    persistShareUiState()
+  } catch (err: any) {
+    if (err.response?.status === 410) {
+      clearCachedPassword(shareToken)
+      state.value = 'expired'
+    } else if (err.response?.status === 401) {
+      clearCachedPassword(shareToken)
+      state.value = 'password'
+    } else if (err.response?.status === 404) {
+      selectedDoc.value = null
+      persistedSelectedDocId.value = null
+      persistShareUiState()
     }
   }
 }

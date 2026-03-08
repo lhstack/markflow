@@ -35,7 +35,8 @@
               <div v-if="form.hasPassword" class="sd-pw-input">
                 <div class="field-wrap">
                   <svg class="field-icon" width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M4 7.5V6a4 4 0 0 1 8 0v1.5h.25c.966 0 1.75.784 1.75 1.75v5.5A1.75 1.75 0 0 1 12.25 16h-8.5A1.75 1.75 0 0 1 2 14.75v-5.5C2 8.284 2.784 7.5 3.75 7.5Zm1.5-1.5v1.5h5V6a2.5 2.5 0 0 0-5 0Z"/></svg>
-                  <input v-model="form.password" class="sd-input" type="password" placeholder="设置访问密码" />
+                  <input v-model="form.password" class="sd-input" type="text" placeholder="设置访问密码" />
+                  <button class="pw-generate-btn" type="button" @click="generatePassword">随机生成</button>
                 </div>
               </div>
             </transition>
@@ -100,7 +101,7 @@
                     <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25Z"/><path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"/></svg>
                   </button>
                   <button
-                    v-if="share.has_password"
+                    v-if="share.has_password && share.can_copy_password"
                     class="ssi-btn ssi-btn-pass"
                     title="复制链接+标题+密码"
                     @click="copyLinkWithPassword(share)"
@@ -137,6 +138,7 @@ type ShareItem = {
   id: number
   token: string
   has_password: boolean
+  can_copy_password: boolean
   expires_at?: string | null
 }
 
@@ -275,6 +277,23 @@ function buildCopyPayload(share: ShareItem, password: string) {
   return `${getShareUrl(share.token)} 《${title}》 密码：${password}`
 }
 
+function generatePassword() {
+  const letters = 'abcdefghijkmnopqrstuvwxyz'
+  const digits = '23456789'
+  const all = `${letters}${digits}`
+
+  const pick = (source: string) => source[Math.floor(Math.random() * source.length)]
+  const chars = [pick(letters), pick(digits)]
+  while (chars.length < 5) chars.push(pick(all))
+
+  for (let index = chars.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(Math.random() * (index + 1))
+    ;[chars[index], chars[swapIndex]] = [chars[swapIndex], chars[index]]
+  }
+
+  form.value.password = chars.join('')
+}
+
 async function loadShares() {
   if (!props.node) return
   try {
@@ -360,13 +379,22 @@ async function copyLink(token: string) {
 async function copyLinkWithPassword(share: ShareItem) {
   let password = getCachedPassword(share.token)
   if (!password) {
-    const input = window.prompt('请输入该分享链接密码（仅保存在当前浏览器）', '')
-    password = input?.trim()
-    if (!password) {
-      ElMessage.warning('未输入密码，已取消复制')
+    try {
+      const data = (await request.get(`/shares/${share.id}/password`)) as { password?: string }
+      password = data.password?.trim()
+      if (!password) {
+        ElMessage.warning('分享密码暂时不可恢复，请重新创建分享链接')
+        return
+      }
+      cachePassword(share.token, password)
+    } catch (err: any) {
+      if (err.response?.status === 409) {
+        ElMessage.warning('该分享密码为旧数据，无法直接恢复；请重新创建分享链接')
+      } else {
+        ElMessage.error('获取分享密码失败')
+      }
       return
     }
-    cachePassword(share.token, password)
   }
 
   try {
@@ -621,7 +649,7 @@ watch(
 
 .sd-input {
   width: 100%;
-  padding: 8px 12px 8px 30px;
+  padding: 8px 92px 8px 30px;
   background: var(--bg2);
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
@@ -634,6 +662,29 @@ watch(
 
 .sd-input:focus {
   border-color: var(--blue);
+}
+
+.pw-generate-btn {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid color-mix(in srgb, var(--green) 24%, var(--border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--green) 10%, #fff);
+  color: var(--green3);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.pw-generate-btn:hover {
+  background: color-mix(in srgb, var(--green) 16%, #fff);
+  border-color: color-mix(in srgb, var(--green) 36%, var(--border));
 }
 
 .sd-hint {

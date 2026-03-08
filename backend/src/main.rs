@@ -33,6 +33,7 @@ struct FileConfig {
     database_url: Option<String>,
     port: Option<String>,
     jwt_secret: Option<String>,
+    share_password_secret: Option<String>,
     rust_log: Option<String>,
     upload_dir: Option<String>,
     registration_enabled: Option<bool>,
@@ -357,6 +358,10 @@ async fn main() -> anyhow::Result<()> {
         file_cfg.jwt_secret,
         "markflow_dev_secret_change_in_production",
     );
+    let share_password_secret = std::env::var("SHARE_PASSWORD_SECRET")
+        .ok()
+        .or(file_cfg.share_password_secret)
+        .unwrap_or_else(|| jwt_secret.clone());
     let upload_dir = cfg_val("UPLOAD_DIR", file_cfg.upload_dir, "uploads");
     let registration_enabled = cfg_bool(
         "REGISTRATION_ENABLED",
@@ -375,6 +380,7 @@ async fn main() -> anyhow::Result<()> {
 
     std::env::set_var("RUST_LOG", &rust_log);
     std::env::set_var("JWT_SECRET", &jwt_secret);
+    std::env::set_var("SHARE_PASSWORD_SECRET", &share_password_secret);
     std::env::set_var("UPLOAD_DIR", &upload_dir);
 
     fs::create_dir_all(&upload_dir)?;
@@ -412,12 +418,17 @@ async fn main() -> anyhow::Result<()> {
     }
 
     tracing::info!(
-        "Resolved config: port={}, database={}, upload_dir={}, registration_enabled={}, upload_max_mb={}, log_to_file={}, log_dir={}, file={}, rotate_size_mb={}, rotate_days={}, keep_days={}",
+        "Resolved config: port={}, database={}, upload_dir={}, registration_enabled={}, upload_max_mb={}, share_password_secret_source={}, log_to_file={}, log_dir={}, file={}, rotate_size_mb={}, rotate_days={}, keep_days={}",
         port,
         database_url,
         upload_dir,
         registration_enabled,
         upload_max_mb,
+        if std::env::var("SHARE_PASSWORD_SECRET").ok().as_deref() == Some(jwt_secret.as_str()) {
+            "jwt_secret_fallback"
+        } else {
+            "share_password_secret"
+        },
         log_to_file,
         log_dir,
         log_file_name,
@@ -487,10 +498,15 @@ async fn main() -> anyhow::Result<()> {
         .route("/docs/:id/move", put(routes::documents::move_node))
         .route("/shares", post(routes::shares::create_share))
         .route("/shares/doc/:doc_id", get(routes::shares::list_shares))
+        .route("/shares/:id/password", get(routes::shares::get_share_password))
         .route("/shares/:id", delete(routes::shares::delete_share))
         .route("/s/:token", get(routes::shares::get_share))
         .route("/s/:token/verify", post(routes::shares::verify_share))
-        .route("/s/:token/content", get(routes::shares::get_share_content));
+        .route("/s/:token/content", get(routes::shares::get_share_content))
+        .route(
+            "/s/:token/nodes/:node_id/content",
+            get(routes::shares::get_share_node_content),
+        );
 
     let api = api
         .route("/admin/system-settings", get(routes::admin::get_system_settings).put(routes::admin::update_system_settings))

@@ -28,6 +28,8 @@ mime_guess = "2"
 lazy_static = "1"
 chrono = { version = "0.4", features = ["serde"] }
 toml = "0.8"
+aes-gcm = "0.10"
+sha2 = "0.10"
 
 [build-dependencies]
 # build script to copy frontend dist

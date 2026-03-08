@@ -56,6 +56,7 @@ struct LegacyShare {
     doc_id: String,
     token: String,
     password_hash: Option<String>,
+    password_ciphertext: Option<String>,
     expires_at: Option<String>,
     created_at: String,
 }
@@ -73,6 +74,7 @@ impl Database {
 
     pub async fn migrate(&self) -> Result<()> {
         self.create_tables().await?;
+        self.ensure_share_columns().await?;
 
         if self.uses_legacy_text_ids().await? {
             self.ensure_legacy_doc_nodes_project_column().await?;
@@ -156,6 +158,7 @@ impl Database {
                 doc_id INTEGER NOT NULL,
                 token TEXT NOT NULL UNIQUE,
                 password_hash TEXT,
+                password_ciphertext TEXT,
                 expires_at TEXT,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
@@ -241,6 +244,26 @@ impl Database {
             )
             .execute(&self.pool)
             .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn ensure_share_columns(&self) -> Result<()> {
+        let columns = sqlx::query("PRAGMA table_info(shares)")
+            .fetch_all(&self.pool)
+            .await?;
+
+        let has_password_ciphertext = columns.iter().any(|col| {
+            col.try_get::<String, _>("name")
+                .map(|name| name == "password_ciphertext")
+                .unwrap_or(false)
+        });
+
+        if !has_password_ciphertext {
+            sqlx::query("ALTER TABLE shares ADD COLUMN password_ciphertext TEXT")
+                .execute(&self.pool)
+                .await?;
         }
 
         Ok(())
@@ -558,7 +581,7 @@ impl Database {
         .await?;
 
         let shares: Vec<LegacyShare> = sqlx::query_as(
-            "SELECT user_id, doc_id, token, password_hash, expires_at, created_at
+            "SELECT user_id, doc_id, token, password_hash, password_ciphertext, expires_at, created_at
              FROM shares
              ORDER BY created_at ASC, id ASC",
         )
@@ -644,6 +667,7 @@ impl Database {
                 doc_id INTEGER NOT NULL,
                 token TEXT NOT NULL UNIQUE,
                 password_hash TEXT,
+                password_ciphertext TEXT,
                 expires_at TEXT,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 FOREIGN KEY (user_id) REFERENCES users_new(id) ON DELETE CASCADE,
@@ -754,13 +778,14 @@ impl Database {
                 .expect("legacy share doc_id should exist");
 
             sqlx::query(
-                "INSERT INTO shares_new (user_id, doc_id, token, password_hash, expires_at, created_at)
-                 VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO shares_new (user_id, doc_id, token, password_hash, password_ciphertext, expires_at, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(new_user_id)
             .bind(new_doc_id)
             .bind(&share.token)
             .bind(&share.password_hash)
+            .bind(&share.password_ciphertext)
             .bind(&share.expires_at)
             .bind(&share.created_at)
             .execute(&mut *tx)

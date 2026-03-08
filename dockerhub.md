@@ -49,6 +49,7 @@ docker run -d \
   -v $(pwd)/uploads:/app/uploads \
   -v $(pwd)/logs:/app/logs \
   -e JWT_SECRET=replace_with_your_secret \
+  -e SHARE_PASSWORD_SECRET=replace_with_your_share_password_secret \
   -e REGISTRATION_ENABLED=true \
   -e UPLOAD_MAX_MB=20 \
   lhstack/markflow:latest
@@ -63,7 +64,7 @@ docker run -d \
 ```yaml
 services:
   markflow:
-    image: lhstack/markflow:1.0.1
+    image: lhstack/markflow:latest
     container_name: markflow
     restart: unless-stopped
     ports:
@@ -72,6 +73,7 @@ services:
       PORT: "3000"
       DATABASE_URL: "sqlite:data/markflow.db"
       JWT_SECRET: "change_me_to_a_long_random_string_in_production"
+      SHARE_PASSWORD_SECRET: "change_me_to_a_long_random_string_for_share_password_encryption"
       RUST_LOG: "markflow=info,tower_http=warn"
       UPLOAD_DIR: "uploads"
       REGISTRATION_ENABLED: "true"
@@ -109,6 +111,7 @@ docker compose up -d
 | `PORT` | `3000` | HTTP 监听端口 |
 | `DATABASE_URL` | `sqlite:data/markflow.db` | 数据库连接串 |
 | `JWT_SECRET` | `markflow_dev_secret_change_in_production` | JWT 密钥，生产必须替换 |
+| `SHARE_PASSWORD_SECRET` | 同 `JWT_SECRET` 回退值 | 分享密码加密密钥，生产建议单独配置 |
 | `RUST_LOG` | `markflow=info,tower_http=warn` | 日志级别 |
 | `UPLOAD_DIR` | `uploads` | 上传文件目录 |
 | `REGISTRATION_ENABLED` | `true` | 是否允许新用户注册 |
@@ -124,6 +127,8 @@ docker compose up -d
 
 - 系统配置首次启动时会读取环境变量或 `config.toml`
 - 一旦系统配置已写入数据库，后续运行会优先读取数据库中的配置
+- 分享密码不会以明文直接落库，而是使用 `SHARE_PASSWORD_SECRET` 进行服务端加密后保存
+- 如果未单独配置 `SHARE_PASSWORD_SECRET`，系统会回退使用 `JWT_SECRET`，但生产环境不建议这样做
 
 ## 首次启动
 
@@ -147,12 +152,13 @@ docker logs --tail 200 markflow
 
 建议首次登录后立即修改管理员密码。
 
-## 1.0.1 版本更新
+## 1.0.2 版本更新
 
 - 新增系统配置持久化能力
 - 新增超级管理员初始化
 - 新增系统配置与用户管理界面
 - 支持注册开关和上传大小限制
+- 新增分享密码服务端加密存储与可恢复复制
 - 修复粘贴上传重复触发问题
 - 登录、注册、2FA 错误提示改为中文
 - 分享页右侧目录改为浮动定位，不再影响正文区域宽度

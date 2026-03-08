@@ -39,7 +39,7 @@ fn build_tree(nodes: Vec<DocNode>, parent_id: Option<i64>) -> Vec<DocNodeRespons
             None => node.parent_id.is_none(),
         };
         if matches {
-            let mut resp = DocNodeResponse::from_node(node.clone());
+            let mut resp = DocNodeResponse::from_node_meta(node.clone());
             resp.children = build_tree(nodes.clone(), Some(node.id));
             resp.children.sort_by(|a, b| {
                 if a.node_type != b.node_type {
@@ -343,7 +343,7 @@ pub async fn get_node(
 
                 let mut child_responses: Vec<DocNodeResponse> = children
                     .into_iter()
-                    .map(DocNodeResponse::from_node)
+                    .map(DocNodeResponse::from_node_meta)
                     .collect();
 
                 child_responses.sort_by(|a, b| {
