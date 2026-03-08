@@ -165,7 +165,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
@@ -184,6 +184,13 @@ import ProjectOverview from '@/components/ProjectOverview.vue'
 import AgentPanel from '@/components/AgentPanel.vue'
 import request from '@/utils/request'
 import { useSystemStore } from '@/stores/system'
+import { describeAgentEditorBridge, getAgentEditorBridge } from '@/utils/agentEditorBridge'
+import { registerAgentToolRuntime, unregisterAgentToolRuntime } from '@/utils/agentTools'
+import {
+  dispatchAgentWriterChunk,
+  dispatchAgentWriterComplete,
+  dispatchAgentWriterStart,
+} from '@/utils/agentWriter'
 
 const router = useRouter()
 const route = useRoute()
@@ -310,6 +317,980 @@ function findDocNodeByPath(nodes: DocNode[], rawPath: string): DocNode | null {
   return currentNode
 }
 
+function normalizeToolString(value: unknown) {
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+function normalizeToolInteger(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isInteger(value)) return value
+  if (typeof value !== 'string' || !value.trim()) return null
+  const parsed = Number(value)
+  return Number.isInteger(parsed) ? parsed : null
+}
+
+function expandToolArgs(args: Record<string, any>) {
+  const params = args.params && typeof args.params === 'object' && !Array.isArray(args.params)
+    ? args.params as Record<string, any>
+    : {}
+  return { ...params, ...args }
+}
+
+function flattenDocTree(
+  nodes: DocNode[],
+  trail: string[] = [],
+  rows: Array<{ node: DocNode; path: string; depth: number }> = [],
+) {
+  for (const node of nodes) {
+    const nextTrail = [...trail, node.name]
+    rows.push({
+      node,
+      path: nextTrail.join('/'),
+      depth: trail.length,
+    })
+    if (node.children?.length) {
+      flattenDocTree(node.children, nextTrail, rows)
+    }
+  }
+  return rows
+}
+
+function serializeProject(project: { id: number; name: string; description: string; background_image?: string | null; sort_order: number; created_at: string; updated_at: string }) {
+  return {
+    id: project.id,
+    name: project.name,
+    description: project.description,
+    background_image: project.background_image || null,
+    sort_order: project.sort_order,
+    created_at: project.created_at,
+    updated_at: project.updated_at,
+  }
+}
+
+function serializeNodeEntry(entry: { node: DocNode; path: string; depth: number }) {
+  return {
+    id: entry.node.id,
+    project_id: entry.node.project_id ?? null,
+    parent_id: entry.node.parent_id ?? null,
+    name: entry.node.name,
+    node_type: entry.node.node_type,
+    path: entry.path,
+    depth: entry.depth,
+    sort_order: entry.node.sort_order,
+    child_count: entry.node.children?.length || 0,
+    created_at: entry.node.created_at,
+    updated_at: entry.node.updated_at,
+  }
+}
+
+async function wait(ms: number) {
+  await new Promise((resolve) => window.setTimeout(resolve, ms))
+}
+
+async function waitForEditorBridge(docId: number, timeoutMs = 4000) {
+  const startedAt = Date.now()
+  while (Date.now() - startedAt < timeoutMs) {
+    const bridge = getAgentEditorBridge()
+    if (bridge?.docId === docId) {
+      return bridge
+    }
+    await nextTick()
+    await wait(40)
+  }
+  return null
+}
+
+async function ensureProjectsLoaded(refresh = false) {
+  if (!refresh && projects.projects.length) {
+    return projects.projects
+  }
+  await projects.fetchProjects()
+  return projects.projects
+}
+
+async function resolveProjectTarget(
+  rawArgs: Record<string, any>,
+  options: { required?: boolean; refresh?: boolean } = {},
+) {
+  const args = expandToolArgs(rawArgs)
+  const refresh = options.refresh ?? Boolean(args.refresh)
+  await ensureProjectsLoaded(refresh)
+
+  const projectId = normalizeToolInteger(args.project_id ?? args.projectId)
+  const projectName = normalizeToolString(args.project_name ?? args.projectName)
+
+  let project = null
+  if (projectId !== null) {
+    project = projects.projects.find((item) => item.id === projectId) || null
+  } else if (projectName) {
+    const targetName = normalizeAgentName(projectName)
+    project = projects.projects.find((item) => normalizeAgentName(item.name) === targetName) || null
+  } else if (projects.currentProject) {
+    project = projects.currentProject
+  }
+
+  if (!project && options.required !== false) {
+    throw new Error(projectId !== null || projectName ? '未找到目标项目' : '缺少项目参数')
+  }
+
+  return project
+}
+
+async function fetchProjectTreeSnapshot(projectId: number, refresh = false) {
+  if (!refresh && projects.currentProjectId === projectId && docs.tree.length) {
+    return docs.tree
+  }
+
+  const data = await request.get('/docs', {
+    params: { project_id: projectId },
+  }) as { tree?: DocNode[] }
+
+  const tree = Array.isArray(data.tree) ? data.tree : []
+  if (projects.currentProjectId === projectId) {
+    docs.tree = tree
+  }
+  return tree
+}
+
+async function resolveNodeTarget(
+  rawArgs: Record<string, any>,
+  options: { required?: boolean; requireProject?: boolean; refresh?: boolean } = {},
+) {
+  const args = expandToolArgs(rawArgs)
+  const project = await resolveProjectTarget(args, {
+    required: options.requireProject !== false,
+    refresh: options.refresh ?? Boolean(args.refresh),
+  })
+  const nodeId = normalizeToolInteger(args.node_id ?? args.doc_id ?? args.parent_id ?? args.nodeId ?? args.docId ?? args.parentId)
+  const nodePath = normalizeToolString(args.node_path ?? args.doc_path ?? args.parent_path ?? args.nodePath ?? args.docPath ?? args.parentPath)
+  const nodeName = normalizeToolString(args.node_name ?? args.doc_name ?? args.parent_name ?? args.nodeName ?? args.docName ?? args.parentName)
+
+  if (!project) {
+    if (options.required === false) return null
+    throw new Error('缺少项目参数')
+  }
+
+  const tree = await fetchProjectTreeSnapshot(project.id, options.refresh ?? Boolean(args.refresh))
+  const rows = flattenDocTree(tree)
+
+  let entry = null
+  if (nodeId !== null) {
+    entry = rows.find((item) => item.node.id === nodeId) || null
+  } else if (nodePath) {
+    const targetPath = nodePath
+      .split('/')
+      .map((segment: string) => normalizeAgentName(segment))
+      .filter(Boolean)
+      .join('/')
+    entry = rows.find((item) =>
+      item.path
+        .split('/')
+        .map((segment) => normalizeAgentName(segment))
+        .join('/') === targetPath
+    ) || null
+  } else if (nodeName) {
+    const targetName = normalizeAgentName(nodeName)
+    entry = rows.find((item) => normalizeAgentName(item.node.name) === targetName) || null
+  } else if (docs.currentNode && docs.currentNode.project_id === project.id) {
+    entry = rows.find((item) => item.node.id === docs.currentNode?.id) || null
+  }
+
+  if (!entry && options.required !== false) {
+    throw new Error(nodeId !== null || nodePath || nodeName ? '未找到目标节点' : '缺少节点参数')
+  }
+
+  return entry ? { project, tree, entry } : null
+}
+
+async function getCurrentPageState() {
+  const currentProject = projects.currentProject
+  const currentRows = flattenDocTree(docs.tree)
+  const currentEntry = docs.currentNode
+    ? currentRows.find((item) => item.node.id === docs.currentNode?.id) || null
+    : null
+  const editorBridge = describeAgentEditorBridge()
+  const liveEditor = getAgentEditorBridge()
+  const content = liveEditor?.getValue() || docs.currentNode?.content || ''
+
+  return {
+    route: {
+      name: typeof route.name === 'string' ? route.name : '',
+      path: route.path,
+      full_path: route.fullPath,
+      query: route.query,
+    },
+    page_scope: agentPageScope.value,
+    page_state: showProjectOverview.value
+      ? 'project_overview'
+      : docs.currentNode?.node_type === 'doc'
+        ? 'document_editor'
+        : docs.currentNode?.node_type === 'dir'
+          ? 'directory_detail'
+          : 'project_workspace',
+    project: currentProject ? serializeProject(currentProject) : null,
+    current_node: currentEntry ? serializeNodeEntry(currentEntry) : null,
+    editor: {
+      ...editorBridge,
+      content_length: content.length,
+      content_preview: content.slice(0, 500),
+    },
+    visible: {
+      project_count: projects.projects.length,
+      current_project_root_count: docs.tree.length,
+      current_project_node_count: currentRows.length,
+      project_catalog: agentProjectCatalog.value,
+      current_node_catalog: agentNodeCatalog.value,
+    },
+    capabilities: {
+      can_open_project: true,
+      can_open_node: Boolean(currentProject),
+      can_move_node: Boolean(currentProject),
+      can_write_document: docs.currentNode?.node_type === 'doc',
+      can_execute_javascript: true,
+    },
+  }
+}
+
+function listPageRoutes() {
+  return {
+    current_route: {
+      name: typeof route.name === 'string' ? route.name : '',
+      path: route.path,
+      full_path: route.fullPath,
+    },
+    routes: [
+      {
+        route: 'home.overview',
+        path: '/',
+        description: '项目概览页，展示当前用户的所有项目卡片。',
+        params: [],
+      },
+      {
+        route: 'home.project',
+        path: '/?project={project_id}',
+        description: '进入指定项目并展示左侧文档树，主区域停留在项目工作区。',
+        params: ['project_id 或 project_name'],
+      },
+      {
+        route: 'home.doc',
+        path: '/?project={project_id}&doc={node_id}',
+        description: '进入指定项目并打开某个 Markdown 文档编辑页。',
+        params: ['project_id 或 project_name', 'node_id 或 node_path 或 node_name'],
+      },
+      {
+        route: 'home.dir',
+        path: '/?project={project_id}&doc={node_id}',
+        description: '进入指定项目并打开某个目录详情页。',
+        params: ['project_id 或 project_name', 'node_id 或 node_path 或 node_name'],
+      },
+      {
+        route: 'login',
+        path: '/login',
+        description: '登录页。',
+        params: [],
+      },
+      {
+        route: 'register',
+        path: '/register',
+        description: '注册页。',
+        params: [],
+      },
+      {
+        route: 'login.2fa',
+        path: '/login/2fa',
+        description: '两步验证页。',
+        params: [],
+      },
+      {
+        route: 'share',
+        path: '/s/{token}',
+        description: '分享文档页。',
+        params: ['share_token'],
+      },
+    ],
+    usage_notes: [
+      '如果目标是打开项目，优先调用 open_project。',
+      '如果目标是打开文档或目录，优先调用 open_tree_node。',
+    ],
+  }
+}
+
+async function navigateToPage(rawArgs: Record<string, any>) {
+  const args = expandToolArgs(rawArgs)
+  const routeName = normalizeToolString(args.route || args.target)
+
+  if (!routeName) {
+    throw new Error('navigate_to_page 缺少 route 参数')
+  }
+
+  if (routeName === 'home.overview' || routeName === 'home' || routeName === 'overview') {
+    backToOverview()
+  } else if (routeName === 'home.project' || routeName === 'project') {
+    const project = await resolveProjectTarget(args)
+    if (!project) throw new Error('未找到目标项目')
+    await enterProject(project.id)
+  } else if (routeName === 'home.doc' || routeName === 'doc' || routeName === 'node') {
+    const target = await resolveNodeTarget(args)
+    if (!target) throw new Error('未找到目标节点')
+    if (target.entry.node.node_type !== 'doc') {
+      throw new Error('目标节点不是文档，请改用 home.dir 或 open_tree_node')
+    }
+    if (projects.currentProjectId !== target.project.id || showProjectOverview.value) {
+      await enterProject(target.project.id)
+    }
+    await openDocNode(target.entry.node.id)
+  } else if (routeName === 'home.dir' || routeName === 'dir') {
+    const target = await resolveNodeTarget(args)
+    if (!target) throw new Error('未找到目标节点')
+    if (target.entry.node.node_type !== 'dir') {
+      throw new Error('目标节点不是目录，请改用 home.doc 或 open_tree_node')
+    }
+    if (projects.currentProjectId !== target.project.id || showProjectOverview.value) {
+      await enterProject(target.project.id)
+    }
+    await openDocNode(target.entry.node.id)
+  } else if (routeName === 'login') {
+    await router.push('/login')
+  } else if (routeName === 'register') {
+    await router.push('/register')
+  } else if (routeName === 'login.2fa') {
+    await router.push('/login/2fa')
+  } else if (routeName === 'share') {
+    const shareToken = normalizeToolString(args.share_token ?? args.token)
+    if (!shareToken) {
+      throw new Error('share 路由缺少 share_token')
+    }
+    await router.push(`/s/${shareToken}`)
+  } else {
+    throw new Error(`不支持的 route: ${routeName}`)
+  }
+
+  return {
+    ok: true,
+    route: routeName,
+    state: await getCurrentPageState(),
+  }
+}
+
+async function listProjectsTool(rawArgs: Record<string, any>) {
+  await ensureProjectsLoaded(Boolean(expandToolArgs(rawArgs).refresh))
+  return {
+    projects: projects.projects.map((project) => serializeProject(project)),
+    total: projects.projects.length,
+    current_project_id: projects.currentProjectId,
+  }
+}
+
+async function openProjectTool(rawArgs: Record<string, any>) {
+  const args = expandToolArgs(rawArgs)
+  const project = await resolveProjectTarget(args)
+  if (!project) throw new Error('未找到目标项目')
+
+  if (projects.currentProjectId !== project.id || showProjectOverview.value) {
+    await enterProject(project.id)
+  } else if (args.fetch_tree !== false && !docs.tree.length) {
+    await docs.fetchTree(project.id)
+  }
+
+  return {
+    opened: serializeProject(project),
+    state: await getCurrentPageState(),
+  }
+}
+
+async function createProjectTool(rawArgs: Record<string, any>) {
+  const args = expandToolArgs(rawArgs)
+  const name = normalizeToolString(args.name)
+  if (!name) {
+    throw new Error('create_project 缺少 name 参数')
+  }
+
+  const created = await projects.createProject({
+    name,
+    description: normalizeToolString(args.description),
+    background_image: normalizeToolString(args.background_image),
+  })
+
+  if (args.open_after_create === false) {
+    showProjectOverview.value = true
+    docs.currentNode = null
+  } else {
+    await enterProject(created.id)
+  }
+
+  return {
+    created: serializeProject(created),
+    state: await getCurrentPageState(),
+  }
+}
+
+async function deleteProjectsTool(rawArgs: Record<string, any>) {
+  const args = expandToolArgs(rawArgs)
+  await ensureProjectsLoaded(false)
+
+  const idTargets = Array.isArray(args.project_ids)
+    ? args.project_ids.map((item: unknown) => normalizeToolInteger(item)).filter((item: number | null): item is number => item !== null)
+    : []
+  const nameTargets = Array.isArray(args.project_names)
+    ? args.project_names.map((item: unknown) => normalizeToolString(item)).filter(Boolean)
+    : []
+
+  const resolvedByName = nameTargets
+    .map((name) => projects.projects.find((item) => normalizeAgentName(item.name) === normalizeAgentName(name)) || null)
+    .filter((item): item is NonNullable<typeof item> => Boolean(item))
+    .map((item) => item.id)
+
+  const targetIds = Array.from(new Set([...idTargets, ...resolvedByName]))
+  if (!targetIds.length) {
+    throw new Error('delete_projects 至少需要 project_ids 或 project_names')
+  }
+
+  const deleted: Array<{ id: number; name: string }> = []
+  const failed: Array<{ id: number; error: string }> = []
+  const deletingCurrent = targetIds.includes(projects.currentProjectId || -1)
+
+  for (const projectId of targetIds) {
+    const project = projects.projects.find((item) => item.id === projectId)
+    if (!project) {
+      failed.push({ id: projectId, error: '项目不存在' })
+      continue
+    }
+
+    try {
+      await projects.deleteProject(projectId)
+      deleted.push({ id: projectId, name: project.name })
+    } catch (error: any) {
+      failed.push({
+        id: projectId,
+        error: error?.response?.data?.error || error?.message || '删除项目失败',
+      })
+    }
+  }
+
+  if (deletingCurrent) {
+    docs.currentNode = null
+    if (!projects.currentProjectId) {
+      docs.tree = []
+      showProjectOverview.value = true
+    } else if (!showProjectOverview.value) {
+      await docs.fetchTree(projects.currentProjectId)
+    }
+  }
+
+  return {
+    deleted,
+    failed,
+    remaining_project_count: projects.projects.length,
+    current_project_id: projects.currentProjectId,
+  }
+}
+
+async function getProjectTreeTool(rawArgs: Record<string, any>) {
+  const args = expandToolArgs(rawArgs)
+  const project = await resolveProjectTarget(args)
+  if (!project) throw new Error('未找到目标项目')
+
+  const tree = await fetchProjectTreeSnapshot(project.id, Boolean(args.refresh))
+  const rows = flattenDocTree(tree)
+
+  return {
+    project: serializeProject(project),
+    stats: {
+      total_nodes: rows.length,
+      doc_count: rows.filter((item) => item.node.node_type === 'doc').length,
+      dir_count: rows.filter((item) => item.node.node_type === 'dir').length,
+    },
+    tree,
+    flat_nodes: rows.map((item) => serializeNodeEntry(item)),
+  }
+}
+
+async function createTreeNodeTool(rawArgs: Record<string, any>) {
+  const args = expandToolArgs(rawArgs)
+  const project = await resolveProjectTarget(args)
+  if (!project) throw new Error('未找到目标项目')
+
+  const nodeType = normalizeToolString(args.node_type)
+  if (nodeType !== 'doc' && nodeType !== 'dir') {
+    throw new Error('node_type 只能是 doc 或 dir')
+  }
+
+  const name = normalizeToolString(args.name)
+  if (!name) {
+    throw new Error('create_tree_node 缺少 name 参数')
+  }
+
+  let parentId: number | undefined
+  const hasParentLocator = args.parent_id !== undefined
+    || args.parent_path !== undefined
+    || args.parent_name !== undefined
+    || args.parentId !== undefined
+    || args.parentPath !== undefined
+    || args.parentName !== undefined
+
+  if (hasParentLocator) {
+    const parentTarget = await resolveNodeTarget({
+      ...args,
+      node_id: args.parent_id ?? args.parentId,
+      node_path: args.parent_path ?? args.parentPath,
+      node_name: args.parent_name ?? args.parentName,
+    })
+    if (!parentTarget) {
+      throw new Error('未找到目标父目录')
+    }
+    if (parentTarget.entry.node.node_type !== 'dir') {
+      throw new Error('父节点必须是目录')
+    }
+    parentId = parentTarget.entry.node.id
+  }
+
+  const data = await request.post('/docs', {
+    project_id: project.id,
+    parent_id: parentId,
+    name,
+    node_type: nodeType,
+    content: nodeType === 'doc' ? normalizeToolString(args.content) : undefined,
+  }) as { node?: DocNode }
+  const created = data.node
+  if (!created) {
+    throw new Error('创建节点失败')
+  }
+
+  if (args.open_after_create !== false) {
+    if (projects.currentProjectId !== project.id || showProjectOverview.value) {
+      await enterProject(project.id)
+    } else {
+      await docs.fetchTree(project.id)
+    }
+    await openDocNode(created.id)
+  } else if (projects.currentProjectId === project.id && !showProjectOverview.value) {
+    await docs.fetchTree(project.id)
+  }
+
+  const tree = await fetchProjectTreeSnapshot(project.id, true)
+  const rows = flattenDocTree(tree)
+  const createdEntry = rows.find((item) => item.node.id === created.id) || {
+    node: created,
+    path: created.name,
+    depth: parentId ? 1 : 0,
+  }
+
+  return {
+    created: serializeNodeEntry(createdEntry),
+    state: await getCurrentPageState(),
+  }
+}
+
+async function moveTreeNodeTool(rawArgs: Record<string, any>) {
+  const args = expandToolArgs(rawArgs)
+  const source = await resolveNodeTarget({
+    ...args,
+    node_id: args.node_id ?? args.doc_id ?? args.nodeId ?? args.docId,
+    node_path: args.node_path ?? args.doc_path ?? args.nodePath ?? args.docPath,
+    node_name: args.node_name ?? args.doc_name ?? args.nodeName ?? args.docName,
+  })
+  if (!source) {
+    throw new Error('未找到要移动的节点')
+  }
+
+  const moveToRoot = args.to_root === true
+  let parentId: number | null = null
+
+  if (!moveToRoot) {
+    const targetParent = await resolveNodeTarget({
+      ...args,
+      project_id: args.target_project_id ?? args.project_id ?? args.targetProjectId ?? args.projectId,
+      project_name: args.target_project_name ?? args.project_name ?? args.targetProjectName ?? args.projectName,
+      node_id: args.target_parent_id ?? args.parent_id ?? args.targetParentId ?? args.parentId,
+      node_path: args.target_parent_path ?? args.parent_path ?? args.targetParentPath ?? args.parentPath,
+      node_name: args.target_parent_name ?? args.parent_name ?? args.targetParentName ?? args.parentName,
+    }, {
+      required: false,
+    })
+
+    if (targetParent) {
+      if (targetParent.project.id !== source.project.id) {
+        throw new Error('当前仅支持在同一项目内移动节点')
+      }
+      if (targetParent.entry.node.node_type !== 'dir') {
+        throw new Error('目标父节点必须是目录')
+      }
+      parentId = targetParent.entry.node.id
+    } else if (
+      args.target_parent_id !== undefined
+      || args.parent_id !== undefined
+      || args.target_parent_path !== undefined
+      || args.parent_path !== undefined
+      || args.target_parent_name !== undefined
+      || args.parent_name !== undefined
+    ) {
+      throw new Error('未找到目标父目录')
+    }
+  }
+
+  const tree = await fetchProjectTreeSnapshot(source.project.id, true)
+  const siblings = flattenDocTree(tree)
+    .filter((item) => (item.node.parent_id ?? null) === parentId && item.node.id !== source.entry.node.id)
+    .sort((a, b) => a.node.sort_order - b.node.sort_order)
+
+  const explicitSortOrder = normalizeToolInteger(args.sort_order ?? args.sortOrder)
+  const sortOrder = explicitSortOrder ?? siblings.length
+
+  await docs.moveNode(
+    source.entry.node.id,
+    parentId,
+    sortOrder,
+    source.project.id,
+    true,
+  )
+
+  if (docs.currentNode?.id === source.entry.node.id) {
+    await docs.fetchNode(source.entry.node.id)
+  }
+
+  const refreshedTree = await fetchProjectTreeSnapshot(source.project.id, true)
+  const movedEntry = flattenDocTree(refreshedTree).find((item) => item.node.id === source.entry.node.id) || null
+
+  return {
+    moved: true,
+    target_parent_id: parentId,
+    sort_order: sortOrder,
+    node: movedEntry ? serializeNodeEntry(movedEntry) : serializeNodeEntry(source.entry),
+    state: await getCurrentPageState(),
+  }
+}
+
+async function openTreeNodeTool(rawArgs: Record<string, any>) {
+  const args = expandToolArgs(rawArgs)
+  const target = await resolveNodeTarget(args)
+  if (!target) throw new Error('未找到目标节点')
+
+  if (projects.currentProjectId !== target.project.id || showProjectOverview.value) {
+    await enterProject(target.project.id)
+  }
+  await openDocNode(target.entry.node.id)
+
+  return {
+    opened: serializeNodeEntry(target.entry),
+    state: await getCurrentPageState(),
+  }
+}
+
+async function writeDocumentTool(rawArgs: Record<string, any>) {
+  const args = expandToolArgs(rawArgs)
+  const content = typeof args.content === 'string' ? args.content : ''
+  if (!content) {
+    throw new Error('write_document 缺少 content 参数')
+  }
+
+  let target = null
+  if (
+    args.doc_id !== undefined
+    || args.doc_path !== undefined
+    || args.doc_name !== undefined
+    || args.node_id !== undefined
+    || args.node_path !== undefined
+    || args.node_name !== undefined
+    || args.project_id !== undefined
+    || args.project_name !== undefined
+  ) {
+    target = await resolveNodeTarget({
+      ...args,
+      node_id: args.doc_id ?? args.node_id ?? args.docId ?? args.nodeId,
+      node_path: args.doc_path ?? args.node_path ?? args.docPath ?? args.nodePath,
+      node_name: args.doc_name ?? args.node_name ?? args.docName ?? args.nodeName,
+    })
+  } else if (docs.currentNode) {
+    const rows = flattenDocTree(docs.tree)
+    const entry = rows.find((item) => item.node.id === docs.currentNode?.id) || null
+    if (projects.currentProject && entry) {
+      target = { project: projects.currentProject, tree: docs.tree, entry }
+    }
+  }
+
+  if (!target) {
+    throw new Error('未找到要写入的文档')
+  }
+  if (target.entry.node.node_type !== 'doc') {
+    throw new Error('write_document 只能写入文档，不能写入目录')
+  }
+
+  if (projects.currentProjectId !== target.project.id || docs.currentNode?.id !== target.entry.node.id || showProjectOverview.value) {
+    if (projects.currentProjectId !== target.project.id || showProjectOverview.value) {
+      await enterProject(target.project.id)
+    }
+    await openDocNode(target.entry.node.id)
+  }
+
+  const bridge = await waitForEditorBridge(target.entry.node.id)
+  if (!bridge) {
+    throw new Error('目标文档编辑器尚未完成初始化')
+  }
+
+  const mode = normalizeToolString(args.mode) === 'replace' ? 'replace' : 'append'
+  const shouldSave = args.save === true
+
+  dispatchAgentWriterStart({
+    docId: target.entry.node.id,
+    mode,
+    save: shouldSave,
+  })
+  dispatchAgentWriterChunk({
+    docId: target.entry.node.id,
+    chunk: content,
+  })
+  dispatchAgentWriterComplete({
+    docId: target.entry.node.id,
+  })
+
+  return {
+    written: true,
+    mode,
+    save: shouldSave,
+    target: serializeNodeEntry(target.entry),
+    content_length: content.length,
+  }
+}
+
+async function readDocumentTool(rawArgs: Record<string, any>) {
+  const args = expandToolArgs(rawArgs)
+  let target = null
+
+  if (
+    args.doc_id !== undefined
+    || args.doc_path !== undefined
+    || args.doc_name !== undefined
+    || args.node_id !== undefined
+    || args.node_path !== undefined
+    || args.node_name !== undefined
+    || args.project_id !== undefined
+    || args.project_name !== undefined
+  ) {
+    target = await resolveNodeTarget({
+      ...args,
+      node_id: args.doc_id ?? args.node_id ?? args.docId ?? args.nodeId,
+      node_path: args.doc_path ?? args.node_path ?? args.docPath ?? args.nodePath,
+      node_name: args.doc_name ?? args.node_name ?? args.docName ?? args.nodeName,
+    })
+  } else if (docs.currentNode?.node_type === 'doc' && projects.currentProject) {
+    const rows = flattenDocTree(docs.tree)
+    const entry = rows.find((item) => item.node.id === docs.currentNode?.id) || null
+    if (entry) {
+      target = { project: projects.currentProject, tree: docs.tree, entry }
+    }
+  }
+
+  if (!target) {
+    throw new Error('未找到要读取的文档')
+  }
+  if (target.entry.node.node_type !== 'doc') {
+    throw new Error('read_document 只能读取文档，不能读取目录')
+  }
+
+  const data = await request.get(`/docs/${target.entry.node.id}`) as { node?: DocNode }
+  const node = data.node
+  if (!node) {
+    throw new Error('读取文档失败')
+  }
+
+  return {
+    project: serializeProject(target.project),
+    document: serializeNodeEntry(target.entry),
+    content: node.content || '',
+    content_length: (node.content || '').length,
+  }
+}
+
+async function deleteTreeNodesTool(rawArgs: Record<string, any>) {
+  const args = expandToolArgs(rawArgs)
+  const project = await resolveProjectTarget(args)
+  if (!project) throw new Error('未找到目标项目')
+
+  const tree = await fetchProjectTreeSnapshot(project.id, false)
+  const rows = flattenDocTree(tree)
+
+  const nodeIds = Array.isArray(args.node_ids)
+    ? args.node_ids.map((item: unknown) => normalizeToolInteger(item)).filter((item: number | null): item is number => item !== null)
+    : []
+  const nodePaths = Array.isArray(args.node_paths)
+    ? args.node_paths.map((item: unknown) => normalizeToolString(item)).filter(Boolean)
+    : []
+
+  const resolvedByPath = nodePaths
+    .map((rawPath) => {
+      const normalizedPath = rawPath
+        .split('/')
+        .map((segment) => normalizeAgentName(segment))
+        .filter(Boolean)
+        .join('/')
+      return rows.find((item) =>
+        item.path
+          .split('/')
+          .map((segment) => normalizeAgentName(segment))
+          .join('/') === normalizedPath
+      ) || null
+    })
+    .filter((item): item is NonNullable<typeof item> => Boolean(item))
+    .map((item) => item.node.id)
+
+  const targetIds = Array.from(new Set([...nodeIds, ...resolvedByPath]))
+  if (!targetIds.length) {
+    throw new Error('delete_tree_nodes 至少需要 node_ids 或 node_paths')
+  }
+
+  const entries = targetIds
+    .map((id) => rows.find((item) => item.node.id === id) || null)
+    .filter((item): item is NonNullable<typeof item> => Boolean(item))
+    .sort((a, b) => b.depth - a.depth)
+
+  const deleted: Array<{ id: number; path: string }> = []
+  const failed: Array<{ id: number; error: string }> = []
+  const deletingCurrentNode = targetIds.includes(docs.currentNode?.id || -1)
+
+  for (const entry of entries) {
+    try {
+      await request.delete(`/docs/${entry.node.id}`)
+      deleted.push({ id: entry.node.id, path: entry.path })
+    } catch (error: any) {
+      failed.push({
+        id: entry.node.id,
+        error: error?.response?.data?.error || error?.message || '删除节点失败',
+      })
+    }
+  }
+
+  if (projects.currentProjectId === project.id) {
+    await docs.fetchTree(project.id)
+    if (deletingCurrentNode) {
+      docs.currentNode = null
+    }
+  }
+
+  return {
+    deleted,
+    failed,
+    current_project_id: projects.currentProjectId,
+    current_node_id: docs.currentNode?.id ?? null,
+  }
+}
+
+function getMarkdownEditorRuntimeTool() {
+  const bridge = describeAgentEditorBridge()
+  const liveBridge = getAgentEditorBridge()
+  const liveValue = liveBridge?.getValue() || ''
+
+  return {
+    ...bridge,
+    current_document: docs.currentNode?.node_type === 'doc'
+      ? {
+        id: docs.currentNode.id,
+        name: docs.currentNode.name,
+        content_length: liveValue.length,
+        content_preview: liveValue.slice(0, 500),
+      }
+      : null,
+    globals: [
+      {
+        name: 'editor',
+        description: '当前 Markdown 编辑器桥接对象，可在 execute_browser_javascript 中直接调用，也会挂到 window.editor。',
+      },
+      {
+        name: 'markflow',
+        description: 'MarkFlow 前端工具助手对象，可在 execute_browser_javascript 中直接调用，也会挂到 window.markflow。',
+      },
+    ],
+    usage_notes: [
+      '如果只是读取当前文档内容，优先使用 read_document。',
+      '如果只是写入或改写文档，优先使用 write_document。',
+      '只有在需要细粒度 DOM/编辑器动作时再使用 execute_browser_javascript。',
+    ],
+  }
+}
+
+function getBrowserRuntimeTool(rawArgs: Record<string, any>) {
+  const args = expandToolArgs(rawArgs)
+  const includeStorage = Boolean(args.include_storage)
+  return {
+    location: {
+      href: window.location.href,
+      origin: window.location.origin,
+      pathname: window.location.pathname,
+      search: window.location.search,
+      hash: window.location.hash,
+    },
+    document: {
+      title: document.title,
+      ready_state: document.readyState,
+    },
+    history: {
+      length: window.history.length,
+    },
+    navigator: {
+      user_agent: window.navigator.userAgent,
+      language: window.navigator.language,
+      languages: window.navigator.languages,
+      on_line: window.navigator.onLine,
+    },
+    viewport: {
+      width: window.innerWidth,
+      height: window.innerHeight,
+      device_pixel_ratio: window.devicePixelRatio,
+    },
+    globals: [
+      {
+        name: 'window',
+        description: '完整浏览器 window 对象。',
+      },
+      {
+        name: 'document',
+        description: 'DOM 文档对象，用于查询节点、读取文本、触发事件。',
+      },
+      {
+        name: 'location/history/navigator',
+        description: '浏览器路由、历史记录和环境信息对象。',
+      },
+      {
+        name: 'localStorage/sessionStorage',
+        description: '本地存储对象。',
+      },
+      {
+        name: 'editor',
+        description: '当前 Markdown 编辑器桥接对象。',
+      },
+      {
+        name: 'markflow',
+        description: 'MarkFlow 页面工具助手对象。',
+      },
+    ],
+    storage: includeStorage
+      ? {
+        local_storage_keys: Object.keys(window.localStorage),
+        session_storage_keys: Object.keys(window.sessionStorage),
+      }
+      : undefined,
+  }
+}
+
+function installAgentToolRuntime() {
+  registerAgentToolRuntime({
+    getCurrentPageState,
+    listPageRoutes,
+    navigateToPage,
+    listProjects: listProjectsTool,
+    openProject: openProjectTool,
+    createProject: createProjectTool,
+    deleteProjects: deleteProjectsTool,
+    getProjectTree: getProjectTreeTool,
+    createTreeNode: createTreeNodeTool,
+    moveTreeNode: moveTreeNodeTool,
+    openTreeNode: openTreeNodeTool,
+    writeDocument: writeDocumentTool,
+    readDocument: readDocumentTool,
+    deleteTreeNodes: deleteTreeNodesTool,
+    getMarkdownEditorRuntime: getMarkdownEditorRuntimeTool,
+    getBrowserRuntime: getBrowserRuntimeTool,
+  })
+}
+
 function persistHomeCache() {
   localStorage.setItem(HOME_SIDEBAR_KEY, sidebarOpen.value ? '1' : '0')
   localStorage.setItem(HOME_LAST_VIEW_KEY, showProjectOverview.value ? 'overview' : 'project')
@@ -407,12 +1388,17 @@ async function restoreHomeState() {
 }
 
 onMounted(async () => {
+  installAgentToolRuntime()
   await system.fetchPublicSettings().catch(() => {})
   await auth.refreshUser().catch(() => {})
   await restoreHomeState()
   restoringHomeState.value = false
   persistHomeCache()
   await syncHomeRoute()
+})
+
+onUnmounted(() => {
+  unregisterAgentToolRuntime()
 })
 
 watch(sidebarOpen, (open) => {

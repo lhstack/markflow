@@ -14,7 +14,9 @@ use tokio::fs;
 use crate::{
     auth,
     db::Database,
-    models::{AdminUserResponse, DocNode, Project, Share, SystemSettingsResponse, UploadAsset, User},
+    models::{
+        AdminUserResponse, DocNode, Project, Share, SystemSettingsResponse, UploadAsset, User,
+    },
 };
 
 fn json_error(status: StatusCode, message: &str) -> Response {
@@ -30,23 +32,22 @@ fn upload_root() -> PathBuf {
 }
 
 async fn load_managed_user(db: &Database, user_id: i64) -> Result<User, Response> {
-    let user = match sqlx::query_as::<_, User>(
-        "SELECT * FROM users WHERE id = ? AND is_super_admin = 0",
-    )
-    .bind(user_id)
-    .fetch_optional(&db.pool)
-    .await
-    {
-        Ok(Some(user)) => user,
-        Ok(None) => return Err(json_error(StatusCode::NOT_FOUND, "User not found")),
-        Err(err) => {
-            tracing::error!("load managed user failed: {}", err);
-            return Err(json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to load user",
-            ));
-        }
-    };
+    let user =
+        match sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = ? AND is_super_admin = 0")
+            .bind(user_id)
+            .fetch_optional(&db.pool)
+            .await
+        {
+            Ok(Some(user)) => user,
+            Ok(None) => return Err(json_error(StatusCode::NOT_FOUND, "User not found")),
+            Err(err) => {
+                tracing::error!("load managed user failed: {}", err);
+                return Err(json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to load user",
+                ));
+            }
+        };
 
     Ok(user)
 }
@@ -69,10 +70,7 @@ pub async fn create_user(
 
     let username = body.username.trim();
     if username.len() < 3 || username.len() > 32 {
-        return json_error(
-            StatusCode::BAD_REQUEST,
-            "Username length must be 3-32",
-        );
+        return json_error(StatusCode::BAD_REQUEST, "Username length must be 3-32");
     }
     if username.eq_ignore_ascii_case("admin") {
         return json_error(StatusCode::BAD_REQUEST, "Username admin is reserved");
@@ -84,17 +82,18 @@ pub async fn create_user(
         );
     }
 
-    let exists: bool = match sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE username = ?)")
-        .bind(username)
-        .fetch_one(&db.pool)
-        .await
-    {
-        Ok(exists) => exists,
-        Err(err) => {
-            tracing::error!("check user exists failed: {}", err);
-            return json_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to create user");
-        }
-    };
+    let exists: bool =
+        match sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE username = ?)")
+            .bind(username)
+            .fetch_one(&db.pool)
+            .await
+        {
+            Ok(exists) => exists,
+            Err(err) => {
+                tracing::error!("check user exists failed: {}", err);
+                return json_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to create user");
+            }
+        };
 
     if exists {
         return json_error(StatusCode::CONFLICT, "Username already exists");
@@ -126,7 +125,11 @@ pub async fn create_user(
     };
 
     match load_managed_user(&db, created_id).await {
-        Ok(user) => (StatusCode::CREATED, Json(json!({ "user": AdminUserResponse::from(user) }))).into_response(),
+        Ok(user) => (
+            StatusCode::CREATED,
+            Json(json!({ "user": AdminUserResponse::from(user) })),
+        )
+            .into_response(),
         Err(resp) => resp,
     }
 }
@@ -318,51 +321,71 @@ pub async fn export_user_data(
         Err(resp) => return resp,
     };
 
-    let projects: Vec<Project> = match sqlx::query_as("SELECT * FROM projects WHERE user_id = ? ORDER BY sort_order ASC, created_at ASC")
-        .bind(user.id)
-        .fetch_all(&db.pool)
-        .await
+    let projects: Vec<Project> = match sqlx::query_as(
+        "SELECT * FROM projects WHERE user_id = ? ORDER BY sort_order ASC, created_at ASC",
+    )
+    .bind(user.id)
+    .fetch_all(&db.pool)
+    .await
     {
         Ok(rows) => rows,
         Err(err) => {
             tracing::error!("export user projects failed: {}", err);
-            return json_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to export user data");
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to export user data",
+            );
         }
     };
 
-    let doc_nodes: Vec<DocNode> = match sqlx::query_as("SELECT * FROM doc_nodes WHERE user_id = ? ORDER BY sort_order ASC, created_at ASC, id ASC")
-        .bind(user.id)
-        .fetch_all(&db.pool)
-        .await
+    let doc_nodes: Vec<DocNode> = match sqlx::query_as(
+        "SELECT * FROM doc_nodes WHERE user_id = ? ORDER BY sort_order ASC, created_at ASC, id ASC",
+    )
+    .bind(user.id)
+    .fetch_all(&db.pool)
+    .await
     {
         Ok(rows) => rows,
         Err(err) => {
             tracing::error!("export user docs failed: {}", err);
-            return json_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to export user data");
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to export user data",
+            );
         }
     };
 
-    let shares: Vec<Share> = match sqlx::query_as("SELECT * FROM shares WHERE user_id = ? ORDER BY created_at ASC, id ASC")
-        .bind(user.id)
-        .fetch_all(&db.pool)
-        .await
+    let shares: Vec<Share> = match sqlx::query_as(
+        "SELECT * FROM shares WHERE user_id = ? ORDER BY created_at ASC, id ASC",
+    )
+    .bind(user.id)
+    .fetch_all(&db.pool)
+    .await
     {
         Ok(rows) => rows,
         Err(err) => {
             tracing::error!("export user shares failed: {}", err);
-            return json_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to export user data");
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to export user data",
+            );
         }
     };
 
-    let uploads: Vec<UploadAsset> = match sqlx::query_as("SELECT * FROM uploads WHERE user_id = ? ORDER BY created_at ASC, id ASC")
-        .bind(user.id)
-        .fetch_all(&db.pool)
-        .await
+    let uploads: Vec<UploadAsset> = match sqlx::query_as(
+        "SELECT * FROM uploads WHERE user_id = ? ORDER BY created_at ASC, id ASC",
+    )
+    .bind(user.id)
+    .fetch_all(&db.pool)
+    .await
     {
         Ok(rows) => rows,
         Err(err) => {
             tracing::error!("export user uploads failed: {}", err);
-            return json_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to export user data");
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to export user data",
+            );
         }
     };
 
@@ -373,7 +396,11 @@ pub async fn export_user_data(
         let file_bytes = match fs::read(&file_path).await {
             Ok(bytes) => Some(general_purpose::STANDARD.encode(bytes)),
             Err(err) => {
-                tracing::warn!("read export upload file failed {}: {}", file_path.display(), err);
+                tracing::warn!(
+                    "read export upload file failed {}: {}",
+                    file_path.display(),
+                    err
+                );
                 None
             }
         };
@@ -422,7 +449,10 @@ pub async fn export_user_data(
             .unwrap(),
         Err(err) => {
             tracing::error!("serialize export user data failed: {}", err);
-            json_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to export user data")
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to export user data",
+            )
         }
     }
 }
@@ -550,10 +580,7 @@ pub async fn update_user_2fa(
             .map(|secret| secret.trim().is_empty())
             .unwrap_or(true)
     {
-        return json_error(
-            StatusCode::BAD_REQUEST,
-            "User has not initialized 2FA yet",
-        );
+        return json_error(StatusCode::BAD_REQUEST, "User has not initialized 2FA yet");
     }
 
     match sqlx::query(

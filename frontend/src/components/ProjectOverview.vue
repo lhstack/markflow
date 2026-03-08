@@ -33,7 +33,6 @@
 
       <div v-else class="overview-empty">
         <span>还没有项目，先创建一个项目吧</span>
-        <el-button type="primary" @click="openCreate">新建项目</el-button>
       </div>
     </div>
 

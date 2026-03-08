@@ -120,6 +120,10 @@ import {
   type AgentWriterCompleteDetail,
   type AgentWriterStartDetail,
 } from '@/utils/agentWriter'
+import {
+  registerAgentEditorBridge,
+  unregisterAgentEditorBridge,
+} from '@/utils/agentEditorBridge'
 import VditorPreview from '@/components/VditorPreview.vue'
 import { createManagedUploadTask, removeManagedUpload, type ManagedUploadTask } from '@/utils/managedUploads'
 import { uploadFile, uploadImage } from '@/utils/uploads'
@@ -148,6 +152,7 @@ let writerMode: 'append' | 'replace' = 'append'
 let writerTargetDocId: number | null = null
 let writerTickHandle: number | null = null
 let writerPendingComplete = false
+let writerShouldSave = false
 
 const wordCount = computed(() => {
   const text = draft.value
@@ -233,6 +238,43 @@ function bindScrollSync() {
   previewBodyRef.value?.addEventListener('scroll', syncEditorScrollFromPreview, { passive: true })
 }
 
+function scrollEditorToBottom() {
+  const target = editorScrollEl || getEditorScrollElement()
+  if (!target) return
+  target.scrollTop = target.scrollHeight
+}
+
+function syncAgentEditorBridge() {
+  if (!editor) return
+  registerAgentEditorBridge({
+    docId: props.node.id,
+    docName: props.node.name,
+    getValue: () => editor?.getValue() || draft.value,
+    setValue: (value: string) => {
+      applyWriterValue(value)
+    },
+    insertValue: (value: string) => {
+      if (!editor) return
+      editor.insertValue(value)
+      syncDraftFromEditor()
+    },
+    appendValue: (value: string) => {
+      if (!editor) return
+      applyWriterValue(`${editor.getValue()}${value}`)
+    },
+    replaceValue: (value: string) => {
+      applyWriterValue(value)
+    },
+    focus: () => {
+      editor?.focus()
+    },
+    scrollToBottom: () => {
+      scrollEditorToBottom()
+    },
+    save,
+  })
+}
+
 function beginAssetUpload(kind: 'doc-image' | 'doc-file', file: File) {
   if (assetUploadTask.value) {
     removeManagedUpload(assetUploadTask.value.id)
@@ -272,6 +314,8 @@ function applyWriterValue(value: string) {
   isDirty.value = value !== originalContent
   editor.setValue(value, true)
   setAgentEditorSnapshot(props.node.id, value)
+  scrollEditorToBottom()
+  syncAgentEditorBridge()
 }
 
 function resetWriterState() {
@@ -279,6 +323,7 @@ function resetWriterState() {
   writerBuffer = ''
   writerTargetDocId = null
   writerPendingComplete = false
+  writerShouldSave = false
   if (writerTickHandle !== null) {
     window.clearTimeout(writerTickHandle)
     writerTickHandle = null
@@ -288,11 +333,14 @@ function resetWriterState() {
 function finalizeWriterIfReady() {
   if (writerQueue.length > 0 || !writerPendingComplete) return
   const finalValue = writerBuffer
+  const shouldSave = writerShouldSave
   resetWriterState()
   draft.value = finalValue
   isDirty.value = finalValue !== originalContent
   setAgentEditorSnapshot(props.node.id, finalValue)
-  void save()
+  if (shouldSave) {
+    void save()
+  }
 }
 
 function flushWriterTick() {
@@ -326,6 +374,7 @@ function handleAgentWriterStart(event: Event) {
   resetWriterState()
   writerMode = detail.mode
   writerTargetDocId = detail.docId
+  writerShouldSave = detail.save === true
 
   const currentValue = editor.getValue()
   if (detail.mode === 'replace') {
@@ -497,12 +546,14 @@ async function initEditor() {
         syncFullscreenToolbarButton()
         bindScrollSync()
         syncPreviewScrollFromEditor()
+        syncAgentEditorBridge()
       })
     },
     input(value) {
       draft.value = value
       isDirty.value = value !== originalContent
       setAgentEditorSnapshot(props.node.id, value)
+      syncAgentEditorBridge()
     },
   })
 }
@@ -527,6 +578,7 @@ async function save() {
     ElMessage.error('保存失败')
   } finally {
     saving.value = false
+    syncAgentEditorBridge()
   }
 }
 
@@ -563,6 +615,7 @@ watch(
     }
     editor.setValue(next, true)
     setAgentEditorSnapshot(props.node.id, next)
+    syncAgentEditorBridge()
   }
 )
 
@@ -577,6 +630,7 @@ watch(
       editor.setValue(next, true)
     }
     setAgentEditorSnapshot(props.node.id, next)
+    syncAgentEditorBridge()
   }
 )
 
@@ -613,6 +667,7 @@ onUnmounted(() => {
     syncFullscreenLock()
   }
   resetWriterState()
+  unregisterAgentEditorBridge(props.node.id)
   clearAgentEditorSnapshot(props.node.id)
   editorScrollEl?.removeEventListener('scroll', syncPreviewScrollFromEditor)
   previewBodyRef.value?.removeEventListener('scroll', syncEditorScrollFromPreview)

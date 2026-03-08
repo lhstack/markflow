@@ -87,7 +87,7 @@ pub async fn require_user(db: &Database, headers: &HeaderMap) -> Result<User, Re
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": "Failed to load user"})),
             )
-                .into_response())
+                .into_response());
         }
     };
 
@@ -105,11 +105,7 @@ pub async fn require_user(db: &Database, headers: &HeaderMap) -> Result<User, Re
 pub async fn require_super_admin(db: &Database, headers: &HeaderMap) -> Result<User, Response> {
     let user = require_user(db, headers).await?;
     if user.is_super_admin != 1 {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(json!({"error": "Forbidden"})),
-        )
-            .into_response());
+        return Err((StatusCode::FORBIDDEN, Json(json!({"error": "Forbidden"}))).into_response());
     }
     Ok(user)
 }

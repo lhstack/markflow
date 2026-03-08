@@ -3,6 +3,7 @@ export type AgentWriterMode = 'append' | 'replace'
 export interface AgentWriterStartDetail {
   docId: number
   mode: AgentWriterMode
+  save?: boolean
 }
 
 export interface AgentWriterChunkDetail {

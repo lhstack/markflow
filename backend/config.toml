@@ -3,7 +3,7 @@
 # Environment variables override file values
 
 # Application
-port = "3000"
+port = "3001"
 database_url = "sqlite:markflow.db"
 jwt_secret = "change_me_to_a_long_random_string_in_production"
 share_password_secret = "change_me_to_a_long_random_string_for_share_password_encryption"

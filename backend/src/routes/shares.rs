@@ -98,12 +98,13 @@ async fn delete_share_ids(db: &Database, share_ids: &[i64]) {
 }
 
 async fn cleanup_expired_doc_shares(db: &Database, user_id: i64, doc_id: i64) {
-    let shares: Vec<Share> = sqlx::query_as("SELECT * FROM shares WHERE user_id = ? AND doc_id = ?")
-        .bind(user_id)
-        .bind(doc_id)
-        .fetch_all(&db.pool)
-        .await
-        .unwrap_or_default();
+    let shares: Vec<Share> =
+        sqlx::query_as("SELECT * FROM shares WHERE user_id = ? AND doc_id = ?")
+            .bind(user_id)
+            .bind(doc_id)
+            .fetch_all(&db.pool)
+            .await
+            .unwrap_or_default();
 
     let expired_ids: Vec<i64> = shares
         .into_iter()
@@ -328,7 +329,8 @@ pub async fn list_shares(
 
     delete_share_ids(&db, &expired_ids).await;
 
-    let responses: Vec<ShareResponse> = active_shares.into_iter().map(ShareResponse::from).collect();
+    let responses: Vec<ShareResponse> =
+        active_shares.into_iter().map(ShareResponse::from).collect();
     Json(json!({"shares": responses})).into_response()
 }
 

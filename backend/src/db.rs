@@ -202,6 +202,27 @@ impl Database {
         .execute(&self.pool)
         .await?;
 
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS agent_providers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                base_url TEXT NOT NULL,
+                api_key_ciphertext TEXT NOT NULL,
+                remote_models TEXT NOT NULL DEFAULT '[]',
+                enabled_models TEXT NOT NULL DEFAULT '[]',
+                custom_models TEXT NOT NULL DEFAULT '[]',
+                is_active INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+        "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
         Ok(())
     }
 
@@ -294,6 +315,16 @@ impl Database {
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_uploads_kind ON uploads(kind)")
             .execute(&self.pool)
             .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_agent_providers_user_id ON agent_providers(user_id)",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_agent_providers_user_active ON agent_providers(user_id, is_active)",
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -302,11 +333,10 @@ impl Database {
         registration_enabled: bool,
         upload_max_bytes: i64,
     ) -> Result<SystemSettings> {
-        if let Some(settings) = sqlx::query_as::<_, SystemSettings>(
-            "SELECT * FROM system_settings WHERE id = 1",
-        )
-        .fetch_optional(&self.pool)
-        .await?
+        if let Some(settings) =
+            sqlx::query_as::<_, SystemSettings>("SELECT * FROM system_settings WHERE id = 1")
+                .fetch_optional(&self.pool)
+                .await?
         {
             return Ok(settings);
         }
@@ -324,11 +354,10 @@ impl Database {
     }
 
     pub async fn get_system_settings(&self) -> Result<SystemSettings> {
-        let settings = sqlx::query_as::<_, SystemSettings>(
-            "SELECT * FROM system_settings WHERE id = 1",
-        )
-        .fetch_one(&self.pool)
-        .await?;
+        let settings =
+            sqlx::query_as::<_, SystemSettings>("SELECT * FROM system_settings WHERE id = 1")
+                .fetch_one(&self.pool)
+                .await?;
         Ok(settings)
     }
 

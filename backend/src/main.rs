@@ -363,11 +363,8 @@ async fn main() -> anyhow::Result<()> {
         .or(file_cfg.share_password_secret)
         .unwrap_or_else(|| jwt_secret.clone());
     let upload_dir = cfg_val("UPLOAD_DIR", file_cfg.upload_dir, "uploads");
-    let registration_enabled = cfg_bool(
-        "REGISTRATION_ENABLED",
-        file_cfg.registration_enabled,
-        true,
-    );
+    let registration_enabled =
+        cfg_bool("REGISTRATION_ENABLED", file_cfg.registration_enabled, true);
     let upload_max_mb = cfg_u64("UPLOAD_MAX_MB", file_cfg.upload_max_mb, 20);
     let upload_max_bytes = (upload_max_mb.saturating_mul(1024 * 1024)) as i64;
 
@@ -448,7 +445,10 @@ async fn main() -> anyhow::Result<()> {
         settings.upload_max_bytes
     );
     if let Some(password) = db.ensure_super_admin().await? {
-        tracing::warn!("Initialized super admin account: username=admin password={}", password);
+        tracing::warn!(
+            "Initialized super admin account: username=admin password={}",
+            password
+        );
     }
     let db = Arc::new(db);
 
@@ -459,7 +459,10 @@ async fn main() -> anyhow::Result<()> {
 
     let api = Router::new()
         .route("/auth/captcha", get(routes::auth::get_captcha))
-        .route("/auth/public-settings", get(routes::admin::get_public_settings))
+        .route(
+            "/auth/public-settings",
+            get(routes::admin::get_public_settings),
+        )
         .route("/auth/register", post(routes::auth::register))
         .route("/auth/login", post(routes::auth::login))
         .route("/auth/login/2fa", post(routes::auth::login_2fa))
@@ -469,7 +472,20 @@ async fn main() -> anyhow::Result<()> {
         .route("/auth/2fa/setup", post(routes::auth::setup_2fa))
         .route("/auth/2fa/confirm", post(routes::auth::confirm_2fa))
         .route("/auth/2fa/disable", post(routes::auth::disable_2fa))
+        .route(
+            "/agent/providers",
+            get(routes::agent::list_providers).post(routes::agent::save_provider),
+        )
+        .route(
+            "/agent/providers/:id",
+            get(routes::agent::get_provider).delete(routes::agent::delete_provider),
+        )
+        .route(
+            "/agent/providers/:id/activate",
+            post(routes::agent::activate_provider),
+        )
         .route("/agent/chat/stream", post(routes::agent::chat_stream))
+        .route("/agent/models", post(routes::agent::list_models))
         .route(
             "/uploads",
             get(routes::uploads::list_uploads).post(routes::uploads::upload_file),
@@ -499,7 +515,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/docs/:id/move", put(routes::documents::move_node))
         .route("/shares", post(routes::shares::create_share))
         .route("/shares/doc/:doc_id", get(routes::shares::list_shares))
-        .route("/shares/:id/password", get(routes::shares::get_share_password))
+        .route(
+            "/shares/:id/password",
+            get(routes::shares::get_share_password),
+        )
         .route("/shares/:id", delete(routes::shares::delete_share))
         .route("/s/:token", get(routes::shares::get_share))
         .route("/s/:token/verify", post(routes::shares::verify_share))
@@ -510,13 +529,28 @@ async fn main() -> anyhow::Result<()> {
         );
 
     let api = api
-        .route("/admin/system-settings", get(routes::admin::get_system_settings).put(routes::admin::update_system_settings))
-        .route("/admin/users", get(routes::admin::list_users).post(routes::admin::create_user))
+        .route(
+            "/admin/system-settings",
+            get(routes::admin::get_system_settings).put(routes::admin::update_system_settings),
+        )
+        .route(
+            "/admin/users",
+            get(routes::admin::list_users).post(routes::admin::create_user),
+        )
         .route("/admin/users/:id", delete(routes::admin::delete_user))
-        .route("/admin/users/:id/status", put(routes::admin::update_user_status))
-        .route("/admin/users/:id/password", put(routes::admin::reset_user_password))
+        .route(
+            "/admin/users/:id/status",
+            put(routes::admin::update_user_status),
+        )
+        .route(
+            "/admin/users/:id/password",
+            put(routes::admin::reset_user_password),
+        )
         .route("/admin/users/:id/2fa", put(routes::admin::update_user_2fa))
-        .route("/admin/users/:id/export", get(routes::admin::export_user_data));
+        .route(
+            "/admin/users/:id/export",
+            get(routes::admin::export_user_data),
+        );
 
     let app = Router::new()
         .route("/uploads/files/:id", get(routes::uploads::serve_upload))

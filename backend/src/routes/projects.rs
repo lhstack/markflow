@@ -322,14 +322,6 @@ pub async fn delete_project(
         .await
         .unwrap_or(0);
 
-    if project_count <= 1 {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "至少保留一个项目"})),
-        )
-            .into_response();
-    }
-
     let mut tx = match db.pool.begin().await {
         Ok(tx) => tx,
         Err(e) => {
@@ -342,26 +334,30 @@ pub async fn delete_project(
         }
     };
 
-    let fallback_project_id: i64 = match sqlx::query_scalar(
-        "SELECT id FROM projects
-         WHERE user_id = ? AND id != ?
-         ORDER BY sort_order ASC, created_at ASC
-         LIMIT 1",
-    )
-    .bind(user.id)
-    .bind(id)
-    .fetch_one(&mut *tx)
-    .await
-    {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::error!("delete_project fallback query failed: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "删除项目失败"})),
-            )
-                .into_response();
+    let fallback_project_id: Option<i64> = if project_count > 1 {
+        match sqlx::query_scalar(
+            "SELECT id FROM projects
+             WHERE user_id = ? AND id != ?
+             ORDER BY sort_order ASC, created_at ASC
+             LIMIT 1",
+        )
+        .bind(user.id)
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await
+        {
+            Ok(v) => Some(v),
+            Err(e) => {
+                tracing::error!("delete_project fallback query failed: {}", e);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": "删除项目失败"})),
+                )
+                    .into_response();
+            }
         }
+    } else {
+        None
     };
 
     if let Err(e) = sqlx::query(

@@ -30,7 +30,7 @@ chrono = { version = "0.4", features = ["serde"] }
 toml = "0.8"
 aes-gcm = "0.10"
 sha2 = "0.10"
-async-openai = { version = "0.33.0", features = ["responses"] }
+async-openai = { version = "0.33.0", features = ["responses", "model", "chat-completion"] }
 futures-util = "0.3"
 tokio-stream = "0.1"
 

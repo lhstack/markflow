@@ -75,6 +75,21 @@ pub struct UploadAsset {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct AgentProvider {
+    pub id: i64,
+    pub user_id: i64,
+    pub name: String,
+    pub base_url: String,
+    pub api_key_ciphertext: String,
+    pub remote_models: String,
+    pub enabled_models: String,
+    pub custom_models: String,
+    pub is_active: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 // API response types
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UserInfo {
