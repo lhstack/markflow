@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod admin;
 pub mod auth;
 pub mod documents;

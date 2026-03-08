@@ -110,6 +110,16 @@ import 'vditor/dist/index.css'
 import { useDocsStore, type DocNode } from '@/stores/docs'
 import { useSystemStore } from '@/stores/system'
 import { VDITOR_CDN } from '@/utils/vditor'
+import {
+  AGENT_WRITER_CHUNK_EVENT,
+  AGENT_WRITER_COMPLETE_EVENT,
+  AGENT_WRITER_START_EVENT,
+  clearAgentEditorSnapshot,
+  setAgentEditorSnapshot,
+  type AgentWriterChunkDetail,
+  type AgentWriterCompleteDetail,
+  type AgentWriterStartDetail,
+} from '@/utils/agentWriter'
 import VditorPreview from '@/components/VditorPreview.vue'
 import { createManagedUploadTask, removeManagedUpload, type ManagedUploadTask } from '@/utils/managedUploads'
 import { uploadFile, uploadImage } from '@/utils/uploads'
@@ -132,6 +142,12 @@ let editor: Vditor | null = null
 let editorScrollEl: HTMLElement | null = null
 let scrollSyncLocked = false
 let scrollUnlockFrame = 0
+let writerQueue = ''
+let writerBuffer = ''
+let writerMode: 'append' | 'replace' = 'append'
+let writerTargetDocId: number | null = null
+let writerTickHandle: number | null = null
+let writerPendingComplete = false
 
 const wordCount = computed(() => {
   const text = draft.value
@@ -161,6 +177,7 @@ function syncDraftFromEditor() {
   const value = editor.getValue()
   draft.value = value
   isDirty.value = value !== originalContent
+  setAgentEditorSnapshot(props.node.id, value)
 }
 
 function getEditorScrollElement() {
@@ -247,6 +264,96 @@ function syncFullscreenToolbarButton() {
   if (!button) return
   button.innerHTML = fullscreenIconMarkup(isFullscreen.value)
   button.setAttribute('aria-label', isFullscreen.value ? '退出全屏' : '进入全屏')
+}
+
+function applyWriterValue(value: string) {
+  if (!editor) return
+  draft.value = value
+  isDirty.value = value !== originalContent
+  editor.setValue(value, true)
+  setAgentEditorSnapshot(props.node.id, value)
+}
+
+function resetWriterState() {
+  writerQueue = ''
+  writerBuffer = ''
+  writerTargetDocId = null
+  writerPendingComplete = false
+  if (writerTickHandle !== null) {
+    window.clearTimeout(writerTickHandle)
+    writerTickHandle = null
+  }
+}
+
+function finalizeWriterIfReady() {
+  if (writerQueue.length > 0 || !writerPendingComplete) return
+  const finalValue = writerBuffer
+  resetWriterState()
+  draft.value = finalValue
+  isDirty.value = finalValue !== originalContent
+  setAgentEditorSnapshot(props.node.id, finalValue)
+  void save()
+}
+
+function flushWriterTick() {
+  writerTickHandle = null
+  if (!editor || writerTargetDocId !== props.node.id) {
+    resetWriterState()
+    return
+  }
+
+  if (!writerQueue.length) {
+    finalizeWriterIfReady()
+    return
+  }
+
+  const take = Math.min(3, writerQueue.length)
+  writerBuffer += writerQueue.slice(0, take)
+  writerQueue = writerQueue.slice(take)
+  applyWriterValue(writerBuffer)
+  writerTickHandle = window.setTimeout(flushWriterTick, 14)
+}
+
+function ensureWriterTick() {
+  if (writerTickHandle !== null) return
+  writerTickHandle = window.setTimeout(flushWriterTick, 14)
+}
+
+function handleAgentWriterStart(event: Event) {
+  const detail = (event as CustomEvent<AgentWriterStartDetail>).detail
+  if (!detail || detail.docId !== props.node.id || !editor) return
+
+  resetWriterState()
+  writerMode = detail.mode
+  writerTargetDocId = detail.docId
+
+  const currentValue = editor.getValue()
+  if (detail.mode === 'replace') {
+    writerBuffer = ''
+  } else {
+    writerBuffer = currentValue
+    if (writerBuffer.trim()) {
+      if (!writerBuffer.endsWith('\n\n')) {
+        writerBuffer = writerBuffer.replace(/\n*$/, '\n\n')
+      }
+    }
+  }
+
+  applyWriterValue(writerBuffer)
+}
+
+function handleAgentWriterChunk(event: Event) {
+  const detail = (event as CustomEvent<AgentWriterChunkDetail>).detail
+  if (!detail || detail.docId !== props.node.id || writerTargetDocId !== detail.docId) return
+  writerQueue += detail.chunk
+  ensureWriterTick()
+}
+
+function handleAgentWriterComplete(event: Event) {
+  const detail = (event as CustomEvent<AgentWriterCompleteDetail>).detail
+  if (!detail || detail.docId !== props.node.id || writerTargetDocId !== detail.docId) return
+  writerPendingComplete = true
+  finalizeWriterIfReady()
 }
 
 function toggleFullscreen() {
@@ -395,6 +502,7 @@ async function initEditor() {
     input(value) {
       draft.value = value
       isDirty.value = value !== originalContent
+      setAgentEditorSnapshot(props.node.id, value)
     },
   })
 }
@@ -443,6 +551,8 @@ function handleSaveHotkey(event: KeyboardEvent) {
 watch(
   () => props.node.id,
   async () => {
+    resetWriterState()
+    clearAgentEditorSnapshot(props.node.id)
     const next = props.node.content || ''
     draft.value = next
     originalContent = next
@@ -452,6 +562,7 @@ watch(
       return
     }
     editor.setValue(next, true)
+    setAgentEditorSnapshot(props.node.id, next)
   }
 )
 
@@ -465,6 +576,7 @@ watch(
     if (editor.getValue() !== next) {
       editor.setValue(next, true)
     }
+    setAgentEditorSnapshot(props.node.id, next)
   }
 )
 
@@ -484,15 +596,24 @@ onMounted(() => {
   void initEditor()
   window.addEventListener('beforeunload', handleBeforeUnload)
   window.addEventListener('keydown', handleSaveHotkey)
+  window.addEventListener(AGENT_WRITER_START_EVENT, handleAgentWriterStart as EventListener)
+  window.addEventListener(AGENT_WRITER_CHUNK_EVENT, handleAgentWriterChunk as EventListener)
+  window.addEventListener(AGENT_WRITER_COMPLETE_EVENT, handleAgentWriterComplete as EventListener)
+  setAgentEditorSnapshot(props.node.id, draft.value)
 })
 
 onUnmounted(() => {
   window.removeEventListener('beforeunload', handleBeforeUnload)
   window.removeEventListener('keydown', handleSaveHotkey)
+  window.removeEventListener(AGENT_WRITER_START_EVENT, handleAgentWriterStart as EventListener)
+  window.removeEventListener(AGENT_WRITER_CHUNK_EVENT, handleAgentWriterChunk as EventListener)
+  window.removeEventListener(AGENT_WRITER_COMPLETE_EVENT, handleAgentWriterComplete as EventListener)
   if (isFullscreen.value) {
     isFullscreen.value = false
     syncFullscreenLock()
   }
+  resetWriterState()
+  clearAgentEditorSnapshot(props.node.id)
   editorScrollEl?.removeEventListener('scroll', syncPreviewScrollFromEditor)
   previewBodyRef.value?.removeEventListener('scroll', syncEditorScrollFromPreview)
   if (scrollUnlockFrame) {

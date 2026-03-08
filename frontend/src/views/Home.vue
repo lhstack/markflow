@@ -136,6 +136,18 @@
     <SystemSettingsDialog v-model="showSystemSettings" />
     <UserManagementDialog v-model="showUserManagement" />
     <ShareDialog v-if="shareTarget" v-model="showShare" :node="shareTarget" />
+    <AgentPanel
+      :page-scope="agentPageScope"
+      :project-id="projects.currentProject?.id ?? null"
+      :project-name="projects.currentProject?.name || ''"
+      :doc-id="docs.currentNode?.id ?? null"
+      :doc-name="docs.currentNode?.name || ''"
+      :doc-type="(docs.currentNode?.node_type as 'doc' | 'dir' | null) ?? null"
+      :doc-content="docs.currentNode?.content || ''"
+      :project-catalog="agentProjectCatalog"
+      :current-node-catalog="agentNodeCatalog"
+      @navigate="handleAgentNavigate"
+    />
 
     <!-- Password dialog -->
     <el-dialog v-model="showPwChange" title="修改密码" width="380px" append-to-body destroy-on-close>
@@ -169,6 +181,7 @@ import SystemSettingsDialog from '@/components/SystemSettingsDialog.vue'
 import UserManagementDialog from '@/components/UserManagementDialog.vue'
 import WelcomeScreen from '@/components/WelcomeScreen.vue'
 import ProjectOverview from '@/components/ProjectOverview.vue'
+import AgentPanel from '@/components/AgentPanel.vue'
 import request from '@/utils/request'
 import { useSystemStore } from '@/stores/system'
 
@@ -236,6 +249,66 @@ const pwForm = ref({ old: '', new: '', confirm: '' })
 const restoringHomeState = ref(true)
 
 const showSidebar = computed(() => !showProjectOverview.value && Boolean(projects.currentProject))
+const agentPageScope = computed<'overview' | 'editor' | 'dir'>(() => {
+  if (showProjectOverview.value) return 'overview'
+  if (docs.currentNode?.node_type === 'doc') return 'editor'
+  return 'dir'
+})
+const agentProjectCatalog = computed(() =>
+  projects.projects
+    .slice(0, 24)
+    .map((project) => project.name.trim())
+    .filter(Boolean)
+    .join('、')
+)
+const agentNodeCatalog = computed(() => {
+  const flat: string[] = []
+  const walk = (nodes: DocNode[], trail: string[] = []) => {
+    for (const node of nodes) {
+      const path = [...trail, node.name].join(' / ')
+      flat.push(`${path}（${node.node_type === 'doc' ? '文档' : '目录'}）`)
+      if (node.children?.length) walk(node.children, [...trail, node.name])
+      if (flat.length >= 40) return
+    }
+  }
+  walk(docs.tree)
+  return flat.join('、')
+})
+
+function normalizeAgentName(value: string) {
+  return value.trim().toLocaleLowerCase()
+}
+
+function findDocNodeByName(nodes: DocNode[], targetName: string): DocNode | null {
+  for (const node of nodes) {
+    if (normalizeAgentName(node.name) === targetName) return node
+    if (node.children?.length) {
+      const found = findDocNodeByName(node.children, targetName)
+      if (found) return found
+    }
+  }
+  return null
+}
+
+function findDocNodeByPath(nodes: DocNode[], rawPath: string): DocNode | null {
+  const segments = rawPath
+    .split('/')
+    .map((segment) => normalizeAgentName(segment))
+    .filter(Boolean)
+
+  if (!segments.length) return null
+
+  let currentNodes = nodes
+  let currentNode: DocNode | null = null
+
+  for (const segment of segments) {
+    currentNode = currentNodes.find((node) => normalizeAgentName(node.name) === segment) || null
+    if (!currentNode) return null
+    currentNodes = currentNode.children || []
+  }
+
+  return currentNode
+}
 
 function persistHomeCache() {
   localStorage.setItem(HOME_SIDEBAR_KEY, sidebarOpen.value ? '1' : '0')
@@ -384,6 +457,51 @@ async function enterProject(projectId: number) {
   showProjectOverview.value = false
   docs.currentNode = null
   await docs.fetchTree(projectId)
+}
+
+async function openDocNode(nodeId: number) {
+  showProjectOverview.value = false
+  await docs.fetchNode(nodeId)
+}
+
+async function handleAgentNavigate(target: { kind: 'overview' | 'project' | 'doc'; name?: string }) {
+  if (target.kind === 'overview') {
+    backToOverview()
+    return
+  }
+
+  if (target.kind === 'project') {
+    const targetName = normalizeAgentName(target.name || '')
+    if (!targetName) return
+    const project = projects.projects.find((item) => normalizeAgentName(item.name) === targetName)
+    if (!project) {
+      ElMessage.warning(`未找到项目“${target.name}”`)
+      return
+    }
+    await enterProject(project.id)
+    return
+  }
+
+  const targetName = normalizeAgentName(target.name || '')
+  if (!targetName) return
+
+  if (!projects.currentProjectId) {
+    ElMessage.warning('当前没有已打开的项目，无法跳转到文档')
+    return
+  }
+
+  if (!docs.tree.length) {
+    await docs.fetchTree(projects.currentProjectId)
+  }
+
+  const node = findDocNodeByPath(docs.tree, target.name || '')
+    || findDocNodeByName(docs.tree, targetName)
+  if (!node) {
+    ElMessage.warning(`当前项目中未找到“${target.name}”`)
+    return
+  }
+
+  await openDocNode(node.id)
 }
 
 async function createProject(payload: { name: string; description: string; background_image: string }) {

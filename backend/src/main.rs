@@ -469,6 +469,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/auth/2fa/setup", post(routes::auth::setup_2fa))
         .route("/auth/2fa/confirm", post(routes::auth::confirm_2fa))
         .route("/auth/2fa/disable", post(routes::auth::disable_2fa))
+        .route("/agent/chat/stream", post(routes::agent::chat_stream))
         .route(
             "/uploads",
             get(routes::uploads::list_uploads).post(routes::uploads::upload_file),
