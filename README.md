@@ -382,6 +382,44 @@ chmod +x /path/to/markflow
 - 限制 CORS 来源（当前默认开发友好配置）
 - 对数据库与日志目录做备份与权限控制
 
-## License
+## 静态资源缓存问题
+### nginx
+```nginx
+http {
+   map $request_method $file_cache_control {
+    default "";
+    GET     "public, max-age=86400";
+    HEAD    "public, max-age=86400";
+   }
+   
+   location /uploads/files/ {
+       proxy_pass http://backend; #你的反向代理地址00000000000000000000000000000000000000000000000000
+   
+       proxy_hide_header Cache-Control;
+       proxy_hide_header Expires;
+   
+       expires 1d;
+       add_header Cache-Control $file_cache_control always;
+   }
+}
+```
+### caddy
+```caddy
+你的域名 {
+    @uploads path /uploads/files/*
+    @uploads_cache {
+        path /uploads/files/*
+        method GET HEAD
+    }
 
-当前仓库未包含明确开源协议。如需开源发布，请补充 `LICENSE` 文件并声明授权条款。
+    header @uploads_cache {
+        -Cache-Control
+        -Expires
+        Cache-Control "public, max-age=86400"
+    }
+
+    reverse_proxy @uploads 你的后端服务
+}
+```
+## License
+[LICENSE](./LICENSE)
