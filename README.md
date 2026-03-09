@@ -3,6 +3,10 @@
 MarkFlow 是一个基于 `Rust + Vue 3` 的轻量文档系统，核心结构为：`用户 -> 项目 -> 文档树`。
 
 它支持项目卡片管理、目录/文档树编辑、Markdown 实时编辑预览、受控分享（密码/过期时间）、账号安全（验证码 + 2FA）以及前后端一体化部署。
+## 演示图
+<img width="2538" height="1128" alt="025d7c6f9412ff96b32115303e4c8883" src="https://github.com/user-attachments/assets/4d56cbb1-7a3c-4b9c-885f-e6a85613668f" />
+<img width="2557" height="1042" alt="d7fcb8133c9393a19493270dee666756" src="https://github.com/user-attachments/assets/cc02966c-211d-4ab0-981a-90a6c7f313f4" />
+<img width="2553" height="1247" alt="0c1c137b0c44893a5c46fd98981496d8" src="https://github.com/user-attachments/assets/af1e7d9f-4520-457c-afdd-7ceb1ca491e4" />
 
 ## 当前版本
 
