@@ -337,7 +337,7 @@ type PageScope = 'overview' | 'editor' | 'dir'
 type DocType = 'doc' | 'dir' | null
 type SessionRole = 'user' | 'assistant'
 type RequestRole = SessionRole | 'system'
-type StreamAction = 'chat' | 'append' | 'replace'
+type StreamAction = 'chat' | AgentWriterMode
 type RouteKind = 'overview' | 'project' | 'doc'
 
 interface AgentRouteTarget {
@@ -1450,7 +1450,7 @@ async function sendMessage() {
 
       if (routeAction && routeAction !== 'chat' && props.docId) {
         if (!writerStarted) {
-          const writerMode: AgentWriterMode = routeAction === 'replace' ? 'replace' : 'append'
+          const writerMode: AgentWriterMode = routeAction
           dispatchAgentWriterStart({ docId: props.docId, mode: writerMode, save: false })
           writerStarted = true
         }
@@ -1471,13 +1471,15 @@ async function sendMessage() {
 
     const buildVisibleAssistantContent = (source = rawAssistantContent, streamMode = false) => {
       let visible = source
-        .replace(/\s*\[\[ACTION:(append|replace)\]\][\s\S]*?\[\[\/ACTION\]\]\s*/gi, '\n')
+        .replace(/\s*\[\[ACTION:(append|replace|rewrite_section|replace_block)\]\][\s\S]*?\[\[\/ACTION\]\]\s*/gi, '\n')
 
       if (streamMode) {
         const upperVisible = visible.toUpperCase()
         const openAppendIndex = upperVisible.lastIndexOf('[[ACTION:APPEND]]')
         const openReplaceIndex = upperVisible.lastIndexOf('[[ACTION:REPLACE]]')
-        const openIndex = Math.max(openAppendIndex, openReplaceIndex)
+        const openRewriteSectionIndex = upperVisible.lastIndexOf('[[ACTION:REWRITE_SECTION]]')
+        const openReplaceBlockIndex = upperVisible.lastIndexOf('[[ACTION:REPLACE_BLOCK]]')
+        const openIndex = Math.max(openAppendIndex, openReplaceIndex, openRewriteSectionIndex, openReplaceBlockIndex)
         if (openIndex !== -1) {
           const closeIndex = upperVisible.lastIndexOf('[[/ACTION]]')
           if (openIndex > closeIndex) {
@@ -1531,7 +1533,7 @@ async function sendMessage() {
       const tail = completedContent.slice(overlapLength)
       const actionCloseMarker = '[[/ACTION]]'
       const existingCloseIndex = rawAssistantContent.toUpperCase().indexOf(actionCloseMarker)
-      const completedHasActionBlock = /\[\[ACTION:(append|replace)\]\]/i.test(completedContent)
+      const completedHasActionBlock = /\[\[ACTION:(append|replace|rewrite_section|replace_block)\]\]/i.test(completedContent)
       const mergedCompletedContent = (() => {
         if (!completedHasActionBlock) return completedContent
         if (existingCloseIndex === -1) return completedContent
@@ -1551,7 +1553,7 @@ async function sendMessage() {
       if (routeAction && routeAction !== 'chat') return
       if (props.docType !== 'doc' || !props.docId) return
 
-      const wrappedMatch = rawAssistantContent.match(/^\s*\[\[ACTION:(append|replace)\]\]\s*([\s\S]*?)\s*\[\[\/ACTION\]\]\s*$/i)
+      const wrappedMatch = rawAssistantContent.match(/^\s*\[\[ACTION:(append|replace|rewrite_section|replace_block)\]\]\s*([\s\S]*?)\s*\[\[\/ACTION\]\]\s*$/i)
       if (wrappedMatch) {
         const mode = wrappedMatch[1].toLowerCase() as AgentWriterMode
         const body = wrappedMatch[2] || ''
@@ -1613,6 +1615,8 @@ async function sendMessage() {
     const actionOpenMarkers: Array<{ marker: string; mode: AgentWriterMode }> = [
       { marker: '[[ACTION:append]]', mode: 'append' },
       { marker: '[[ACTION:replace]]', mode: 'replace' },
+      { marker: '[[ACTION:rewrite_section]]', mode: 'rewrite_section' },
+      { marker: '[[ACTION:replace_block]]', mode: 'replace_block' },
     ]
     const actionMarkerLookbehind = Math.max(
       actionCloseMarker.length,
@@ -1760,7 +1764,11 @@ async function sendMessage() {
             ? 'append'
             : upperMarker === '[[ACTION:REPLACE]]'
               ? 'replace'
-              : 'chat'
+              : upperMarker === '[[ACTION:REWRITE_SECTION]]'
+                ? 'rewrite_section'
+                : upperMarker === '[[ACTION:REPLACE_BLOCK]]'
+                  ? 'replace_block'
+                  : 'chat'
 
           if (routeAction !== 'chat' && props.docType !== 'doc') {
             routeAction = 'chat'

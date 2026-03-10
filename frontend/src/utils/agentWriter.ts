@@ -1,4 +1,4 @@
-export type AgentWriterMode = 'append' | 'replace'
+export type AgentWriterMode = 'append' | 'replace' | 'rewrite_section' | 'replace_block'
 
 export interface AgentWriterStartDetail {
   docId: number

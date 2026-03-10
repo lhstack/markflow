@@ -441,29 +441,45 @@ fn build_system_prompt(
 
     if use_tools {
         parts.push(
-            r#"硬性规则：当目标是生成或修改文档正文时，工具只允许用于定位、打开、创建空文档、读取文档。这条规则优先级高于下面的通用“先用工具”指导。最终正文必须通过 assistant 文本流输出，且正文的第一个字节必须是 [[ACTION:append]] 或 [[ACTION:replace]]。禁止在 write_document 或 create_tree_node 参数中携带完整 Markdown 正文。
+            r#"硬性规则：当目标是生成或修改文档正文时，工具只允许用于定位、打开、创建空文档、读取文档、读取编辑器快照、保存文档、更新文档信息。这条规则优先级高于下面的通用“先用工具”指导。最终正文必须通过 assistant 文本流输出，且正文的第一个字节必须是 [[ACTION:append]]、[[ACTION:replace]]、[[ACTION:rewrite_section]]、[[ACTION:replace_block]] 之一。禁止在 create_tree_node 参数中携带完整 Markdown 正文。
 只有在所有必要工具调用完成后，才允许输出 [[ACTION:...]] 标记；并且该标记必须位于最终正文最开头，不能放在结尾。
-写文档正文时，必须严格使用 [[ACTION:append]]...[[/ACTION]] 或 [[ACTION:replace]]...[[/ACTION]] 包裹正文；只有两个标记之间的内容才视为文档正文。
+写文档正文时，必须严格使用 [[ACTION:append]]...[[/ACTION]]、[[ACTION:replace]]...[[/ACTION]]、[[ACTION:rewrite_section]]...[[/ACTION]] 或 [[ACTION:replace_block]]...[[/ACTION]]；只有两个标记之间的内容才视为文档正文。
+局部重写协议（rewrite_section）块内必须包含：
+[[TARGET]]要重写的小节标题（不带 #）[[/TARGET]]
+[[CONTENT]]该小节重写后的完整 Markdown（建议包含标题行）[[/CONTENT]]
+rewrite_section 的语义是“整节替换”：TARGET 对应旧小节必须被完整替换并清理，不得保留旧段落后再追加新段落。
+局部替换协议（replace_block）块内必须包含：
+[[FIND]]原文中要替换的片段[[/FIND]]
+[[REPLACE]]替换后的新片段[[/REPLACE]]
+replace_block 的语义是“定位替换”：FIND 片段在结果中应被 REPLACE 完整替代，不得与旧片段并存。
+当用户要求“把某段内容移动到指定位置”时，结果必须满足“源位置删除 + 目标位置插入”，最终文档中该内容只能保留一份，禁止旧位置和新位置同时保留。
+执行局部重写/局部替换后必须自检：1）旧内容已清理；2）无重复段落/重复小节；3）目录与编号顺序与新结构一致。
 协议标记必须完整且精确：不能缺少括号、不能改变大小写、不能在标记内加入空格、不能输出半截标记。
 混合输出硬性规则：[[ACTION:...]]...[[/ACTION]] 内的内容进入 Markdown 编辑器；标记外内容进入聊天面板。输出 [[/ACTION]] 后必须继续输出聊天文本，不能在 [[/ACTION]] 处立即结束回复。
 在 [[/ACTION]] 之后，必须按固定结构输出“保存状态与优化建议”模块（放在标记外，不得放进正文标记内）。
 保存状态行必须二选一且原样输出：`保存状态：已保存` 或 `保存状态：未保存`。
 若为未保存，下一行必须补充：`原因：...`，说明未保存原因（例如仅生成草稿、待用户确认等）。
 然后必须输出 `优化建议：` 小节，并给出与当前文档直接相关的 3-5 条编号建议（1. 2. 3. ...），每条建议聚焦一个可执行点，不得少于 3 条，不得超过 5 条。
-本轮优先通过函数调用完成页面导航、项目管理、文档树操作、文档读取、文档写入和浏览器端自动化。
+在 `优化建议` 之后，必须追加 `本次修改总结：` 小节，用 a-z 条简短编号项总结“本次具体改了什么、影响了哪些位置、预期收益是什么”，禁止空泛表述。
+本轮优先通过函数调用完成页面导航、项目管理、文档树操作、文档读取、保存与元信息更新，以及浏览器端自动化。
 不要输出旧版 [[ROUTE:...]] 标记；需要切换页面时优先使用工具调用。
 执行任何写操作前，先尽量读取当前页面状态、项目列表、项目树或文档内容，确保目标准确。
 当用户询问当前页面内容、当前处于什么页面、有哪些页面/路由、有哪些项目、项目树结构、当前文档内容、当前有哪些函数/工具可用时，不要凭上下文猜测，必须优先调用对应工具获取信息。
+读取当前文档正文时，先判断是否未保存：先调用 get_current_page_state 获取当前状态；若当前文档存在未保存修改，必须调用 read_editor_snapshot 读取实时快照；若当前文档已保存或没有可用编辑器快照，再调用 read_document 读取已保存正文。
+禁止在“当前文档未保存”时仅依赖 read_document 进行续写、改写或替换判断，避免覆盖用户尚未保存的编辑内容。
 如果用户想知道你有哪些页面操作能力或函数调用能力，先结合工具列表本身回答；如果还需要当前页面实时信息，再调用 get_current_page_state、list_page_routes、list_projects、get_project_tree 等工具补充。
-如果要改写、补写、完善文档，除非用户明确说了“保存”“直接保存”“写完保存”“应用到文档”“提交修改”这类意思，否则调用 write_document 时必须传 save=false，默认只写入未保存草稿。
+当用户意图仅为“保存当前文档/确认保存”且未要求改写正文时，禁止输出任何 [[ACTION:...]] 文档协议，必须调用 save_current_document 工具完成真实保存，再在聊天面板反馈保存结果。
+当用户意图仅为“修改项目信息”（项目名/描述/背景图）且未要求改写正文时，禁止输出任何 [[ACTION:...]] 文档协议，必须调用 update_project 工具完成修改，再在聊天面板反馈结果。
+当用户意图仅为“修改节点信息”（例如重命名文档或目录）且未要求改写正文时，禁止输出任何 [[ACTION:...]] 文档协议，必须调用 update_tree_node_meta 工具完成修改，再在聊天面板反馈结果。
+如果要改写、补写、完善文档，除非用户明确说了“保存”“直接保存”“写完保存”“应用到文档”“提交修改”这类意思，否则默认只生成未保存草稿。
 当你在未得到明确保存授权的情况下写入了文档，保存状态必须输出为“保存状态：未保存”，并补充原因；不要擅自声称已经保存。
 如果需要填写表单、点击按钮、操作弹窗或调用编辑器对象，优先使用专用工具；只有专用工具不足时再使用 execute_browser_javascript。
 当工具已经完成用户需求时，用简短中文总结结果；不要重复输出工具返回的整段 JSON。
 编辑意图判断流程：必须先结合当前文档内容、历史对话上下文和用户最新输入，先识别编辑意图，再评估影响范围，最后决定协议动作。
 意图识别优先级：判断本轮属于 追加 / 插入 / 替换 / 润色 / 重写 中的哪一类；“补充、继续、完善、展开、加上、重写、整理”等词只能作为参考信号，不能机械映射为固定动作。
 范围评估要求：判断本轮影响是 局部片段 / 单个小节 / 多个相关小节 / 文档大部分内容 / 整篇结构。
-协议动作决策：若本轮主要是局部新增、局部插入、局部替换或局部润色，优先使用 [[ACTION:append]]；若涉及大范围替换、整体结构重排、统一风格改写、整篇逻辑重组或全文重写，使用 [[ACTION:replace]]。
-关键约束：append / replace 是协议动作，不等同于编辑意图；编辑意图与协议动作不是一一对应关系。若局部编辑可以满足需求，不得选择整体重写。并且必须在标记外明确给出：`操作类型：追加/插入/替换/润色/重写` 和 `修改位置：...`。"#
+协议动作决策：若本轮主要是局部新增，优先使用 [[ACTION:append]]；若是整篇改写或大范围重排，使用 [[ACTION:replace]]；若是按标题重写某个小节，使用 [[ACTION:rewrite_section]]；若是替换一段原文片段，使用 [[ACTION:replace_block]]。
+关键约束：append / replace / rewrite_section / replace_block 是协议动作，不等同于编辑意图；编辑意图与协议动作不是一一对应关系。若局部编辑可以满足需求，不得选择整体重写。并且必须在标记外明确给出：`操作类型：追加/插入/替换/润色/重写` 和 `修改位置：...`。"#
                 .to_string(),
         );
     } else {
@@ -482,17 +498,21 @@ fn build_system_prompt(
                 ));
                 parts.push(
                     r#"正文必须以 [[ACTION:...]] 开始，并以 [[/ACTION]] 结束。开始和结束标记之间的内容才是要写入文档的 Markdown。
-在 [[/ACTION]] 结束后，必须继续输出聊天文本，并严格使用以下结构：`保存状态：已保存` 或 `保存状态：未保存`；若未保存，下一行补 `原因：...`；然后输出 `优化建议：`，并给出 3-5 条编号建议。"#
+在 [[/ACTION]] 结束后，必须继续输出聊天文本，并严格使用以下结构：`保存状态：已保存` 或 `保存状态：未保存`；若未保存，下一行补 `原因：...`；然后输出 `优化建议：`，并给出 3-5 条编号建议；最后输出 `本次修改总结：`，并给出 2-4 条编号总结。"#
                         .to_string(),
                 );
             }
             _ => {
                 parts.push(
-                    r#"你必须在最终正文开头只选择一个动作标记：[[ACTION:chat]]、[[ACTION:append]]、[[ACTION:replace]]。
-如果只是回答问题或解释，使用 [[ACTION:chat]]。如果用户要求继续完善现有文档，使用 [[ACTION:append]]。如果用户要求整体改写、重写、整理当前文档，使用 [[ACTION:replace]]。
+                    r#"你必须在最终正文开头只选择一个动作标记：[[ACTION:chat]]、[[ACTION:append]]、[[ACTION:replace]]、[[ACTION:rewrite_section]]、[[ACTION:replace_block]]。
+如果只是回答问题或解释，使用 [[ACTION:chat]]。如果用户要求继续完善现有文档，使用 [[ACTION:append]]。如果用户要求整体改写、重写、整理当前文档，使用 [[ACTION:replace]]。如果用户要求按标题重写某个小节，使用 [[ACTION:rewrite_section]]。如果用户要求替换指定片段，使用 [[ACTION:replace_block]]。
 动作标记后面紧接正文，不要解释你选择了什么动作。
-如果选择 [[ACTION:append]] 或 [[ACTION:replace]]，必须再输出一个结束标记 [[/ACTION]]，并且只有这两个标记之间的内容属于文档正文。
-如果选择 [[ACTION:append]] 或 [[ACTION:replace]]，在 [[/ACTION]] 之后必须继续输出聊天文本，并严格使用以下结构：`保存状态：已保存` 或 `保存状态：未保存`；若未保存，下一行补 `原因：...`；然后输出 `优化建议：`，并给出 3-5 条编号建议。
+如果选择 [[ACTION:append]]、[[ACTION:replace]]、[[ACTION:rewrite_section]] 或 [[ACTION:replace_block]]，必须再输出一个结束标记 [[/ACTION]]，并且只有这两个标记之间的内容属于文档正文。
+当动作为 [[ACTION:rewrite_section]] 时，块内必须包含 [[TARGET]]...[[/TARGET]] 和 [[CONTENT]]...[[/CONTENT]]。
+当动作为 [[ACTION:replace_block]] 时，块内必须包含 [[FIND]]...[[/FIND]] 和 [[REPLACE]]...[[/REPLACE]]。
+若使用 rewrite_section，必须完整替换目标小节并清理旧内容；若使用 replace_block，必须让 FIND 在结果中被 REPLACE 完整替代，禁止旧内容残留。
+若用户意图是移动内容，必须同时满足“源位置删除 + 目标位置插入”，最终只保留一份内容，并保证目录/编号顺序正确。
+如果选择上述任一文档动作，在 [[/ACTION]] 之后必须继续输出聊天文本，并严格使用以下结构：`保存状态：已保存` 或 `保存状态：未保存`；若未保存，下一行补 `原因：...`；然后输出 `优化建议：`，并给出 3-5 条编号建议；最后输出 `本次修改总结：`，并给出 2-4 条编号总结。
 如果用户明确要求切换页面、进入项目概览、进入某个项目或打开当前项目中的某个文档，你可以在最前面额外输出一个路由标记，然后紧跟动作标记。
 可用路由标记格式只有三种：[[ROUTE:overview]]、[[ROUTE:project:项目名]]、[[ROUTE:doc:文档名]]。
 只有在你能从上下文中确认目标名称时才输出路由标记；不要编造项目名或文档名。"#
@@ -699,6 +719,21 @@ fn agent_function_tools() -> Vec<Tool> {
             }),
         ),
         function_tool(
+            "update_project",
+            "更新项目信息。可按 project_id 或 project_name 定位目标项目，支持修改 name、description、background_image。适用于重命名项目、更新项目描述、更新项目背景图。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "project_id": { "type": "integer", "description": "目标项目 ID。优先使用。" },
+                    "project_name": { "type": "string", "description": "目标项目名称。只有拿不到 project_id 时再使用。" },
+                    "name": { "type": "string", "description": "项目新名称。" },
+                    "description": { "type": "string", "description": "项目新描述，可为空字符串。" },
+                    "background_image": { "type": "string", "description": "项目新背景图 URL，可为空字符串。" }
+                },
+                "additionalProperties": false,
+            }),
+        ),
+        function_tool(
             "delete_projects",
             "删除一个或多个项目。删除前应先通过 list_projects 确认目标准确，避免误删。可以传 project_ids，也可以传 project_names；支持批量删除。",
             json!({
@@ -798,25 +833,6 @@ fn agent_function_tools() -> Vec<Tool> {
             }),
         ),
         function_tool(
-            "write_document",
-            "以打字机效果向指定文档写入 Markdown 内容，并让编辑器滚动条自动跟随到最底部。适合创建文档草稿、补全文档、重写文档、完善章节。默认写入当前打开文档；如传入项目或文档定位参数，会先打开目标文档再写入。mode=append 表示追加续写，mode=replace 表示整体替换。除非用户明确要求保存，否则 save 应传 false。",
-            json!({
-                "type": "object",
-                "properties": {
-                    "project_id": { "type": "integer", "description": "目标项目 ID。优先使用。" },
-                    "project_name": { "type": "string", "description": "目标项目名称。只有拿不到 project_id 时再使用。" },
-                    "doc_id": { "type": "integer", "description": "目标文档 ID。优先使用。" },
-                    "doc_path": { "type": "string", "description": "目标文档路径，例如 产品文档/接口/API说明 。只有拿不到 doc_id 时再使用。" },
-                    "doc_name": { "type": "string", "description": "目标文档名称。只有拿不到 doc_id 和 doc_path 时再使用。" },
-                    "mode": { "type": "string", "description": "写入模式。append=在原文后续写；replace=整体替换原文。", "enum": ["append", "replace"] },
-                    "content": { "type": "string", "description": "要写入的 Markdown 正文。" },
-                    "save": { "type": "boolean", "description": "是否在打字机写入结束后自动保存。默认 false；只有在用户明确要求保存时才传 true。" }
-                },
-                "required": ["content"],
-                "additionalProperties": false,
-            }),
-        ),
-        function_tool(
             "read_document",
             "读取指定 Markdown 文档的完整正文和元信息。适合在完善、修复、续写、重写文档前先读取原文。默认读取当前文档；也可以通过项目和文档定位参数读取其他文档。",
             json!({
@@ -828,6 +844,57 @@ fn agent_function_tools() -> Vec<Tool> {
                     "doc_path": { "type": "string", "description": "目标文档路径。只有拿不到 doc_id 时再使用。" },
                     "doc_name": { "type": "string", "description": "目标文档名称。只有拿不到 doc_id 和 doc_path 时再使用。" }
                 },
+                "additionalProperties": false,
+            }),
+        ),
+        function_tool(
+            "read_editor_snapshot",
+            "读取当前编辑器中的实时内容快照（包含未保存修改）。可选传入项目和文档定位参数，工具会先打开目标文档，再返回编辑器当前内容；支持 max_chars 控制返回长度。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "project_id": { "type": "integer", "description": "目标项目 ID。优先使用。" },
+                    "project_name": { "type": "string", "description": "目标项目名称。只有拿不到 project_id 时再使用。" },
+                    "doc_id": { "type": "integer", "description": "目标文档 ID。优先使用。" },
+                    "doc_path": { "type": "string", "description": "目标文档路径。只有拿不到 doc_id 时再使用。" },
+                    "doc_name": { "type": "string", "description": "目标文档名称。只有拿不到 doc_id 和 doc_path 时再使用。" },
+                    "max_chars": { "type": "integer", "description": "可选，限制返回内容的最大字符数。默认不截断。" }
+                },
+                "additionalProperties": false,
+            }),
+        ),
+        function_tool(
+            "save_current_document",
+            "保存当前正在编辑的 Markdown 文档。可选传入项目和文档定位参数，工具会先打开目标文档再执行保存。适合用户明确要求“保存”“提交修改”“应用更改”时调用。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "project_id": { "type": "integer", "description": "目标项目 ID。优先使用。" },
+                    "project_name": { "type": "string", "description": "目标项目名称。只有拿不到 project_id 时再使用。" },
+                    "doc_id": { "type": "integer", "description": "目标文档 ID。优先使用。" },
+                    "doc_path": { "type": "string", "description": "目标文档路径。只有拿不到 doc_id 时再使用。" },
+                    "doc_name": { "type": "string", "description": "目标文档名称。只有拿不到 doc_id 和 doc_path 时再使用。" }
+                },
+                "additionalProperties": false,
+            }),
+        ),
+        function_tool(
+            "update_tree_node_meta",
+            "修改文档树节点元信息（当前支持重命名文档或目录）。可选传入项目和节点定位参数，工具会先打开目标节点再执行修改。适合用户明确要求“重命名文档”“重命名目录”“修改节点名称”时调用。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "project_id": { "type": "integer", "description": "目标项目 ID。优先使用。" },
+                    "project_name": { "type": "string", "description": "目标项目名称。只有拿不到 project_id 时再使用。" },
+                    "node_id": { "type": "integer", "description": "目标节点 ID（文档或目录）。优先使用。" },
+                    "node_path": { "type": "string", "description": "目标节点路径。只有拿不到 node_id 时再使用。" },
+                    "node_name": { "type": "string", "description": "目标节点当前名称。只有拿不到 node_id 和 node_path 时再使用。" },
+                    "doc_id": { "type": "integer", "description": "兼容字段：目标文档 ID。" },
+                    "doc_path": { "type": "string", "description": "兼容字段：目标文档路径。" },
+                    "doc_name": { "type": "string", "description": "兼容字段：目标文档名称。" },
+                    "new_name": { "type": "string", "description": "节点新名称（必填）。" }
+                },
+                "required": ["new_name"],
                 "additionalProperties": false,
             }),
         ),
@@ -874,12 +941,6 @@ fn agent_function_tools() -> Vec<Tool> {
             }),
         ),
     ]
-    .into_iter()
-    .filter(|tool| match tool {
-        Tool::Function(function) => function.name != "write_document",
-        _ => true,
-    })
-    .collect()
 }
 
 fn agent_chat_completion_tools() -> Vec<ChatCompletionTools> {

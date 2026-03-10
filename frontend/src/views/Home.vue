@@ -186,11 +186,6 @@ import request from '@/utils/request'
 import { useSystemStore } from '@/stores/system'
 import { describeAgentEditorBridge, getAgentEditorBridge } from '@/utils/agentEditorBridge'
 import { registerAgentToolRuntime, unregisterAgentToolRuntime } from '@/utils/agentTools'
-import {
-  dispatchAgentWriterChunk,
-  dispatchAgentWriterComplete,
-  dispatchAgentWriterStart,
-} from '@/utils/agentWriter'
 
 const router = useRouter()
 const route = useRoute()
@@ -545,6 +540,9 @@ async function getCurrentPageState() {
       can_open_node: Boolean(currentProject),
       can_move_node: Boolean(currentProject),
       can_write_document: docs.currentNode?.node_type === 'doc',
+      can_read_editor_snapshot: docs.currentNode?.node_type === 'doc',
+      can_update_project: Boolean(currentProject),
+      can_update_tree_node_meta: Boolean(currentProject && docs.currentNode),
       can_execute_javascript: true,
     },
   }
@@ -723,6 +721,42 @@ async function createProjectTool(rawArgs: Record<string, any>) {
 
   return {
     created: serializeProject(created),
+    state: await getCurrentPageState(),
+  }
+}
+
+async function updateProjectTool(rawArgs: Record<string, any>) {
+  const args = expandToolArgs(rawArgs)
+  const project = await resolveProjectTarget(args)
+  if (!project) throw new Error('未找到目标项目')
+
+  const hasName = args.name !== undefined
+  const hasDescription = args.description !== undefined
+  const hasBackgroundImage = args.background_image !== undefined
+
+  if (!hasName && !hasDescription && !hasBackgroundImage) {
+    throw new Error('update_project 至少需要 name、description、background_image 之一')
+  }
+
+  const payload: { name?: string; description?: string; background_image?: string } = {}
+  if (hasName) {
+    const name = normalizeToolString(args.name)
+    if (!name) {
+      throw new Error('update_project 的 name 不能为空')
+    }
+    payload.name = name
+  }
+  if (hasDescription) {
+    payload.description = normalizeToolString(args.description)
+  }
+  if (hasBackgroundImage) {
+    payload.background_image = normalizeToolString(args.background_image)
+  }
+
+  const updated = await projects.updateProject(project.id, payload)
+
+  return {
+    updated: serializeProject(updated),
     state: await getCurrentPageState(),
   }
 }
@@ -990,82 +1024,6 @@ async function openTreeNodeTool(rawArgs: Record<string, any>) {
   }
 }
 
-async function writeDocumentTool(rawArgs: Record<string, any>) {
-  const args = expandToolArgs(rawArgs)
-  const content = typeof args.content === 'string' ? args.content : ''
-  if (!content) {
-    throw new Error('write_document 缺少 content 参数')
-  }
-
-  let target = null
-  if (
-    args.doc_id !== undefined
-    || args.doc_path !== undefined
-    || args.doc_name !== undefined
-    || args.node_id !== undefined
-    || args.node_path !== undefined
-    || args.node_name !== undefined
-    || args.project_id !== undefined
-    || args.project_name !== undefined
-  ) {
-    target = await resolveNodeTarget({
-      ...args,
-      node_id: args.doc_id ?? args.node_id ?? args.docId ?? args.nodeId,
-      node_path: args.doc_path ?? args.node_path ?? args.docPath ?? args.nodePath,
-      node_name: args.doc_name ?? args.node_name ?? args.docName ?? args.nodeName,
-    })
-  } else if (docs.currentNode) {
-    const rows = flattenDocTree(docs.tree)
-    const entry = rows.find((item) => item.node.id === docs.currentNode?.id) || null
-    if (projects.currentProject && entry) {
-      target = { project: projects.currentProject, tree: docs.tree, entry }
-    }
-  }
-
-  if (!target) {
-    throw new Error('未找到要写入的文档')
-  }
-  if (target.entry.node.node_type !== 'doc') {
-    throw new Error('write_document 只能写入文档，不能写入目录')
-  }
-
-  if (projects.currentProjectId !== target.project.id || docs.currentNode?.id !== target.entry.node.id || showProjectOverview.value) {
-    if (projects.currentProjectId !== target.project.id || showProjectOverview.value) {
-      await enterProject(target.project.id)
-    }
-    await openDocNode(target.entry.node.id)
-  }
-
-  const bridge = await waitForEditorBridge(target.entry.node.id)
-  if (!bridge) {
-    throw new Error('目标文档编辑器尚未完成初始化')
-  }
-
-  const mode = normalizeToolString(args.mode) === 'replace' ? 'replace' : 'append'
-  const shouldSave = args.save === true
-
-  dispatchAgentWriterStart({
-    docId: target.entry.node.id,
-    mode,
-    save: shouldSave,
-  })
-  dispatchAgentWriterChunk({
-    docId: target.entry.node.id,
-    chunk: content,
-  })
-  dispatchAgentWriterComplete({
-    docId: target.entry.node.id,
-  })
-
-  return {
-    written: true,
-    mode,
-    save: shouldSave,
-    target: serializeNodeEntry(target.entry),
-    content_length: content.length,
-  }
-}
-
 async function readDocumentTool(rawArgs: Record<string, any>) {
   const args = expandToolArgs(rawArgs)
   let target = null
@@ -1112,6 +1070,192 @@ async function readDocumentTool(rawArgs: Record<string, any>) {
     document: serializeNodeEntry(target.entry),
     content: node.content || '',
     content_length: (node.content || '').length,
+  }
+}
+
+async function readEditorSnapshotTool(rawArgs: Record<string, any>) {
+  const args = expandToolArgs(rawArgs)
+  const maxCharsRaw = normalizeToolInteger(args.max_chars ?? args.maxChars)
+  const maxChars = maxCharsRaw !== null && maxCharsRaw > 0 ? maxCharsRaw : null
+
+  let target = null
+  if (
+    args.doc_id !== undefined
+    || args.doc_path !== undefined
+    || args.doc_name !== undefined
+    || args.node_id !== undefined
+    || args.node_path !== undefined
+    || args.node_name !== undefined
+    || args.project_id !== undefined
+    || args.project_name !== undefined
+  ) {
+    target = await resolveNodeTarget({
+      ...args,
+      node_id: args.doc_id ?? args.node_id ?? args.docId ?? args.nodeId,
+      node_path: args.doc_path ?? args.node_path ?? args.docPath ?? args.nodePath,
+      node_name: args.doc_name ?? args.node_name ?? args.docName ?? args.nodeName,
+    })
+  } else if (docs.currentNode?.node_type === 'doc' && projects.currentProject) {
+    const rows = flattenDocTree(docs.tree)
+    const entry = rows.find((item) => item.node.id === docs.currentNode?.id) || null
+    if (entry) {
+      target = { project: projects.currentProject, tree: docs.tree, entry }
+    }
+  }
+
+  if (!target) {
+    throw new Error('未找到要读取快照的文档')
+  }
+  if (target.entry.node.node_type !== 'doc') {
+    throw new Error('read_editor_snapshot 只能读取文档，不能读取目录')
+  }
+
+  if (projects.currentProjectId !== target.project.id || docs.currentNode?.id !== target.entry.node.id || showProjectOverview.value) {
+    if (projects.currentProjectId !== target.project.id || showProjectOverview.value) {
+      await enterProject(target.project.id)
+    }
+    await openDocNode(target.entry.node.id)
+  }
+
+  const bridge = await waitForEditorBridge(target.entry.node.id)
+  const editorContent = bridge?.getValue() ?? target.entry.node.content ?? ''
+  const savedContent = target.entry.node.content || ''
+  const truncated = maxChars !== null && editorContent.length > maxChars
+  const outputContent = truncated ? editorContent.slice(0, maxChars) : editorContent
+
+  return {
+    source: bridge ? 'editor_bridge' : 'doc_cache',
+    document: serializeNodeEntry(target.entry),
+    content: outputContent,
+    content_length: editorContent.length,
+    saved_content_length: savedContent.length,
+    unsaved_changes: editorContent !== savedContent,
+    truncated,
+    max_chars: maxChars,
+    state: await getCurrentPageState(),
+  }
+}
+
+async function saveCurrentDocumentTool(rawArgs: Record<string, any>) {
+  const args = expandToolArgs(rawArgs)
+  let target = null
+
+  if (
+    args.doc_id !== undefined
+    || args.doc_path !== undefined
+    || args.doc_name !== undefined
+    || args.node_id !== undefined
+    || args.node_path !== undefined
+    || args.node_name !== undefined
+    || args.project_id !== undefined
+    || args.project_name !== undefined
+  ) {
+    target = await resolveNodeTarget({
+      ...args,
+      node_id: args.doc_id ?? args.node_id ?? args.docId ?? args.nodeId,
+      node_path: args.doc_path ?? args.node_path ?? args.docPath ?? args.nodePath,
+      node_name: args.doc_name ?? args.node_name ?? args.docName ?? args.nodeName,
+    })
+  } else if (docs.currentNode?.node_type === 'doc' && projects.currentProject) {
+    const rows = flattenDocTree(docs.tree)
+    const entry = rows.find((item) => item.node.id === docs.currentNode?.id) || null
+    if (entry) {
+      target = { project: projects.currentProject, tree: docs.tree, entry }
+    }
+  }
+
+  if (!target) {
+    throw new Error('未找到要保存的文档')
+  }
+  if (target.entry.node.node_type !== 'doc') {
+    throw new Error('save_current_document 只能保存文档，不能保存目录')
+  }
+
+  if (projects.currentProjectId !== target.project.id || docs.currentNode?.id !== target.entry.node.id || showProjectOverview.value) {
+    if (projects.currentProjectId !== target.project.id || showProjectOverview.value) {
+      await enterProject(target.project.id)
+    }
+    await openDocNode(target.entry.node.id)
+  }
+
+  const bridge = await waitForEditorBridge(target.entry.node.id)
+  if (!bridge) {
+    throw new Error('目标文档编辑器尚未完成初始化')
+  }
+
+  await bridge.save()
+
+  const data = await request.get(`/docs/${target.entry.node.id}`) as { node?: DocNode }
+  const node = data.node
+
+  return {
+    saved: true,
+    target: serializeNodeEntry(target.entry),
+    content_length: (node?.content || '').length,
+    updated_at: node?.updated_at || null,
+    state: await getCurrentPageState(),
+  }
+}
+
+async function updateTreeNodeMetaTool(rawArgs: Record<string, any>) {
+  const args = expandToolArgs(rawArgs)
+  const nextName = normalizeToolString(args.new_name ?? args.newName ?? args.name)
+  if (!nextName) {
+    throw new Error('update_tree_node_meta 缺少 new_name 参数')
+  }
+
+  let target = null
+  if (
+    args.doc_id !== undefined
+    || args.doc_path !== undefined
+    || args.doc_name !== undefined
+    || args.node_id !== undefined
+    || args.node_path !== undefined
+    || args.node_name !== undefined
+    || args.project_id !== undefined
+    || args.project_name !== undefined
+  ) {
+    target = await resolveNodeTarget({
+      ...args,
+      node_id: args.doc_id ?? args.node_id ?? args.docId ?? args.nodeId,
+      node_path: args.doc_path ?? args.node_path ?? args.docPath ?? args.nodePath,
+      node_name: args.doc_name ?? args.node_name ?? args.docName ?? args.nodeName,
+    })
+  } else if (docs.currentNode && projects.currentProject) {
+    const rows = flattenDocTree(docs.tree)
+    const entry = rows.find((item) => item.node.id === docs.currentNode?.id) || null
+    if (entry) {
+      target = { project: projects.currentProject, tree: docs.tree, entry }
+    }
+  }
+
+  if (!target) {
+    throw new Error('未找到要修改信息的节点')
+  }
+
+  if (projects.currentProjectId !== target.project.id || docs.currentNode?.id !== target.entry.node.id || showProjectOverview.value) {
+    if (projects.currentProjectId !== target.project.id || showProjectOverview.value) {
+      await enterProject(target.project.id)
+    }
+    await openDocNode(target.entry.node.id)
+  }
+
+  const beforeName = target.entry.node.name
+  const sameName = beforeName.trim() === nextName.trim()
+  if (!sameName) {
+    await docs.updateNode(target.entry.node.id, { name: nextName }, target.project.id)
+  }
+
+  const updatedRows = flattenDocTree(docs.tree)
+  const updatedEntry = updatedRows.find((item) => item.node.id === target.entry.node.id) || null
+
+  return {
+    updated: !sameName,
+    node_type: target.entry.node.node_type,
+    before_name: beforeName,
+    after_name: updatedEntry?.node.name || nextName,
+    target: updatedEntry ? serializeNodeEntry(updatedEntry) : serializeNodeEntry(target.entry),
+    state: await getCurrentPageState(),
   }
 }
 
@@ -1215,7 +1359,13 @@ function getMarkdownEditorRuntimeTool() {
     ],
     usage_notes: [
       '如果只是读取当前文档内容，优先使用 read_document。',
-      'For document writes, locate/read with open_tree_node/read_document first, then emit [[ACTION:append]] or [[ACTION:replace]] body directly.',
+      '如果需要读取未保存的编辑器实时内容，优先调用 read_editor_snapshot。',
+      '如果用户明确要求保存当前文档，优先调用 save_current_document。',
+      '如果用户明确要求修改项目名称/描述/背景图，优先调用 update_project。',
+      '如果用户明确要求重命名文档或目录，优先调用 update_tree_node_meta。',
+      'For document writes, locate/read with open_tree_node/read_document first, then emit one of: [[ACTION:append]], [[ACTION:replace]], [[ACTION:rewrite_section]], [[ACTION:replace_block]].',
+      'rewrite_section payload format: [[TARGET]]Section Title[[/TARGET]][[CONTENT]]New Section Markdown[[/CONTENT]].',
+      'replace_block payload format: [[FIND]]old snippet[[/FIND]][[REPLACE]]new snippet[[/REPLACE]].',
       '只有在需要细粒度 DOM/编辑器动作时再使用 execute_browser_javascript。',
     ],
   }
@@ -1293,13 +1443,16 @@ function installAgentToolRuntime() {
     listProjects: listProjectsTool,
     openProject: openProjectTool,
     createProject: createProjectTool,
+    updateProject: updateProjectTool,
     deleteProjects: deleteProjectsTool,
     getProjectTree: getProjectTreeTool,
     createTreeNode: createTreeNodeTool,
     moveTreeNode: moveTreeNodeTool,
     openTreeNode: openTreeNodeTool,
-    writeDocument: writeDocumentTool,
     readDocument: readDocumentTool,
+    readEditorSnapshot: readEditorSnapshotTool,
+    saveCurrentDocument: saveCurrentDocumentTool,
+    updateTreeNodeMeta: updateTreeNodeMetaTool,
     deleteTreeNodes: deleteTreeNodesTool,
     getMarkdownEditorRuntime: getMarkdownEditorRuntimeTool,
     getBrowserRuntime: getBrowserRuntimeTool,

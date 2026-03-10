@@ -20,13 +20,16 @@ export interface AgentToolRuntime {
   listProjects: (args: Record<string, any>) => Promise<unknown>
   openProject: (args: Record<string, any>) => Promise<unknown>
   createProject: (args: Record<string, any>) => Promise<unknown>
+  updateProject: (args: Record<string, any>) => Promise<unknown>
   deleteProjects: (args: Record<string, any>) => Promise<unknown>
   getProjectTree: (args: Record<string, any>) => Promise<unknown>
   createTreeNode: (args: Record<string, any>) => Promise<unknown>
   moveTreeNode: (args: Record<string, any>) => Promise<unknown>
   openTreeNode: (args: Record<string, any>) => Promise<unknown>
-  writeDocument: (args: Record<string, any>) => Promise<unknown>
   readDocument: (args: Record<string, any>) => Promise<unknown>
+  readEditorSnapshot: (args: Record<string, any>) => Promise<unknown>
+  saveCurrentDocument: (args: Record<string, any>) => Promise<unknown>
+  updateTreeNodeMeta: (args: Record<string, any>) => Promise<unknown>
   deleteTreeNodes: (args: Record<string, any>) => Promise<unknown>
   getMarkdownEditorRuntime: () => Promise<unknown> | unknown
   getBrowserRuntime: (args: Record<string, any>) => Promise<unknown> | unknown
@@ -169,13 +172,16 @@ function createMarkflowJsHelper(toolRuntime: AgentToolRuntime) {
     listProjects: (args: Record<string, any> = {}) => toolRuntime.listProjects(args),
     openProject: (args: Record<string, any>) => toolRuntime.openProject(args),
     createProject: (args: Record<string, any>) => toolRuntime.createProject(args),
+    updateProject: (args: Record<string, any>) => toolRuntime.updateProject(args),
     deleteProjects: (args: Record<string, any>) => toolRuntime.deleteProjects(args),
     getProjectTree: (args: Record<string, any>) => toolRuntime.getProjectTree(args),
     createTreeNode: (args: Record<string, any>) => toolRuntime.createTreeNode(args),
     moveTreeNode: (args: Record<string, any>) => toolRuntime.moveTreeNode(args),
     openTreeNode: (args: Record<string, any>) => toolRuntime.openTreeNode(args),
-    writeDocument: (args: Record<string, any>) => toolRuntime.writeDocument(args),
     readDocument: (args: Record<string, any>) => toolRuntime.readDocument(args),
+    readEditorSnapshot: (args: Record<string, any> = {}) => toolRuntime.readEditorSnapshot(args),
+    saveCurrentDocument: (args: Record<string, any> = {}) => toolRuntime.saveCurrentDocument(args),
+    updateTreeNodeMeta: (args: Record<string, any>) => toolRuntime.updateTreeNodeMeta(args),
     deleteTreeNodes: (args: Record<string, any>) => toolRuntime.deleteTreeNodes(args),
     getMarkdownEditorRuntime: () => toolRuntime.getMarkdownEditorRuntime(),
     getBrowserRuntime: (args: Record<string, any> = {}) => toolRuntime.getBrowserRuntime(args),
@@ -254,6 +260,9 @@ export async function executeAgentToolCalls(calls: AgentToolCall[]): Promise<Age
         case 'create_project':
           output = await toolRuntime.createProject(args)
           break
+        case 'update_project':
+          output = await toolRuntime.updateProject(args)
+          break
         case 'delete_projects':
           output = await toolRuntime.deleteProjects(args)
           break
@@ -272,11 +281,17 @@ export async function executeAgentToolCalls(calls: AgentToolCall[]): Promise<Age
         case 'open_tree_node':
           output = await toolRuntime.openTreeNode(args)
           break
-        case 'write_document':
-          output = await toolRuntime.writeDocument(args)
-          break
         case 'read_document':
           output = await toolRuntime.readDocument(args)
+          break
+        case 'read_editor_snapshot':
+          output = await toolRuntime.readEditorSnapshot(args)
+          break
+        case 'save_current_document':
+          output = await toolRuntime.saveCurrentDocument(args)
+          break
+        case 'update_tree_node_meta':
+          output = await toolRuntime.updateTreeNodeMeta(args)
           break
         case 'delete_tree_nodes':
           output = await toolRuntime.deleteTreeNodes(args)

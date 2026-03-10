@@ -118,6 +118,7 @@ import {
   setAgentEditorSnapshot,
   type AgentWriterChunkDetail,
   type AgentWriterCompleteDetail,
+  type AgentWriterMode,
   type AgentWriterStartDetail,
 } from '@/utils/agentWriter'
 import {
@@ -149,6 +150,7 @@ let scrollUnlockFrame = 0
 let writerBuffer = ''
 let writerTargetDocId: number | null = null
 let writerShouldSave = false
+let writerMode: AgentWriterMode | null = null
 let writerRenderFrame: number | null = null
 let writerRenderedValue = ''
 
@@ -317,6 +319,81 @@ function applyWriterValue(value: string) {
   syncAgentEditorBridge()
 }
 
+function isPartialWriterMode(mode: AgentWriterMode | null) {
+  return mode === 'rewrite_section' || mode === 'replace_block'
+}
+
+function extractTaggedContent(source: string, tag: string) {
+  const pattern = new RegExp(`\\[\\[${tag}\\]\\]([\\s\\S]*?)\\[\\[\\/${tag}\\]\\]`, 'i')
+  const match = source.match(pattern)
+  return match?.[1]?.trim() || ''
+}
+
+function normalizeHeadingText(value: string) {
+  return value.replace(/^#{1,6}\s*/, '').trim()
+}
+
+function applyRewriteSection(original: string, payload: string) {
+  const targetRaw = extractTaggedContent(payload, 'TARGET')
+  const contentRaw = extractTaggedContent(payload, 'CONTENT')
+  const target = normalizeHeadingText(targetRaw)
+  const sectionContent = (contentRaw || payload).trim()
+  if (!target || !sectionContent) return original
+
+  const lines = original.split(/\r?\n/)
+  const headingPattern = /^(#{1,6})\s+(.+)$/
+  let start = -1
+  let level = 0
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = lines[index].match(headingPattern)
+    if (!match) continue
+    const headingText = normalizeHeadingText(match[2] || '')
+    if (headingText === target) {
+      start = index
+      level = (match[1] || '').length
+      break
+    }
+  }
+
+  if (start === -1) return original
+
+  let end = lines.length
+  for (let index = start + 1; index < lines.length; index += 1) {
+    const match = lines[index].match(headingPattern)
+    if (!match) continue
+    const nextLevel = (match[1] || '').length
+    if (nextLevel <= level) {
+      end = index
+      break
+    }
+  }
+
+  const replacementLines = sectionContent.split(/\r?\n/)
+  return [...lines.slice(0, start), ...replacementLines, ...lines.slice(end)]
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+}
+
+function applyReplaceBlock(original: string, payload: string) {
+  const find = extractTaggedContent(payload, 'FIND')
+  const replacement = extractTaggedContent(payload, 'REPLACE')
+  if (!find) return original
+  const index = original.indexOf(find)
+  if (index === -1) return original
+  return `${original.slice(0, index)}${replacement}${original.slice(index + find.length)}`
+}
+
+function applyPartialWriterAction(mode: AgentWriterMode, original: string, payload: string) {
+  if (mode === 'rewrite_section') {
+    return applyRewriteSection(original, payload)
+  }
+  if (mode === 'replace_block') {
+    return applyReplaceBlock(original, payload)
+  }
+  return original
+}
+
 function flushWriterRender() {
   writerRenderFrame = null
   if (!editor || writerTargetDocId !== props.node.id) return
@@ -335,6 +412,7 @@ function resetWriterState() {
   writerBuffer = ''
   writerTargetDocId = null
   writerShouldSave = false
+  writerMode = null
   writerRenderedValue = ''
   if (writerRenderFrame !== null) {
     window.cancelAnimationFrame(writerRenderFrame)
@@ -349,34 +427,51 @@ function handleAgentWriterStart(event: Event) {
   resetWriterState()
   writerTargetDocId = detail.docId
   writerShouldSave = detail.save === true
+  writerMode = detail.mode
 
   const currentValue = editor.getValue()
   if (detail.mode === 'replace') {
     writerBuffer = ''
-  } else {
+    applyWriterValue(writerBuffer)
+    return
+  }
+
+  if (detail.mode === 'append') {
     writerBuffer = currentValue
     if (writerBuffer.trim()) {
       if (!writerBuffer.endsWith('\n\n')) {
         writerBuffer = writerBuffer.replace(/\n*$/, '\n\n')
       }
     }
+    applyWriterValue(writerBuffer)
+    return
   }
 
-  applyWriterValue(writerBuffer)
+  // Partial modes buffer protocol payload and apply once on complete.
+  writerBuffer = ''
+  writerRenderedValue = currentValue
 }
 
 function handleAgentWriterChunk(event: Event) {
   const detail = (event as CustomEvent<AgentWriterChunkDetail>).detail
   if (!detail || detail.docId !== props.node.id || writerTargetDocId !== detail.docId) return
   writerBuffer += detail.chunk
+  if (isPartialWriterMode(writerMode)) return
   scheduleWriterRender()
 }
 
 function handleAgentWriterComplete(event: Event) {
   const detail = (event as CustomEvent<AgentWriterCompleteDetail>).detail
   if (!detail || detail.docId !== props.node.id || writerTargetDocId !== detail.docId) return
-  flushWriterRender()
-  const finalValue = writerBuffer
+  let finalValue = writerBuffer
+  if (writerMode && isPartialWriterMode(writerMode)) {
+    const currentValue = editor?.getValue() || draft.value
+    finalValue = applyPartialWriterAction(writerMode, currentValue, writerBuffer)
+    applyWriterValue(finalValue)
+  } else {
+    flushWriterRender()
+    finalValue = writerBuffer
+  }
   const shouldSave = writerShouldSave
   resetWriterState()
   draft.value = finalValue
