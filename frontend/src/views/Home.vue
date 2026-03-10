@@ -638,6 +638,10 @@ async function navigateToPage(rawArgs: Record<string, any>) {
       await enterProject(target.project.id)
     }
     await openDocNode(target.entry.node.id)
+    const bridge = await waitForEditorBridge(target.entry.node.id)
+    if (!bridge) {
+      throw new Error('目标文档编辑器尚未完成初始化')
+    }
   } else if (routeName === 'home.dir' || routeName === 'dir') {
     const target = await resolveNodeTarget(args)
     if (!target) throw new Error('未找到目标节点')
@@ -848,7 +852,6 @@ async function createTreeNodeTool(rawArgs: Record<string, any>) {
     parent_id: parentId,
     name,
     node_type: nodeType,
-    content: nodeType === 'doc' ? normalizeToolString(args.content) : undefined,
   }) as { node?: DocNode }
   const created = data.node
   if (!created) {
@@ -862,6 +865,12 @@ async function createTreeNodeTool(rawArgs: Record<string, any>) {
       await docs.fetchTree(project.id)
     }
     await openDocNode(created.id)
+    if (created.node_type === 'doc') {
+      const bridge = await waitForEditorBridge(created.id)
+      if (!bridge) {
+        throw new Error('目标文档编辑器尚未完成初始化')
+      }
+    }
   } else if (projects.currentProjectId === project.id && !showProjectOverview.value) {
     await docs.fetchTree(project.id)
   }
@@ -968,6 +977,12 @@ async function openTreeNodeTool(rawArgs: Record<string, any>) {
     await enterProject(target.project.id)
   }
   await openDocNode(target.entry.node.id)
+  if (target.entry.node.node_type === 'doc') {
+    const bridge = await waitForEditorBridge(target.entry.node.id)
+    if (!bridge) {
+      throw new Error('目标文档编辑器尚未完成初始化')
+    }
+  }
 
   return {
     opened: serializeNodeEntry(target.entry),
@@ -1200,7 +1215,7 @@ function getMarkdownEditorRuntimeTool() {
     ],
     usage_notes: [
       '如果只是读取当前文档内容，优先使用 read_document。',
-      '如果只是写入或改写文档，优先使用 write_document。',
+      'For document writes, locate/read with open_tree_node/read_document first, then emit [[ACTION:append]] or [[ACTION:replace]] body directly.',
       '只有在需要细粒度 DOM/编辑器动作时再使用 execute_browser_javascript。',
     ],
   }

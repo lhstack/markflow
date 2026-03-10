@@ -1,4 +1,11 @@
-use std::{convert::Infallible, sync::Arc, time::Duration};
+use std::{
+    convert::Infallible,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 use aes_gcm::{
     aead::{Aead, KeyInit},
@@ -47,6 +54,8 @@ enum AgentStreamError {
     Retryable(String),
     Fatal(String),
 }
+
+static NEXT_AGENT_STREAM_LOG_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct AgentProviderPayload {
@@ -170,6 +179,55 @@ fn truncate_chars(raw: &str, max_chars: usize) -> String {
     } else {
         truncated
     }
+}
+
+fn preview_for_log(raw: &str, max_chars: usize) -> String {
+    let compact = raw.replace('\r', "\\r").replace('\n', "\\n");
+    truncate_chars(&compact, max_chars)
+}
+
+fn summarize_context_for_log(ctx: Option<&AgentContextPayload>) -> serde_json::Value {
+    match ctx {
+        Some(ctx) => json!({
+            "page_scope": ctx.page_scope,
+            "project_name": ctx.project_name,
+            "doc_id": ctx.doc_id,
+            "doc_name": ctx.doc_name,
+            "doc_content": ctx.doc_content.as_deref().map(|value| preview_for_log(value, 600)),
+            "project_catalog": ctx.project_catalog.as_deref().map(|value| preview_for_log(value, 400)),
+            "current_node_catalog": ctx.current_node_catalog.as_deref().map(|value| preview_for_log(value, 400)),
+        }),
+        None => serde_json::Value::Null,
+    }
+}
+
+fn summarize_messages_for_log(messages: &[AgentMessagePayload]) -> Vec<serde_json::Value> {
+    messages
+        .iter()
+        .map(|message| {
+            json!({
+                "role": message.role,
+                "content": preview_for_log(&message.content, 600),
+            })
+        })
+        .collect()
+}
+
+fn summarize_tool_outputs_for_log(
+    outputs: Option<&[AgentToolOutputPayload]>,
+) -> Vec<serde_json::Value> {
+    outputs
+        .unwrap_or(&[])
+        .iter()
+        .map(|output| {
+            json!({
+                "call_id": output.call_id,
+                "name": output.name,
+                "arguments": output.arguments.as_deref().map(|value| preview_for_log(value, 600)),
+                "output": preview_for_log(&output.output.to_string(), 600),
+            })
+        })
+        .collect()
 }
 
 fn normalize_base_url(value: Option<&str>) -> String {
@@ -382,15 +440,32 @@ fn build_system_prompt(
     }
 
     if use_tools {
-        parts.push("本轮优先通过函数调用完成页面导航、项目管理、文档树操作、文档读取、文档写入和浏览器端自动化。".to_string());
-        parts.push("不要输出 [[ACTION:...]] 或 [[ROUTE:...]] 这类旧动作标记，直接选择合适的工具。".to_string());
-        parts.push("执行任何写操作前，先尽量读取当前页面状态、项目列表、项目树或文档内容，确保目标准确。".to_string());
-        parts.push("当用户询问当前页面内容、当前处于什么页面、有哪些页面/路由、有哪些项目、项目树结构、当前文档内容、当前有哪些函数/工具可用时，不要凭上下文猜测，必须优先调用对应工具获取信息。".to_string());
-        parts.push("如果用户想知道你有哪些页面操作能力或函数调用能力，先结合工具列表本身回答；如果还需要当前页面实时信息，再调用 get_current_page_state、list_page_routes、list_projects、get_project_tree 等工具补充。".to_string());
-        parts.push("如果要改写、补写、完善文档，除非用户明确说了“保存”“直接保存”“写完保存”“应用到文档”“提交修改”这类意思，否则调用 write_document 时必须传 save=false，默认只写入未保存草稿。".to_string());
-        parts.push("当你在未得到明确保存授权的情况下写入了文档，完成后必须明确告诉用户“内容已写入但尚未保存”，并询问是否继续保存；不要擅自声称已经保存。".to_string());
-        parts.push("如果需要填写表单、点击按钮、操作弹窗或调用编辑器对象，优先使用专用工具；只有专用工具不足时再使用 execute_browser_javascript。".to_string());
-        parts.push("当工具已经完成用户需求时，用简短中文总结结果；不要重复输出工具返回的整段 JSON。".to_string());
+        parts.push(
+            r#"硬性规则：当目标是生成或修改文档正文时，工具只允许用于定位、打开、创建空文档、读取文档。这条规则优先级高于下面的通用“先用工具”指导。最终正文必须通过 assistant 文本流输出，且正文的第一个字节必须是 [[ACTION:append]] 或 [[ACTION:replace]]。禁止在 write_document 或 create_tree_node 参数中携带完整 Markdown 正文。
+只有在所有必要工具调用完成后，才允许输出 [[ACTION:...]] 标记；并且该标记必须位于最终正文最开头，不能放在结尾。
+写文档正文时，必须严格使用 [[ACTION:append]]...[[/ACTION]] 或 [[ACTION:replace]]...[[/ACTION]] 包裹正文；只有两个标记之间的内容才视为文档正文。
+协议标记必须完整且精确：不能缺少括号、不能改变大小写、不能在标记内加入空格、不能输出半截标记。
+混合输出硬性规则：[[ACTION:...]]...[[/ACTION]] 内的内容进入 Markdown 编辑器；标记外内容进入聊天面板。输出 [[/ACTION]] 后必须继续输出聊天文本，不能在 [[/ACTION]] 处立即结束回复。
+在 [[/ACTION]] 之后，必须按固定结构输出“保存状态与优化建议”模块（放在标记外，不得放进正文标记内）。
+保存状态行必须二选一且原样输出：`保存状态：已保存` 或 `保存状态：未保存`。
+若为未保存，下一行必须补充：`原因：...`，说明未保存原因（例如仅生成草稿、待用户确认等）。
+然后必须输出 `优化建议：` 小节，并给出与当前文档直接相关的 3-5 条编号建议（1. 2. 3. ...），每条建议聚焦一个可执行点，不得少于 3 条，不得超过 5 条。
+本轮优先通过函数调用完成页面导航、项目管理、文档树操作、文档读取、文档写入和浏览器端自动化。
+不要输出旧版 [[ROUTE:...]] 标记；需要切换页面时优先使用工具调用。
+执行任何写操作前，先尽量读取当前页面状态、项目列表、项目树或文档内容，确保目标准确。
+当用户询问当前页面内容、当前处于什么页面、有哪些页面/路由、有哪些项目、项目树结构、当前文档内容、当前有哪些函数/工具可用时，不要凭上下文猜测，必须优先调用对应工具获取信息。
+如果用户想知道你有哪些页面操作能力或函数调用能力，先结合工具列表本身回答；如果还需要当前页面实时信息，再调用 get_current_page_state、list_page_routes、list_projects、get_project_tree 等工具补充。
+如果要改写、补写、完善文档，除非用户明确说了“保存”“直接保存”“写完保存”“应用到文档”“提交修改”这类意思，否则调用 write_document 时必须传 save=false，默认只写入未保存草稿。
+当你在未得到明确保存授权的情况下写入了文档，保存状态必须输出为“保存状态：未保存”，并补充原因；不要擅自声称已经保存。
+如果需要填写表单、点击按钮、操作弹窗或调用编辑器对象，优先使用专用工具；只有专用工具不足时再使用 execute_browser_javascript。
+当工具已经完成用户需求时，用简短中文总结结果；不要重复输出工具返回的整段 JSON。
+编辑意图判断流程：必须先结合当前文档内容、历史对话上下文和用户最新输入，先识别编辑意图，再评估影响范围，最后决定协议动作。
+意图识别优先级：判断本轮属于 追加 / 插入 / 替换 / 润色 / 重写 中的哪一类；“补充、继续、完善、展开、加上、重写、整理”等词只能作为参考信号，不能机械映射为固定动作。
+范围评估要求：判断本轮影响是 局部片段 / 单个小节 / 多个相关小节 / 文档大部分内容 / 整篇结构。
+协议动作决策：若本轮主要是局部新增、局部插入、局部替换或局部润色，优先使用 [[ACTION:append]]；若涉及大范围替换、整体结构重排、统一风格改写、整篇逻辑重组或全文重写，使用 [[ACTION:replace]]。
+关键约束：append / replace 是协议动作，不等同于编辑意图；编辑意图与协议动作不是一一对应关系。若局部编辑可以满足需求，不得选择整体重写。并且必须在标记外明确给出：`操作类型：追加/插入/替换/润色/重写` 和 `修改位置：...`。"#
+                .to_string(),
+        );
     } else {
         match mode {
             "chat" => {
@@ -405,15 +480,22 @@ fn build_system_prompt(
                     "本轮必须以 [[ACTION:{}]] 开头输出正文，不要输出其他动作标记，也不要解释动作选择。",
                     action
                 ));
+                parts.push(
+                    r#"正文必须以 [[ACTION:...]] 开始，并以 [[/ACTION]] 结束。开始和结束标记之间的内容才是要写入文档的 Markdown。
+在 [[/ACTION]] 结束后，必须继续输出聊天文本，并严格使用以下结构：`保存状态：已保存` 或 `保存状态：未保存`；若未保存，下一行补 `原因：...`；然后输出 `优化建议：`，并给出 3-5 条编号建议。"#
+                        .to_string(),
+                );
             }
             _ => {
-                parts.push("你必须在最终正文开头只选择一个动作标记：[[ACTION:chat]]、[[ACTION:append]]、[[ACTION:replace]]。".to_string());
-                parts.push("如果只是回答问题或解释，使用 [[ACTION:chat]]。如果用户要求继续完善现有文档，使用 [[ACTION:append]]。如果用户要求整体改写、重写、整理当前文档，使用 [[ACTION:replace]]。".to_string());
-                parts.push("动作标记后面紧接正文，不要解释你选择了什么动作。".to_string());
-                parts.push("如果用户明确要求切换页面、进入项目概览、进入某个项目或打开当前项目中的某个文档，你可以在最前面额外输出一个路由标记，然后紧跟动作标记。".to_string());
-                parts.push("可用路由标记格式只有三种：[[ROUTE:overview]]、[[ROUTE:project:项目名]]、[[ROUTE:doc:文档名]]。".to_string());
                 parts.push(
-                    "只有在你能从上下文中确认目标名称时才输出路由标记；不要编造项目名或文档名。"
+                    r#"你必须在最终正文开头只选择一个动作标记：[[ACTION:chat]]、[[ACTION:append]]、[[ACTION:replace]]。
+如果只是回答问题或解释，使用 [[ACTION:chat]]。如果用户要求继续完善现有文档，使用 [[ACTION:append]]。如果用户要求整体改写、重写、整理当前文档，使用 [[ACTION:replace]]。
+动作标记后面紧接正文，不要解释你选择了什么动作。
+如果选择 [[ACTION:append]] 或 [[ACTION:replace]]，必须再输出一个结束标记 [[/ACTION]]，并且只有这两个标记之间的内容属于文档正文。
+如果选择 [[ACTION:append]] 或 [[ACTION:replace]]，在 [[/ACTION]] 之后必须继续输出聊天文本，并严格使用以下结构：`保存状态：已保存` 或 `保存状态：未保存`；若未保存，下一行补 `原因：...`；然后输出 `优化建议：`，并给出 3-5 条编号建议。
+如果用户明确要求切换页面、进入项目概览、进入某个项目或打开当前项目中的某个文档，你可以在最前面额外输出一个路由标记，然后紧跟动作标记。
+可用路由标记格式只有三种：[[ROUTE:overview]]、[[ROUTE:project:项目名]]、[[ROUTE:doc:文档名]]。
+只有在你能从上下文中确认目标名称时才输出路由标记；不要编造项目名或文档名。"#
                         .to_string(),
                 );
             }
@@ -663,7 +745,7 @@ fn agent_function_tools() -> Vec<Tool> {
         ),
         function_tool(
             "create_tree_node",
-            "在指定项目下创建文档或目录。支持在根目录创建，也支持通过 parent_id、parent_path 或 parent_name 指定父目录；node_type 只能是 doc 或 dir。适合“在某个目录下创建文档”“在某个路径下创建目录”这类需求。",
+            "在指定项目下创建文档或目录。支持在根目录创建，也支持通过 parent_id、parent_path 或 parent_name 指定父目录；node_type 只能是 doc 或 dir。创建文档时只创建空文档壳，不要在这个工具里写入完整正文；正文必须在文档打开后通过 assistant 文本流输出。",
             json!({
                 "type": "object",
                 "properties": {
@@ -674,7 +756,6 @@ fn agent_function_tools() -> Vec<Tool> {
                     "parent_name": { "type": "string", "description": "父目录名称。只有拿不到 parent_id 和 parent_path 时再使用。" },
                     "name": { "type": "string", "description": "新建节点名称。" },
                     "node_type": { "type": "string", "description": "新建节点类型。doc=文档，dir=目录。", "enum": ["doc", "dir"] },
-                    "content": { "type": "string", "description": "当 node_type=doc 时可传初始 Markdown 内容；创建目录时忽略。" },
                     "open_after_create": { "type": "boolean", "description": "创建后是否立即打开该节点。默认 true。" }
                 },
                 "required": ["name", "node_type"],
@@ -793,6 +874,12 @@ fn agent_function_tools() -> Vec<Tool> {
             }),
         ),
     ]
+    .into_iter()
+    .filter(|tool| match tool {
+        Tool::Function(function) => function.name != "write_document",
+        _ => true,
+    })
+    .collect()
 }
 
 fn agent_chat_completion_tools() -> Vec<ChatCompletionTools> {
@@ -904,6 +991,7 @@ async fn send_json_event(
 }
 
 async fn stream_via_responses(
+    request_id: u64,
     client: &Client<OpenAIConfig>,
     payload: &AgentChatStreamRequest,
     system_prompt: &str,
@@ -959,37 +1047,70 @@ async fn stream_via_responses(
         match event {
             Ok(ResponseStreamEvent::ResponseCreated(ev)) => {
                 response_id = ev.response.id;
+                tracing::info!(
+                    "agent stream #{} responses.created response_id={}",
+                    request_id,
+                    response_id
+                );
             }
             Ok(ResponseStreamEvent::ResponseOutputTextDelta(ev)) => {
-                final_text.push_str(&ev.delta);
-                if !send_json_event(tx, "message.delta", json!({ "content": ev.delta })).await {
-                    return Err(AgentStreamError::Fatal("客户端连接已关闭".to_string()));
+                if !ev.delta.is_empty() {
+                    tracing::info!(
+                        "agent stream #{} responses.delta {}",
+                        request_id,
+                        preview_for_log(&ev.delta, 300)
+                    );
+                    final_text.push_str(&ev.delta);
+                    if !send_json_event(tx, "message.delta", json!({ "content": ev.delta })).await {
+                        return Err(AgentStreamError::Fatal("客户端连接已关闭".to_string()));
+                    }
                 }
             }
             Ok(ResponseStreamEvent::ResponseReasoningTextDelta(ev)) => {
-                if !send_json_event(
-                    tx,
-                    "reasoning.delta",
-                    json!({ "item_id": ev.item_id, "delta": ev.delta }),
-                )
-                .await
-                {
-                    return Err(AgentStreamError::Fatal("客户端连接已关闭".to_string()));
+                if !ev.delta.is_empty() {
+                    tracing::info!(
+                        "agent stream #{} responses.reasoning.delta {}",
+                        request_id,
+                        preview_for_log(&ev.delta, 300)
+                    );
+                    if !send_json_event(
+                        tx,
+                        "reasoning.delta",
+                        json!({ "item_id": ev.item_id, "delta": ev.delta }),
+                    )
+                    .await
+                    {
+                        return Err(AgentStreamError::Fatal("客户端连接已关闭".to_string()));
+                    }
                 }
             }
             Ok(ResponseStreamEvent::ResponseReasoningSummaryTextDelta(ev)) => {
-                if !send_json_event(
-                    tx,
-                    "reasoning.delta",
-                    json!({ "item_id": ev.item_id, "delta": ev.delta }),
-                )
-                .await
-                {
-                    return Err(AgentStreamError::Fatal("客户端连接已关闭".to_string()));
+                if !ev.delta.is_empty() {
+                    tracing::info!(
+                        "agent stream #{} responses.reasoning.summary {}",
+                        request_id,
+                        preview_for_log(&ev.delta, 300)
+                    );
+                    if !send_json_event(
+                        tx,
+                        "reasoning.delta",
+                        json!({ "item_id": ev.item_id, "delta": ev.delta }),
+                    )
+                    .await
+                    {
+                        return Err(AgentStreamError::Fatal("客户端连接已关闭".to_string()));
+                    }
                 }
             }
             Ok(ResponseStreamEvent::ResponseOutputItemDone(ev)) => {
                 if let OutputItem::FunctionCall(call) = ev.item {
+                    tracing::info!(
+                        "agent stream #{} responses.tool_call name={} call_id={} arguments={}",
+                        request_id,
+                        call.name,
+                        call.call_id,
+                        preview_for_log(&call.arguments, 600)
+                    );
                     tool_calls.push(AgentToolCallRequest {
                         call_id: call.call_id,
                         name: call.name,
@@ -1001,6 +1122,12 @@ async fn stream_via_responses(
                 if response_id.is_empty() {
                     response_id = ev.response.id;
                 }
+                tracing::info!(
+                    "agent stream #{} responses.completed response_id={} text={}",
+                    request_id,
+                    response_id,
+                    preview_for_log(&final_text, 1000)
+                );
             }
             Ok(ResponseStreamEvent::ResponseFailed(ev)) => {
                 let message = ev
@@ -1009,6 +1136,12 @@ async fn stream_via_responses(
                     .as_ref()
                     .map(|error| error.message.clone())
                     .unwrap_or_else(|| "Responses 调用失败".to_string());
+                tracing::warn!(
+                    "agent stream #{} responses.failed response_id={} message={}",
+                    request_id,
+                    response_id,
+                    message
+                );
                 return if final_text.is_empty() {
                     Err(AgentStreamError::Retryable(message))
                 } else {
@@ -1016,6 +1149,12 @@ async fn stream_via_responses(
                 };
             }
             Ok(ResponseStreamEvent::ResponseError(ev)) => {
+                tracing::warn!(
+                    "agent stream #{} responses.error response_id={} message={}",
+                    request_id,
+                    response_id,
+                    ev.message
+                );
                 return if final_text.is_empty() {
                     Err(AgentStreamError::Retryable(ev.message))
                 } else {
@@ -1025,6 +1164,12 @@ async fn stream_via_responses(
             Ok(_) => {}
             Err(err) => {
                 let message = format!("Responses 流式调用失败: {}", err);
+                tracing::warn!(
+                    "agent stream #{} responses.stream_error response_id={} message={}",
+                    request_id,
+                    response_id,
+                    message
+                );
                 return if final_text.is_empty() {
                     Err(AgentStreamError::Retryable(message))
                 } else {
@@ -1057,6 +1202,7 @@ async fn stream_via_responses(
 }
 
 async fn stream_via_chat_completions(
+    request_id: u64,
     client: &Client<OpenAIConfig>,
     payload: &AgentChatStreamRequest,
     system_prompt: &str,
@@ -1088,23 +1234,42 @@ async fn stream_via_chat_completions(
             Ok(chunk) => {
                 if response_id.is_empty() {
                     response_id = chunk.id.clone();
+                    tracing::info!(
+                        "agent stream #{} chat.created response_id={}",
+                        request_id,
+                        response_id
+                    );
                 }
                 for choice in chunk.choices {
                     if let Some(content) = choice.delta.content {
-                        final_text.push_str(&content);
-                        if !send_json_event(tx, "message.delta", json!({ "content": content }))
-                            .await
-                        {
-                            return Err(AgentStreamError::Fatal("客户端连接已关闭".to_string()));
+                        if !content.is_empty() {
+                            tracing::info!(
+                                "agent stream #{} chat.delta {}",
+                                request_id,
+                                preview_for_log(&content, 300)
+                            );
+                            final_text.push_str(&content);
+                            if !send_json_event(tx, "message.delta", json!({ "content": content }))
+                                .await
+                            {
+                                return Err(AgentStreamError::Fatal("客户端连接已关闭".to_string()));
+                            }
                         }
                     }
 
                     if let Some(refusal) = choice.delta.refusal {
-                        final_text.push_str(&refusal);
-                        if !send_json_event(tx, "message.delta", json!({ "content": refusal }))
-                            .await
-                        {
-                            return Err(AgentStreamError::Fatal("客户端连接已关闭".to_string()));
+                        if !refusal.is_empty() {
+                            tracing::info!(
+                                "agent stream #{} chat.refusal {}",
+                                request_id,
+                                preview_for_log(&refusal, 300)
+                            );
+                            final_text.push_str(&refusal);
+                            if !send_json_event(tx, "message.delta", json!({ "content": refusal }))
+                                .await
+                            {
+                                return Err(AgentStreamError::Fatal("客户端连接已关闭".to_string()));
+                            }
                         }
                     }
 
@@ -1130,6 +1295,15 @@ async fn stream_via_chat_completions(
                                     entry.arguments.push_str(&arguments);
                                 }
                             }
+
+                            tracing::info!(
+                                "agent stream #{} chat.tool_call.partial index={} call_id={} name={} arguments={}",
+                                request_id,
+                                tool_call.index,
+                                entry.call_id,
+                                entry.name,
+                                preview_for_log(&entry.arguments, 600)
+                            );
                         }
                     }
 
@@ -1146,6 +1320,18 @@ async fn stream_via_chat_completions(
                             .collect();
 
                         if !calls.is_empty() {
+                            tracing::info!(
+                                "agent stream #{} chat.tool_calls.required response_id={} calls={}",
+                                request_id,
+                                if response_id.trim().is_empty() { model } else { &response_id },
+                                json!(calls.iter().map(|call| {
+                                    json!({
+                                        "call_id": call.call_id,
+                                        "name": call.name,
+                                        "arguments": preview_for_log(&call.arguments, 600),
+                                    })
+                                }).collect::<Vec<_>>()).to_string()
+                            );
                             return Ok(AgentStreamOutcome::ToolCalls {
                                 response_id: if response_id.trim().is_empty() {
                                     model.to_string()
@@ -1159,6 +1345,12 @@ async fn stream_via_chat_completions(
                 }
             }
             Err(err) => {
+                tracing::warn!(
+                    "agent stream #{} chat.stream_error response_id={} message={}",
+                    request_id,
+                    response_id,
+                    err
+                );
                 return Err(AgentStreamError::Fatal(format!(
                     "Chat Completions 流式调用失败: {}",
                     err
@@ -1168,7 +1360,15 @@ async fn stream_via_chat_completions(
     }
 
     Ok(AgentStreamOutcome::Message {
-        text: final_text,
+        text: {
+            tracing::info!(
+                "agent stream #{} chat.completed response_id={} text={}",
+                request_id,
+                response_id,
+                preview_for_log(&final_text, 1000)
+            );
+            final_text
+        },
         response_id: None,
     })
 }
@@ -1495,8 +1695,27 @@ pub async fn chat_stream(
     let mode = normalize_agent_mode(payload.mode.as_deref());
     let write_mode = normalize_write_mode(payload.write_mode.as_deref());
     let username = user.username.clone();
+    let request_id = NEXT_AGENT_STREAM_LOG_ID.fetch_add(1, Ordering::Relaxed);
     let responses_prompt = build_system_prompt(&mode, write_mode.as_deref(), &username, &ctx, true);
-    let fallback_prompt = build_system_prompt(&mode, write_mode.as_deref(), &username, &ctx, false);
+    let fallback_prompt = build_system_prompt(&mode, write_mode.as_deref(), &username, &ctx, true);
+
+    tracing::info!(
+        "agent stream request #{}: {}",
+        request_id,
+        json!({
+            "user": username,
+            "provider_id": provider.id,
+            "base_url": provider.base_url,
+            "model": model,
+            "mode": mode,
+            "write_mode": write_mode,
+            "previous_response_id": payload.previous_response_id,
+            "messages": summarize_messages_for_log(&payload.messages),
+            "tool_outputs": summarize_tool_outputs_for_log(payload.tool_outputs.as_deref()),
+            "context": summarize_context_for_log(payload.context.as_ref()),
+        })
+        .to_string()
+    );
 
     tokio::spawn(async move {
         let _ = send_json_event(
@@ -1510,7 +1729,7 @@ pub async fn chat_stream(
             }),
         )
         .await;
-        let outcome = match stream_via_responses(&client, &payload, &responses_prompt, &model, &tx).await {
+        let outcome = match stream_via_responses(request_id, &client, &payload, &responses_prompt, &model, &tx).await {
             Ok(outcome) => {
                 let _ = send_json_event(
                     &tx,
@@ -1525,7 +1744,8 @@ pub async fn chat_stream(
             }
             Err(AgentStreamError::Retryable(responses_error)) => {
                 tracing::warn!(
-                    "agent responses transport unavailable for model {} via {}: {}",
+                    "agent stream #{} responses transport unavailable for model {} via {}: {}",
+                    request_id,
                     model,
                     provider.base_url,
                     responses_error
@@ -1535,12 +1755,13 @@ pub async fn chat_stream(
                     "agent.transport",
                     json!({
                         "mode": "chat_fallback",
-                        "tools_available": false,
+                        "tools_available": true,
                         "reason": responses_error,
                     }),
                 )
                 .await;
                 stream_via_chat_completions(
+                    request_id,
                     &client,
                     &payload,
                     &fallback_prompt,
@@ -1562,6 +1783,12 @@ pub async fn chat_stream(
 
         match outcome {
             Ok(AgentStreamOutcome::Message { text, response_id }) => {
+                tracing::info!(
+                    "agent stream #{} message.completed response_id={} text={}",
+                    request_id,
+                    response_id.as_deref().unwrap_or(""),
+                    preview_for_log(&text, 1000)
+                );
                 let _ = send_json_event(
                     &tx,
                     "message.completed",
@@ -1574,6 +1801,18 @@ pub async fn chat_stream(
                 let _ = send_json_event(&tx, "done", json!({})).await;
             }
             Ok(AgentStreamOutcome::ToolCalls { response_id, calls }) => {
+                tracing::info!(
+                    "agent stream #{} tool.calls.required response_id={} calls={}",
+                    request_id,
+                    response_id,
+                    json!(calls.iter().map(|call| {
+                        json!({
+                            "call_id": call.call_id,
+                            "name": call.name,
+                            "arguments": preview_for_log(&call.arguments, 600),
+                        })
+                    }).collect::<Vec<_>>()).to_string()
+                );
                 let _ = send_json_event(
                     &tx,
                     "tool.calls.required",
@@ -1586,6 +1825,11 @@ pub async fn chat_stream(
                 let _ = send_json_event(&tx, "done", json!({})).await;
             }
             Err(message) => {
+                tracing::warn!(
+                    "agent stream #{} failed message={}",
+                    request_id,
+                    message
+                );
                 let _ = send_json_event(&tx, "error", json!({ "error": message })).await;
             }
         }

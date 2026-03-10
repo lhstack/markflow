@@ -146,13 +146,11 @@ let editor: Vditor | null = null
 let editorScrollEl: HTMLElement | null = null
 let scrollSyncLocked = false
 let scrollUnlockFrame = 0
-let writerQueue = ''
 let writerBuffer = ''
-let writerMode: 'append' | 'replace' = 'append'
 let writerTargetDocId: number | null = null
-let writerTickHandle: number | null = null
-let writerPendingComplete = false
 let writerShouldSave = false
+let writerRenderFrame: number | null = null
+let writerRenderedValue = ''
 
 const wordCount = computed(() => {
   const text = draft.value
@@ -313,58 +311,35 @@ function applyWriterValue(value: string) {
   draft.value = value
   isDirty.value = value !== originalContent
   editor.setValue(value, true)
+  writerRenderedValue = value
   setAgentEditorSnapshot(props.node.id, value)
   scrollEditorToBottom()
   syncAgentEditorBridge()
 }
 
+function flushWriterRender() {
+  writerRenderFrame = null
+  if (!editor || writerTargetDocId !== props.node.id) return
+  if (writerRenderedValue === writerBuffer) return
+  applyWriterValue(writerBuffer)
+}
+
+function scheduleWriterRender() {
+  if (writerRenderFrame !== null) return
+  writerRenderFrame = window.requestAnimationFrame(() => {
+    flushWriterRender()
+  })
+}
+
 function resetWriterState() {
-  writerQueue = ''
   writerBuffer = ''
   writerTargetDocId = null
-  writerPendingComplete = false
   writerShouldSave = false
-  if (writerTickHandle !== null) {
-    window.clearTimeout(writerTickHandle)
-    writerTickHandle = null
+  writerRenderedValue = ''
+  if (writerRenderFrame !== null) {
+    window.cancelAnimationFrame(writerRenderFrame)
+    writerRenderFrame = null
   }
-}
-
-function finalizeWriterIfReady() {
-  if (writerQueue.length > 0 || !writerPendingComplete) return
-  const finalValue = writerBuffer
-  const shouldSave = writerShouldSave
-  resetWriterState()
-  draft.value = finalValue
-  isDirty.value = finalValue !== originalContent
-  setAgentEditorSnapshot(props.node.id, finalValue)
-  if (shouldSave) {
-    void save()
-  }
-}
-
-function flushWriterTick() {
-  writerTickHandle = null
-  if (!editor || writerTargetDocId !== props.node.id) {
-    resetWriterState()
-    return
-  }
-
-  if (!writerQueue.length) {
-    finalizeWriterIfReady()
-    return
-  }
-
-  const take = Math.min(3, writerQueue.length)
-  writerBuffer += writerQueue.slice(0, take)
-  writerQueue = writerQueue.slice(take)
-  applyWriterValue(writerBuffer)
-  writerTickHandle = window.setTimeout(flushWriterTick, 14)
-}
-
-function ensureWriterTick() {
-  if (writerTickHandle !== null) return
-  writerTickHandle = window.setTimeout(flushWriterTick, 14)
 }
 
 function handleAgentWriterStart(event: Event) {
@@ -372,7 +347,6 @@ function handleAgentWriterStart(event: Event) {
   if (!detail || detail.docId !== props.node.id || !editor) return
 
   resetWriterState()
-  writerMode = detail.mode
   writerTargetDocId = detail.docId
   writerShouldSave = detail.save === true
 
@@ -394,15 +368,23 @@ function handleAgentWriterStart(event: Event) {
 function handleAgentWriterChunk(event: Event) {
   const detail = (event as CustomEvent<AgentWriterChunkDetail>).detail
   if (!detail || detail.docId !== props.node.id || writerTargetDocId !== detail.docId) return
-  writerQueue += detail.chunk
-  ensureWriterTick()
+  writerBuffer += detail.chunk
+  scheduleWriterRender()
 }
 
 function handleAgentWriterComplete(event: Event) {
   const detail = (event as CustomEvent<AgentWriterCompleteDetail>).detail
   if (!detail || detail.docId !== props.node.id || writerTargetDocId !== detail.docId) return
-  writerPendingComplete = true
-  finalizeWriterIfReady()
+  flushWriterRender()
+  const finalValue = writerBuffer
+  const shouldSave = writerShouldSave
+  resetWriterState()
+  draft.value = finalValue
+  isDirty.value = finalValue !== originalContent
+  setAgentEditorSnapshot(props.node.id, finalValue)
+  if (shouldSave) {
+    void save()
+  }
 }
 
 function toggleFullscreen() {

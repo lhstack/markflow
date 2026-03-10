@@ -1357,10 +1357,6 @@ function parseSseBlock(block: string) {
   }
 }
 
-function wait(ms: number) {
-  return new Promise((resolve) => window.setTimeout(resolve, ms))
-}
-
 function scrollMessagesToBottom() {
   void nextTick().then(() => {
     window.requestAnimationFrame(() => {
@@ -1433,16 +1429,15 @@ async function sendMessage() {
   let prefixProbe = ''
   let pendingRoute: AgentRouteTarget | null = null
   let writerStarted = false
-  let receivedDelta = false
   let renderBuffer = ''
   let inThinkBlock = false
-  let streamCompleted = false
   let streamFailed = false
   let pendingToolOutputs: AgentToolOutputPayload[] | null = null
   let streamAborted = false
-  const requestMessages = buildConversationMessages(session.messages)
-  const renderQueue: Array<{ type: 'message' | 'reasoning'; content: string }> = []
-  let renderLoop: Promise<void> | null = null
+  let previousResponseId: string | null = session.previousResponseId
+  let rawAssistantContent = ''
+  let completedAssistantContent = ''
+  let wroteDocument = false
   let consumeAssistantText = (_rawChunk: string, _force = false) => {}
   let handleAssistantChunk = (_rawChunk: string) => {}
 
@@ -1453,26 +1448,121 @@ async function sendMessage() {
     const appendAssistantContent = (content: string) => {
       if (!content) return
 
-      if (routeAction !== 'chat' && props.docId) {
+      if (routeAction && routeAction !== 'chat' && props.docId) {
         if (!writerStarted) {
           const writerMode: AgentWriterMode = routeAction === 'replace' ? 'replace' : 'append'
           dispatchAgentWriterStart({ docId: props.docId, mode: writerMode, save: false })
           writerStarted = true
         }
+        wroteDocument = true
+        dispatchAgentWriterChunk({ docId: props.docId, chunk: content })
+        return
       }
 
       liveAssistantContent.value = `${liveAssistantContent.value}${content}`
       scrollMessagesToBottom()
-
-      if (routeAction !== 'chat' && props.docId) {
-        dispatchAgentWriterChunk({ docId: props.docId, chunk: content })
-      }
     }
 
     const appendAssistantReasoning = (delta: string) => {
       if (!delta) return
       liveAssistantReasoning.value = `${liveAssistantReasoning.value}${delta}`
       scrollMessagesToBottom()
+    }
+
+    const buildVisibleAssistantContent = (source = rawAssistantContent, streamMode = false) => {
+      let visible = source
+        .replace(/\s*\[\[ACTION:(append|replace)\]\][\s\S]*?\[\[\/ACTION\]\]\s*/gi, '\n')
+
+      if (streamMode) {
+        const upperVisible = visible.toUpperCase()
+        const openAppendIndex = upperVisible.lastIndexOf('[[ACTION:APPEND]]')
+        const openReplaceIndex = upperVisible.lastIndexOf('[[ACTION:REPLACE]]')
+        const openIndex = Math.max(openAppendIndex, openReplaceIndex)
+        if (openIndex !== -1) {
+          const closeIndex = upperVisible.lastIndexOf('[[/ACTION]]')
+          if (openIndex > closeIndex) {
+            visible = visible.slice(0, openIndex)
+          }
+        }
+      }
+
+      return visible
+        .replace(/[ \t]+\n/g, '\n')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim()
+    }
+
+    const appendUnsavedDraftNotice = () => {
+      if (!wroteDocument || streamAborted || streamFailed) return
+      if (/(保存|save)/i.test(liveAssistantContent.value)) return
+      const prefix = liveAssistantContent.value.trim() ? '\n\n' : ''
+      liveAssistantContent.value = `${liveAssistantContent.value}${prefix}内容已写入当前文档草稿，尚未保存。是否现在保存？`
+    }
+
+    const appendCompletedTail = (completedContent: string) => {
+      if (!completedContent) return
+      if (!rawAssistantContent) {
+        rawAssistantContent = completedContent
+        handleAssistantChunk(completedContent)
+        return
+      }
+      if (completedContent === rawAssistantContent) return
+
+      if (completedContent.startsWith(rawAssistantContent)) {
+        const tail = completedContent.slice(rawAssistantContent.length)
+        if (!tail) return
+        rawAssistantContent += tail
+        handleAssistantChunk(tail)
+        return
+      }
+
+      // Some providers only give a partial delta stream and then a final full
+      // message. Rebuild the visible chat content from the final message and
+      // only replay the unseen suffix into the editor/chat router.
+      const overlapLength = (() => {
+        const max = Math.min(rawAssistantContent.length, completedContent.length)
+        for (let length = max; length > 0; length -= 1) {
+          if (rawAssistantContent.endsWith(completedContent.slice(0, length))) {
+            return length
+          }
+        }
+        return 0
+      })()
+      const tail = completedContent.slice(overlapLength)
+      const actionCloseMarker = '[[/ACTION]]'
+      const existingCloseIndex = rawAssistantContent.toUpperCase().indexOf(actionCloseMarker)
+      const completedHasActionBlock = /\[\[ACTION:(append|replace)\]\]/i.test(completedContent)
+      const mergedCompletedContent = (() => {
+        if (!completedHasActionBlock) return completedContent
+        if (existingCloseIndex === -1) return completedContent
+        const existingTail = rawAssistantContent.slice(existingCloseIndex + actionCloseMarker.length)
+        if (!existingTail.trim()) return completedContent
+        return completedContent.includes(existingTail)
+          ? completedContent
+          : `${completedContent}${existingTail}`
+      })()
+      rawAssistantContent = mergedCompletedContent
+      if (tail) {
+        handleAssistantChunk(tail)
+      }
+    }
+
+    const recoverTrailingActionMarker = () => {
+      if (routeAction && routeAction !== 'chat') return
+      if (props.docType !== 'doc' || !props.docId) return
+
+      const wrappedMatch = rawAssistantContent.match(/^\s*\[\[ACTION:(append|replace)\]\]\s*([\s\S]*?)\s*\[\[\/ACTION\]\]\s*$/i)
+      if (wrappedMatch) {
+        const mode = wrappedMatch[1].toLowerCase() as AgentWriterMode
+        const body = wrappedMatch[2] || ''
+        liveAssistantContent.value = ''
+        routeAction = mode
+        dispatchAgentWriterStart({ docId: props.docId, mode, save: false })
+        writerStarted = true
+        if (body) {
+          dispatchAgentWriterChunk({ docId: props.docId, chunk: body })
+        }
+      }
     }
 
     const flushAssistantRenderBuffer = (force = false) => {
@@ -1519,57 +1609,96 @@ async function sendMessage() {
       flushAssistantRenderBuffer(force)
     }
 
-    const enqueueRenderJob = (type: 'message' | 'reasoning', content: string) => {
-      if (!content) return
-      renderQueue.push({ type, content })
-      if (!renderLoop) {
-        renderLoop = drainRenderQueue()
+    const actionCloseMarker = '[[/ACTION]]'
+    const actionOpenMarkers: Array<{ marker: string; mode: AgentWriterMode }> = [
+      { marker: '[[ACTION:append]]', mode: 'append' },
+      { marker: '[[ACTION:replace]]', mode: 'replace' },
+    ]
+    const actionMarkerLookbehind = Math.max(
+      actionCloseMarker.length,
+      ...actionOpenMarkers.map((item) => item.marker.length),
+    )
+    let actionProbe = ''
+
+    const completeWriterBlock = () => {
+      if (routeAction && routeAction !== 'chat' && props.docId && writerStarted) {
+        dispatchAgentWriterComplete({ docId: props.docId })
+        writerStarted = false
       }
+      routeAction = 'chat'
     }
 
-    const waitForPaint = async () => {
-      await nextTick()
-      await new Promise<void>((resolve) => {
-        window.requestAnimationFrame(() => resolve())
-      })
+    const findNextActionOpen = (input: string) => {
+      const upperInput = input.toUpperCase()
+      const normalizedOpenMarkers = actionOpenMarkers.map((item) => ({
+        ...item,
+        upperMarker: item.marker.toUpperCase(),
+      }))
+      let best: { index: number; marker: string; mode: AgentWriterMode } | null = null
+      for (const item of normalizedOpenMarkers) {
+        const index = upperInput.indexOf(item.upperMarker)
+        if (index === -1) continue
+        if (!best || index < best.index) {
+          best = { index, marker: item.upperMarker, mode: item.mode }
+        }
+      }
+      return best
     }
 
-    const drainRenderQueue = async () => {
-      while (!streamCompleted || renderQueue.length) {
-        const current = renderQueue[0]
-        if (!current) {
-          await wait(8)
+    const routeChunk = (rawChunk: string, force = false) => {
+      if (rawChunk) {
+        actionProbe += rawChunk
+      }
+
+      while (actionProbe) {
+        if (routeAction && routeAction !== 'chat') {
+          const closeIndex = actionProbe.toUpperCase().indexOf(actionCloseMarker)
+          if (closeIndex !== -1) {
+            const beforeClose = actionProbe.slice(0, closeIndex)
+            if (beforeClose) {
+              consumeAssistantText(beforeClose, true)
+            }
+            actionProbe = actionProbe.slice(closeIndex + actionCloseMarker.length)
+            completeWriterBlock()
+            continue
+          }
+
+          const safeLength = force
+            ? actionProbe.length
+            : Math.max(0, actionProbe.length - actionCloseMarker.length + 1)
+          if (!safeLength) return
+
+          consumeAssistantText(actionProbe.slice(0, safeLength), force)
+          actionProbe = actionProbe.slice(safeLength)
+          return
+        }
+
+        const nextOpen = findNextActionOpen(actionProbe)
+        if (nextOpen) {
+          const beforeOpen = actionProbe.slice(0, nextOpen.index)
+          if (beforeOpen) {
+            routeAction = 'chat'
+            consumeAssistantText(beforeOpen, true)
+          }
+          actionProbe = actionProbe.slice(nextOpen.index + nextOpen.marker.length)
+          routeAction = props.docType === 'doc' ? nextOpen.mode : 'chat'
           continue
         }
 
-        const step = current.type === 'reasoning' ? 20 : 8
-        const chunk = current.content.slice(0, step)
-        current.content = current.content.slice(step)
-        if (!current.content) {
-          renderQueue.shift()
-        }
+        const safeLength = force
+          ? actionProbe.length
+          : Math.max(0, actionProbe.length - actionMarkerLookbehind + 1)
+        if (!safeLength) return
 
-        if (current.type === 'message') {
-          handleAssistantChunk(chunk)
-        } else {
-          appendAssistantReasoning(chunk)
-        }
-
-        await waitForPaint()
-        await wait(10)
+        routeAction = 'chat'
+        consumeAssistantText(actionProbe.slice(0, safeLength), force)
+        actionProbe = actionProbe.slice(safeLength)
+        return
       }
-
-      renderLoop = null
-    }
-
-    const routeChunk = (rawChunk: string) => {
-      if (!rawChunk) return
-      consumeAssistantText(rawChunk)
     }
 
     handleAssistantChunk = (rawChunk: string) => {
       if (!rawChunk) return
-      receivedDelta = true
       if (routeAction) {
         routeChunk(rawChunk)
         return
@@ -1580,6 +1709,10 @@ async function sendMessage() {
       if (!trimmedProbe) return
       if (trimmedProbe !== prefixProbe) {
         prefixProbe = trimmedProbe
+      }
+
+      if (prefixProbe === '[') {
+        return
       }
 
       if (!prefixProbe.startsWith('[[')) {
@@ -1605,7 +1738,9 @@ async function sendMessage() {
         const marker = prefixProbe.slice(0, markerEnd + 2)
         const rest = prefixProbe.slice(markerEnd + 2)
 
-        if (marker.startsWith('[[ROUTE:')) {
+        const upperMarker = marker.toUpperCase()
+
+        if (upperMarker.startsWith('[[ROUTE:')) {
           const target = parseRouteMarker(marker)
           if (target) {
             pendingRoute = target
@@ -1619,11 +1754,11 @@ async function sendMessage() {
           return
         }
 
-        if (marker.startsWith('[[ACTION:')) {
+        if (upperMarker.startsWith('[[ACTION:')) {
           prefixProbe = ''
-          routeAction = marker === '[[ACTION:append]]'
+          routeAction = upperMarker === '[[ACTION:APPEND]]'
             ? 'append'
-            : marker === '[[ACTION:replace]]'
+            : upperMarker === '[[ACTION:REPLACE]]'
               ? 'replace'
               : 'chat'
 
@@ -1659,6 +1794,9 @@ async function sendMessage() {
     }
 
     while (true) {
+      assistantMessage.content = liveAssistantContent.value
+      assistantMessage.reasoning = liveAssistantReasoning.value
+      const requestMessages = buildConversationMessages(session.messages)
       const token = localStorage.getItem('token')
       const response = await fetch('/api/agent/chat/stream', {
         method: 'POST',
@@ -1668,7 +1806,7 @@ async function sendMessage() {
         },
         signal: abortController.signal,
         body: JSON.stringify(buildRequestBody(requestMessages, provider, session.model.trim(), {
-          previousResponseId: null,
+          previousResponseId,
           toolOutputs: pendingToolOutputs,
         })),
       })
@@ -1688,43 +1826,74 @@ async function sendMessage() {
       let cycleReceivedDelta = false
       let requiredToolCalls: AgentToolCall[] = []
       let toolResponseId = ''
+      let streamDone = false
+
+      const processParsedEvent = (parsed: ReturnType<typeof parseSseBlock>) => {
+        if (!parsed) return
+
+        if (parsed.event === 'message.delta') {
+          cycleReceivedDelta = true
+          const content = parsed.data.content || ''
+          rawAssistantContent += content
+          handleAssistantChunk(content)
+          liveAssistantContent.value = buildVisibleAssistantContent(rawAssistantContent, true)
+        } else if (parsed.event === 'reasoning.delta') {
+          const delta = parsed.data.delta || parsed.data.content || ''
+          if (delta) {
+            appendAssistantReasoning(delta)
+          }
+        } else if (parsed.event === 'message.completed') {
+          const completedContent = parsed.data.content || ''
+          if (completedContent) {
+            completedAssistantContent = completedContent
+          }
+          const responseId = typeof parsed.data.response_id === 'string' && parsed.data.response_id.trim()
+            ? parsed.data.response_id.trim()
+            : null
+          if (responseId) {
+            previousResponseId = responseId
+          }
+          appendCompletedTail(completedContent)
+          liveAssistantContent.value = buildVisibleAssistantContent(completedAssistantContent || rawAssistantContent)
+          streamDone = true
+        } else if (parsed.event === 'agent.transport') {
+          const mode = parsed.data.mode === 'chat_fallback' ? 'chat_fallback' : 'responses'
+          agentTransportMode.value = mode
+        } else if (parsed.event === 'tool.calls.required') {
+          toolResponseId = typeof parsed.data.response_id === 'string' ? parsed.data.response_id : ''
+          if (toolResponseId.trim()) {
+            previousResponseId = toolResponseId.trim()
+          }
+          requiredToolCalls = Array.isArray(parsed.data.calls) ? parsed.data.calls : []
+        } else if (parsed.event === 'done') {
+          streamDone = true
+        } else if (parsed.event === 'error') {
+          throw new Error(parsed.data.error || '智能体流式请求失败')
+        }
+      }
 
       while (true) {
         const { value, done } = await reader.read()
-        if (done) break
+        if (done) {
+          break
+        }
 
         buffer += decoder.decode(value, { stream: true })
-        const blocks = buffer.split('\n\n')
+        const blocks = buffer.split(/\r?\n\r?\n/)
         buffer = blocks.pop() || ''
 
         for (const block of blocks) {
-          const parsed = parseSseBlock(block)
-          if (!parsed) continue
-
-          if (parsed.event === 'message.delta') {
-            receivedDelta = true
-            cycleReceivedDelta = true
-            enqueueRenderJob('message', parsed.data.content || '')
-          } else if (parsed.event === 'reasoning.delta') {
-            const delta = parsed.data.delta || parsed.data.content || ''
-            if (delta) {
-              enqueueRenderJob('reasoning', delta)
-            }
-          } else if (parsed.event === 'message.completed') {
-            const completedContent = parsed.data.content || ''
-            if (!cycleReceivedDelta && completedContent) {
-              enqueueRenderJob('message', completedContent)
-            }
-          } else if (parsed.event === 'agent.transport') {
-            const mode = parsed.data.mode === 'chat_fallback' ? 'chat_fallback' : 'responses'
-            agentTransportMode.value = mode
-          } else if (parsed.event === 'tool.calls.required') {
-            toolResponseId = typeof parsed.data.response_id === 'string' ? parsed.data.response_id : ''
-            requiredToolCalls = Array.isArray(parsed.data.calls) ? parsed.data.calls : []
-          } else if (parsed.event === 'error') {
-            throw new Error(parsed.data.error || '智能体流式请求失败')
-          }
+          processParsedEvent(parseSseBlock(block))
+          if (streamDone) break
         }
+
+        if (streamDone) {
+          break
+        }
+      }
+
+      if (buffer.trim()) {
+        processParsedEvent(parseSseBlock(buffer))
       }
 
       if (!requiredToolCalls.length) {
@@ -1747,22 +1916,27 @@ async function sendMessage() {
     }
   } finally {
     activeStreamController = null
-    streamCompleted = true
-    if (renderLoop) {
-      await renderLoop
-    }
     if (!streamFailed) {
-      if (!routeAction && prefixProbe.trim()) {
-        handleAssistantChunk(prefixProbe)
-      }
-      consumeAssistantText('', true)
-      if (routeAction && routeAction !== 'chat' && props.docId && (!streamAborted || writerStarted)) {
-        dispatchAgentWriterComplete({ docId: props.docId })
+      try {
+        if (!routeAction && prefixProbe.trim()) {
+          handleAssistantChunk(prefixProbe)
+        }
+        routeChunk('', true)
+        consumeAssistantText('', true)
+        recoverTrailingActionMarker()
+        const finalizedSource = completedAssistantContent || rawAssistantContent
+        liveAssistantContent.value = buildVisibleAssistantContent(finalizedSource)
+        appendUnsavedDraftNotice()
+        if (routeAction && routeAction !== 'chat' && props.docId && (!streamAborted || writerStarted)) {
+          dispatchAgentWriterComplete({ docId: props.docId })
+        }
+      } catch (finalizeError) {
+        console.error('agent stream finalize failed', finalizeError)
       }
     }
     assistantMessage.content = liveAssistantContent.value
     assistantMessage.reasoning = liveAssistantReasoning.value
-    session.previousResponseId = null
+    session.previousResponseId = previousResponseId
     session.lastSyncedMessageCount = 0
     session.updatedAt = Date.now()
     streaming.value = false
