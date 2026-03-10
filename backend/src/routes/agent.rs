@@ -441,45 +441,24 @@ fn build_system_prompt(
 
     if use_tools {
         parts.push(
-            r#"硬性规则：当目标是生成或修改文档正文时，工具只允许用于定位、打开、创建空文档、读取文档、读取编辑器快照、保存文档、更新文档信息。这条规则优先级高于下面的通用“先用工具”指导。最终正文必须通过 assistant 文本流输出，且正文的第一个字节必须是 [[ACTION:append]]、[[ACTION:replace]]、[[ACTION:rewrite_section]]、[[ACTION:replace_block]] 之一。禁止在 create_tree_node 参数中携带完整 Markdown 正文。
-只有在所有必要工具调用完成后，才允许输出 [[ACTION:...]] 标记；并且该标记必须位于最终正文最开头，不能放在结尾。
-写文档正文时，必须严格使用 [[ACTION:append]]...[[/ACTION]]、[[ACTION:replace]]...[[/ACTION]]、[[ACTION:rewrite_section]]...[[/ACTION]] 或 [[ACTION:replace_block]]...[[/ACTION]]；只有两个标记之间的内容才视为文档正文。
-局部重写协议（rewrite_section）块内必须包含：
-[[TARGET]]要重写的小节标题（不带 #）[[/TARGET]]
-[[CONTENT]]该小节重写后的完整 Markdown（建议包含标题行）[[/CONTENT]]
-rewrite_section 的语义是“整节替换”：TARGET 对应旧小节必须被完整替换并清理，不得保留旧段落后再追加新段落。
-局部替换协议（replace_block）块内必须包含：
-[[FIND]]原文中要替换的片段[[/FIND]]
-[[REPLACE]]替换后的新片段[[/REPLACE]]
-replace_block 的语义是“定位替换”：FIND 片段在结果中应被 REPLACE 完整替代，不得与旧片段并存。
-当用户要求“把某段内容移动到指定位置”时，结果必须满足“源位置删除 + 目标位置插入”，最终文档中该内容只能保留一份，禁止旧位置和新位置同时保留。
-执行局部重写/局部替换后必须自检：1）旧内容已清理；2）无重复段落/重复小节；3）目录与编号顺序与新结构一致。
-协议标记必须完整且精确：不能缺少括号、不能改变大小写、不能在标记内加入空格、不能输出半截标记。
-混合输出硬性规则：[[ACTION:...]]...[[/ACTION]] 内的内容进入 Markdown 编辑器；标记外内容进入聊天面板。输出 [[/ACTION]] 后必须继续输出聊天文本，不能在 [[/ACTION]] 处立即结束回复。
-在 [[/ACTION]] 之后，必须按固定结构输出“保存状态与优化建议”模块（放在标记外，不得放进正文标记内）。
-保存状态行必须二选一且原样输出：`保存状态：已保存` 或 `保存状态：未保存`。
-若为未保存，下一行必须补充：`原因：...`，说明未保存原因（例如仅生成草稿、待用户确认等）。
-然后必须输出 `优化建议：` 小节，并给出与当前文档直接相关的 3-5 条编号建议（1. 2. 3. ...），每条建议聚焦一个可执行点，不得少于 3 条，不得超过 5 条。
-在 `优化建议` 之后，必须追加 `本次修改总结：` 小节，用 a-z 条简短编号项总结“本次具体改了什么、影响了哪些位置、预期收益是什么”，禁止空泛表述。
-本轮优先通过函数调用完成页面导航、项目管理、文档树操作、文档读取、保存与元信息更新，以及浏览器端自动化。
-不要输出旧版 [[ROUTE:...]] 标记；需要切换页面时优先使用工具调用。
-执行任何写操作前，先尽量读取当前页面状态、项目列表、项目树或文档内容，确保目标准确。
-当用户询问当前页面内容、当前处于什么页面、有哪些页面/路由、有哪些项目、项目树结构、当前文档内容、当前有哪些函数/工具可用时，不要凭上下文猜测，必须优先调用对应工具获取信息。
-读取当前文档正文时，先判断是否未保存：先调用 get_current_page_state 获取当前状态；若当前文档存在未保存修改，必须调用 read_editor_snapshot 读取实时快照；若当前文档已保存或没有可用编辑器快照，再调用 read_document 读取已保存正文。
-禁止在“当前文档未保存”时仅依赖 read_document 进行续写、改写或替换判断，避免覆盖用户尚未保存的编辑内容。
-如果用户想知道你有哪些页面操作能力或函数调用能力，先结合工具列表本身回答；如果还需要当前页面实时信息，再调用 get_current_page_state、list_page_routes、list_projects、get_project_tree 等工具补充。
-当用户意图仅为“保存当前文档/确认保存”且未要求改写正文时，禁止输出任何 [[ACTION:...]] 文档协议，必须调用 save_current_document 工具完成真实保存，再在聊天面板反馈保存结果。
-当用户意图仅为“修改项目信息”（项目名/描述/背景图）且未要求改写正文时，禁止输出任何 [[ACTION:...]] 文档协议，必须调用 update_project 工具完成修改，再在聊天面板反馈结果。
-当用户意图仅为“修改节点信息”（例如重命名文档或目录）且未要求改写正文时，禁止输出任何 [[ACTION:...]] 文档协议，必须调用 update_tree_node_meta 工具完成修改，再在聊天面板反馈结果。
-如果要改写、补写、完善文档，除非用户明确说了“保存”“直接保存”“写完保存”“应用到文档”“提交修改”这类意思，否则默认只生成未保存草稿。
-当你在未得到明确保存授权的情况下写入了文档，保存状态必须输出为“保存状态：未保存”，并补充原因；不要擅自声称已经保存。
-如果需要填写表单、点击按钮、操作弹窗或调用编辑器对象，优先使用专用工具；只有专用工具不足时再使用 execute_browser_javascript。
-当工具已经完成用户需求时，用简短中文总结结果；不要重复输出工具返回的整段 JSON。
-编辑意图判断流程：必须先结合当前文档内容、历史对话上下文和用户最新输入，先识别编辑意图，再评估影响范围，最后决定协议动作。
-意图识别优先级：判断本轮属于 追加 / 插入 / 替换 / 润色 / 重写 中的哪一类；“补充、继续、完善、展开、加上、重写、整理”等词只能作为参考信号，不能机械映射为固定动作。
-范围评估要求：判断本轮影响是 局部片段 / 单个小节 / 多个相关小节 / 文档大部分内容 / 整篇结构。
-协议动作决策：若本轮主要是局部新增，优先使用 [[ACTION:append]]；若是整篇改写或大范围重排，使用 [[ACTION:replace]]；若是按标题重写某个小节，使用 [[ACTION:rewrite_section]]；若是替换一段原文片段，使用 [[ACTION:replace_block]]。
-关键约束：append / replace / rewrite_section / replace_block 是协议动作，不等同于编辑意图；编辑意图与协议动作不是一一对应关系。若局部编辑可以满足需求，不得选择整体重写。并且必须在标记外明确给出：`操作类型：追加/插入/替换/润色/重写` 和 `修改位置：...`。"#
+            r#"文档正文规则：
+1. 生成或修改正文时，工具只用于定位/打开/创建空文档/读取正文或快照/保存/改元信息；正文必须由 assistant 文本流输出，禁止在 create_tree_node 中携带完整正文。
+2. 所有必要工具调用完成后，才能输出正文协议；正文最开头必须是 [[ACTION:append]]、[[ACTION:replace]]、[[ACTION:rewrite_section]]、[[ACTION:replace_block]] 之一，并以 [[/ACTION]] 结束；标记内写入编辑器，标记外显示在聊天面板。
+3. rewrite_section 块必须含 [[TARGET]]标题[[/TARGET]] 和 [[CONTENT]]完整小节[[/CONTENT]]；replace_block 块必须含 [[FIND]]原片段[[/FIND]] 和 [[REPLACE]]新片段[[/REPLACE]]。
+4. 局部改写后必须清理旧内容，禁止重复；若是移动内容，必须满足“源位置删除 + 目标位置插入”，最终只保留一份。
+5. 协议标记必须完整、精确、无半截；[[/ACTION]] 后继续聊天，不得立即结束。
+6. [[/ACTION]] 后按固定结构输出：`操作类型：...`、`修改位置：...`、`保存状态：已保存/未保存`；然后输出 `优化建议：`（3-5 条）和 `本次修改总结：\r\n` (总结内容)。
+工具与读取规则：
+1. 优先用工具完成页面导航、项目管理、文档树、正文读取、保存、重命名、浏览器自动化；不要输出旧版 [[ROUTE:...]]。
+2. 执行写操作前先确认状态；回答“当前页面/页面路由/项目列表/项目树/当前文档/可用函数”时，不要猜，先调对应工具。
+3. 读取当前文档时先调 get_current_page_state；若存在未保存修改，必须优先调 read_editor_snapshot；否则再调 read_document。当前文档未保存时，禁止只依赖 read_document 做续写/替换判断。
+4. 仅保存当前文档时必须调用 save_current_document；仅修改项目元信息时调用 update_project；仅重命名文档/目录时调用 update_tree_node_meta。
+5. 除非用户明确授权保存，否则默认生成未保存草稿，并在保存状态中写“未保存”；不要擅自声称已保存。
+6. 填表、点按钮、弹窗、细粒度编辑器操作优先用专用工具；专用工具不足时才用 execute_browser_javascript。工具完成后用简短中文总结，不要复述整段 JSON。
+动作选择规则：
+1. 先判断编辑意图（追加/插入/替换/润色/重写），再判断影响范围（片段/小节/多节/大部分/整篇），最后决定协议动作。
+2. append / replace / rewrite_section / replace_block 是协议动作，不等同于编辑意图；能局部解决时不要整体重写。
+3. 一般规则：局部新增优先 append；整篇改写或大范围重排用 replace；按标题整节改写用 rewrite_section；替换指定片段用 replace_block。"#
                 .to_string(),
         );
     } else {
@@ -497,25 +476,17 @@ replace_block 的语义是“定位替换”：FIND 片段在结果中应被 REP
                     action
                 ));
                 parts.push(
-                    r#"正文必须以 [[ACTION:...]] 开始，并以 [[/ACTION]] 结束。开始和结束标记之间的内容才是要写入文档的 Markdown。
-在 [[/ACTION]] 结束后，必须继续输出聊天文本，并严格使用以下结构：`保存状态：已保存` 或 `保存状态：未保存`；若未保存，下一行补 `原因：...`；然后输出 `优化建议：`，并给出 3-5 条编号建议；最后输出 `本次修改总结：`，并给出 2-4 条编号总结。"#
+                    r#"正文必须包在 [[ACTION:...]]...[[/ACTION]] 内；标记内才是写入文档的 Markdown。[[/ACTION]] 后继续输出聊天文本，并按以下结构给出：`操作类型：...`、`修改位置：...`、`保存状态：已保存/未保存`；若未保存，再输出 `原因：...`；然后输出 `优化建议：`（3-5 条）和 `本次修改总结：\r\n`（总结内容）。"#
                         .to_string(),
                 );
             }
             _ => {
                 parts.push(
-                    r#"你必须在最终正文开头只选择一个动作标记：[[ACTION:chat]]、[[ACTION:append]]、[[ACTION:replace]]、[[ACTION:rewrite_section]]、[[ACTION:replace_block]]。
-如果只是回答问题或解释，使用 [[ACTION:chat]]。如果用户要求继续完善现有文档，使用 [[ACTION:append]]。如果用户要求整体改写、重写、整理当前文档，使用 [[ACTION:replace]]。如果用户要求按标题重写某个小节，使用 [[ACTION:rewrite_section]]。如果用户要求替换指定片段，使用 [[ACTION:replace_block]]。
-动作标记后面紧接正文，不要解释你选择了什么动作。
-如果选择 [[ACTION:append]]、[[ACTION:replace]]、[[ACTION:rewrite_section]] 或 [[ACTION:replace_block]]，必须再输出一个结束标记 [[/ACTION]]，并且只有这两个标记之间的内容属于文档正文。
-当动作为 [[ACTION:rewrite_section]] 时，块内必须包含 [[TARGET]]...[[/TARGET]] 和 [[CONTENT]]...[[/CONTENT]]。
-当动作为 [[ACTION:replace_block]] 时，块内必须包含 [[FIND]]...[[/FIND]] 和 [[REPLACE]]...[[/REPLACE]]。
-若使用 rewrite_section，必须完整替换目标小节并清理旧内容；若使用 replace_block，必须让 FIND 在结果中被 REPLACE 完整替代，禁止旧内容残留。
-若用户意图是移动内容，必须同时满足“源位置删除 + 目标位置插入”，最终只保留一份内容，并保证目录/编号顺序正确。
-如果选择上述任一文档动作，在 [[/ACTION]] 之后必须继续输出聊天文本，并严格使用以下结构：`保存状态：已保存` 或 `保存状态：未保存`；若未保存，下一行补 `原因：...`；然后输出 `优化建议：`，并给出 3-5 条编号建议；最后输出 `本次修改总结：`，并给出 2-4 条编号总结。
-如果用户明确要求切换页面、进入项目概览、进入某个项目或打开当前项目中的某个文档，你可以在最前面额外输出一个路由标记，然后紧跟动作标记。
-可用路由标记格式只有三种：[[ROUTE:overview]]、[[ROUTE:project:项目名]]、[[ROUTE:doc:文档名]]。
-只有在你能从上下文中确认目标名称时才输出路由标记；不要编造项目名或文档名。"#
+                    r#"最终开头只能选择一个动作：[[ACTION:chat]]、[[ACTION:append]]、[[ACTION:replace]]、[[ACTION:rewrite_section]]、[[ACTION:replace_block]]。
+聊天答复用 [[ACTION:chat]]；继续补写通常用 [[ACTION:append]]；整篇改写用 [[ACTION:replace]]；按标题整节重写用 [[ACTION:rewrite_section]]；替换指定片段用 [[ACTION:replace_block]]。
+若是文档动作，必须输出 [[/ACTION]]，且只有标记内内容属于文档正文。rewrite_section 必须带 TARGET/CONTENT；replace_block 必须带 FIND/REPLACE；局部改写后要清理旧内容，移动内容时最终只保留一份。
+[[/ACTION]] 后继续输出聊天文本，并按以下结构给出：`操作类型：...`、`修改位置：...`、`保存状态：已保存/未保存`；若未保存，再输出 `原因：...`；然后输出 `优化建议：`（3-5 条）和 `本次修改总结：\r\n`（总结内容）。
+若用户明确要求切换页面，可在最前面额外输出一个路由标记：[[ROUTE:overview]]、[[ROUTE:project:项目名]]、[[ROUTE:doc:文档名]]；只有目标名称明确时才可输出，禁止编造名称。"#
                         .to_string(),
                 );
             }
@@ -632,7 +603,7 @@ fn agent_function_tools() -> Vec<Tool> {
     vec![
         function_tool(
             "get_current_page_state",
-            "读取当前前端页面的实时状态。会返回当前路由、页面作用域、页面状态、当前项目、当前文档或目录、编辑器状态、当前可见项目列表摘要、当前可见文档树摘要和当前可执行能力。执行任何导航、项目操作、文档树操作、文档读写之前，优先先调用它确认当前 UI 所处位置。",
+            "读取当前前端页面的实时状态与可操作上下文。适用于回答“我现在在哪个页面”“当前打开了哪个项目/文档”“当前文档是否存在未保存修改”“当前页面还能执行哪些操作”这类问题，也适用于在调用导航、项目管理、文档树、文档读取、保存、重命名等工具前先确认 UI 所处位置。返回结果会包含当前路由、页面作用域、页面状态、当前项目、当前节点、编辑器快照来源、未保存状态、当前可见项目/节点摘要以及能力开关。",
             json!({
                 "type": "object",
                 "properties": {},
@@ -641,7 +612,7 @@ fn agent_function_tools() -> Vec<Tool> {
         ),
         function_tool(
             "list_page_routes",
-            "列出当前前端应用支持的页面路由、说明和参数要求。返回结果会包含 login、register、login.2fa、share 这些真实路由，以及 home.overview、home.project、home.doc、home.dir 这些 Home 页内部状态路由。无参数。",
+            "列出当前前端应用支持的所有页面路由、每个路由的用途说明、典型使用场景和参数要求。适用于模型需要回答“你知道哪些页面”“如何跳转到某个页面”时使用。返回结果会包含 login、register、login.2fa、share 这些真实路由，以及 home.overview、home.project、home.doc、home.dir 这些 Home 页内部状态路由。",
             json!({
                 "type": "object",
                 "properties": {},
@@ -650,13 +621,13 @@ fn agent_function_tools() -> Vec<Tool> {
         ),
         function_tool(
             "navigate_to_page",
-            "按“route + 定位参数”的方式跳转页面。适合明确切换到概览页、登录页、注册页、2FA 页、分享页，或按路由语义进入某个项目、文档、目录。优先传 ID；名称和路径只作为兜底。如果目标只是打开项目，优先用 open_project；如果目标只是打开文档或目录，优先用 open_tree_node。",
+            "按“route + 定位参数”的方式跳转页面。适用于明确切换到项目概览、登录、注册、2FA、分享页，或按照页面语义进入某个项目、某个文档、某个目录。它是通用跳转工具，适合已经明确 route 的场景；如果目标只是打开项目，优先用 open_project；如果目标只是打开文档或目录，优先用 open_tree_node。参数定位优先级为 ID > 路径 > 名称。",
             json!({
                 "type": "object",
                 "properties": {
                     "route": {
                         "type": "string",
-                        "description": "目标页面路由。home.overview=项目概览；home.project=项目工作区；home.doc=文档编辑页；home.dir=目录详情页；login/register/login.2fa/share 为真实页面。",
+                        "description": "目标页面路由。home.overview=项目概览；home.project=项目工作区；home.doc=文档编辑页；home.dir=目录详情页；login/register/login.2fa/share 为真实页面。只有 route 明确时才使用此工具。",
                         "enum": [
                             "home.overview",
                             "home.project",
@@ -668,12 +639,12 @@ fn agent_function_tools() -> Vec<Tool> {
                             "share"
                         ]
                     },
-                    "share_token": { "type": "string", "description": "当 route=share 时必填，表示分享链接 token。" },
-                    "project_id": { "type": "integer", "description": "目标项目 ID。route=home.project/home.doc/home.dir 时优先使用。" },
-                    "project_name": { "type": "string", "description": "目标项目名称。只有拿不到 project_id 时再使用。" },
-                    "node_id": { "type": "integer", "description": "目标文档或目录节点 ID。route=home.doc/home.dir 时优先使用。" },
-                    "node_path": { "type": "string", "description": "目标节点路径，例如 产品文档/接口/API说明 。只有拿不到 node_id 时再使用。" },
-                    "node_name": { "type": "string", "description": "目标节点名称。只有拿不到 node_id 和 node_path 时再使用。" }
+                    "share_token": { "type": "string", "description": "当 route=share 时必填，表示分享链接 token；可从分享 URL 中提取。" },
+                    "project_id": { "type": "integer", "description": "目标项目 ID。route=home.project/home.doc/home.dir 时优先使用，用于稳定定位项目。" },
+                    "project_name": { "type": "string", "description": "目标项目名称。只有拿不到 project_id 时再使用，适合用户只提供项目名时兜底定位。" },
+                    "node_id": { "type": "integer", "description": "目标文档或目录节点 ID。route=home.doc/home.dir 时优先使用，用于稳定定位节点。" },
+                    "node_path": { "type": "string", "description": "目标节点路径，例如 产品文档/接口/API说明。只有拿不到 node_id 时再使用，适合已知层级路径时定位。" },
+                    "node_name": { "type": "string", "description": "目标节点名称。只有拿不到 node_id 和 node_path 时再使用，可能存在重名风险。" }
                 },
                 "required": ["route"],
                 "additionalProperties": false,
@@ -681,38 +652,38 @@ fn agent_function_tools() -> Vec<Tool> {
         ),
         function_tool(
             "list_projects",
-            "获取当前用户当前可访问的项目列表。适合在打开项目、创建项目、删除项目前先确认项目全集。可选 refresh=true 强制刷新，返回项目列表、总数和当前项目信息。",
+            "获取当前用户当前可访问的项目列表。适用于回答“我有哪些项目”、在打开项目、创建项目、更新项目、删除项目之前先确认项目全集，或在项目列表可能已变化时刷新数据。返回结果包含项目列表、总数和当前激活项目 ID。",
             json!({
                 "type": "object",
                 "properties": {
-                    "refresh": { "type": "boolean", "description": "是否强制从后端刷新项目列表。true=忽略当前页面缓存。" }
+                    "refresh": { "type": "boolean", "description": "是否强制从后端刷新项目列表。true=忽略当前页面缓存，适合刚创建/删除项目后重新确认结果。" }
                 },
                 "additionalProperties": false,
             }),
         ),
         function_tool(
             "open_project",
-            "打开指定项目，并进入该项目的工作区和文档树视图。适合“打开某个项目”“进入某个项目的文档编辑列表”这类需求。可以按 project_id 或 project_name 指定目标，优先使用 project_id。",
+            "打开指定项目，并进入该项目的工作区和文档树视图。适用于“打开某个项目”“进入某个项目的文档编辑列表”“切换当前工作项目”等场景。可以按 project_id 或 project_name 指定目标，优先使用 project_id；打开后通常应继续通过 get_project_tree 或 open_tree_node 处理具体文档。",
             json!({
                 "type": "object",
                 "properties": {
-                    "project_id": { "type": "integer", "description": "要打开的项目 ID。优先使用这个字段。" },
+                    "project_id": { "type": "integer", "description": "要打开的项目 ID。优先使用这个字段，可避免项目重名带来的歧义。" },
                     "project_name": { "type": "string", "description": "要打开的项目名称。只有拿不到 project_id 时再使用。" },
-                    "fetch_tree": { "type": "boolean", "description": "打开后是否确保加载该项目的文档树。默认 true。" }
+                    "fetch_tree": { "type": "boolean", "description": "打开后是否确保加载该项目的文档树。默认 true；若后续马上要定位文档，建议保持 true。" }
                 },
                 "additionalProperties": false,
             }),
         ),
         function_tool(
             "create_project",
-            "创建新项目。适用于帮用户新建项目、填写项目名称、描述、背景图等场景。默认创建后进入该项目；如不想跳转，可传 open_after_create=false。",
+            "创建新项目。适用于帮用户新建项目、填写项目名称、项目描述、背景图等场景。默认创建成功后立即进入该项目；如果用户只想创建而不切换页面，可传 open_after_create=false。",
             json!({
                 "type": "object",
                 "properties": {
-                    "name": { "type": "string", "description": "项目名称" },
-                    "description": { "type": "string", "description": "项目描述，可为空" },
-                    "background_image": { "type": "string", "description": "项目背景图 URL，可为空" },
-                    "open_after_create": { "type": "boolean", "description": "创建完成后是否立即打开该项目。默认 true。" }
+                    "name": { "type": "string", "description": "项目名称。必填，应直接使用用户确认后的最终名称。" },
+                    "description": { "type": "string", "description": "项目描述，可为空；适合补充项目用途、背景、说明。" },
+                    "background_image": { "type": "string", "description": "项目背景图 URL，可为空；用于卡片展示。" },
+                    "open_after_create": { "type": "boolean", "description": "创建完成后是否立即打开该项目。默认 true；若只需创建不打断当前页面，可传 false。" }
                 },
                 "required": ["name"],
                 "additionalProperties": false,
@@ -720,33 +691,33 @@ fn agent_function_tools() -> Vec<Tool> {
         ),
         function_tool(
             "update_project",
-            "更新项目信息。可按 project_id 或 project_name 定位目标项目，支持修改 name、description、background_image。适用于重命名项目、更新项目描述、更新项目背景图。",
+            "更新项目信息。适用于重命名项目、修改项目描述、更新项目背景图等非正文类操作。可按 project_id 或 project_name 定位目标项目，支持单字段修改，也支持一次同时修改多个字段。",
             json!({
                 "type": "object",
                 "properties": {
-                    "project_id": { "type": "integer", "description": "目标项目 ID。优先使用。" },
+                    "project_id": { "type": "integer", "description": "目标项目 ID。优先使用，用于稳定定位项目。" },
                     "project_name": { "type": "string", "description": "目标项目名称。只有拿不到 project_id 时再使用。" },
-                    "name": { "type": "string", "description": "项目新名称。" },
-                    "description": { "type": "string", "description": "项目新描述，可为空字符串。" },
-                    "background_image": { "type": "string", "description": "项目新背景图 URL，可为空字符串。" }
+                    "name": { "type": "string", "description": "项目新名称。传入时表示重命名项目。" },
+                    "description": { "type": "string", "description": "项目新描述；可传空字符串以清空原描述。" },
+                    "background_image": { "type": "string", "description": "项目新背景图 URL；可传空字符串以清空背景图。" }
                 },
                 "additionalProperties": false,
             }),
         ),
         function_tool(
             "delete_projects",
-            "删除一个或多个项目。删除前应先通过 list_projects 确认目标准确，避免误删。可以传 project_ids，也可以传 project_names；支持批量删除。",
+            "删除一个或多个项目。适用于明确删除项目的场景，删除前应先通过 list_projects 确认目标，避免误删。支持按 project_ids 或 project_names 批量删除；优先使用 ID。",
             json!({
                 "type": "object",
                 "properties": {
                     "project_ids": {
                         "type": "array",
-                        "description": "要删除的项目 ID 列表。批量删除时优先使用。",
+                        "description": "要删除的项目 ID 列表。批量删除时优先使用，最稳定。",
                         "items": { "type": "integer" }
                     },
                     "project_names": {
                         "type": "array",
-                        "description": "要删除的项目名称列表。只有拿不到 project_ids 时再使用。",
+                        "description": "要删除的项目名称列表。只有拿不到 project_ids 时再使用，存在项目重名风险。",
                         "items": { "type": "string" }
                     }
                 },
@@ -755,11 +726,11 @@ fn agent_function_tools() -> Vec<Tool> {
         ),
         function_tool(
             "execute_browser_javascript",
-            "在浏览器端执行一段 JavaScript。适合处理点击按钮、填写表单、操作弹窗、读取 DOM、触发事件、直接调用编辑器桥接对象这类细粒度动作。代码运行在 async 环境，可直接使用 window、document、location、history、navigator、localStorage、sessionStorage、console、editor、markflow；其中 editor 是 Markdown 编辑器桥接对象，markflow 是前端工具助手对象。只有在专用工具不足以完成任务时才使用它。必须 return 可序列化结果。",
+            "在浏览器端执行一段 JavaScript。适用于点击按钮、填写表单、操作弹窗、读取 DOM、触发事件、直接调用编辑器桥接对象或 markflow 页面助手等细粒度动作。代码运行在 async 环境，可直接使用 window、document、location、history、navigator、localStorage、sessionStorage、console、editor、markflow。只有在现有专用工具不足以表达需求时才使用它；代码最后必须 return 一个可序列化结果，避免返回 DOM 循环引用。",
             json!({
                 "type": "object",
                 "properties": {
-                    "code": { "type": "string", "description": "要执行的 JavaScript 代码，运行在 async 函数体内" }
+                    "code": { "type": "string", "description": "要执行的 JavaScript 代码，运行在 async 函数体内。建议显式 return 结果，便于模型读取执行反馈。" }
                 },
                 "required": ["code"],
                 "additionalProperties": false,
@@ -767,31 +738,31 @@ fn agent_function_tools() -> Vec<Tool> {
         ),
         function_tool(
             "get_project_tree",
-            "读取指定项目下的完整文档树。适合在创建文档、创建目录、定位父目录、打开节点、删除节点前先确认结构。可以通过 project_id 或 project_name 指定目标；返回结果会包含树结构、扁平节点列表和统计信息。",
+            "读取指定项目下的完整文档树。适用于在创建文档、创建目录、移动节点、删除节点、打开节点之前先确认层级结构，也适用于回答“某个项目下面有哪些目录/文档”。可以通过 project_id 或 project_name 指定目标；返回结果会包含树结构、扁平节点列表和统计信息。",
             json!({
                 "type": "object",
                 "properties": {
-                    "project_id": { "type": "integer", "description": "目标项目 ID。优先使用。" },
+                    "project_id": { "type": "integer", "description": "目标项目 ID。优先使用，用于稳定定位项目。" },
                     "project_name": { "type": "string", "description": "目标项目名称。只有拿不到 project_id 时再使用。" },
-                    "refresh": { "type": "boolean", "description": "是否强制从后端刷新该项目文档树。默认 false。" }
+                    "refresh": { "type": "boolean", "description": "是否强制从后端刷新该项目文档树。默认 false；在节点刚发生创建/删除/移动后建议传 true。" }
                 },
                 "additionalProperties": false,
             }),
         ),
         function_tool(
             "create_tree_node",
-            "在指定项目下创建文档或目录。支持在根目录创建，也支持通过 parent_id、parent_path 或 parent_name 指定父目录；node_type 只能是 doc 或 dir。创建文档时只创建空文档壳，不要在这个工具里写入完整正文；正文必须在文档打开后通过 assistant 文本流输出。",
+            "在指定项目下创建文档或目录。适用于“在根目录创建文档”“在某个路径下创建目录”“先建空文档再写正文”等场景。支持通过 parent_id、parent_path 或 parent_name 指定父目录；node_type 只能是 doc 或 dir。创建文档时只创建空文档壳，不要在这个工具里携带完整正文；正文必须在文档打开后通过 assistant 文本流协议输出。",
             json!({
                 "type": "object",
                 "properties": {
                     "project_id": { "type": "integer", "description": "目标项目 ID。优先使用。" },
                     "project_name": { "type": "string", "description": "目标项目名称。只有拿不到 project_id 时再使用。" },
                     "parent_id": { "type": "integer", "description": "父目录节点 ID。优先使用；不传表示在项目根目录创建。" },
-                    "parent_path": { "type": "string", "description": "父目录路径，例如 产品文档/接口 。只有拿不到 parent_id 时再使用。" },
-                    "parent_name": { "type": "string", "description": "父目录名称。只有拿不到 parent_id 和 parent_path 时再使用。" },
-                    "name": { "type": "string", "description": "新建节点名称。" },
-                    "node_type": { "type": "string", "description": "新建节点类型。doc=文档，dir=目录。", "enum": ["doc", "dir"] },
-                    "open_after_create": { "type": "boolean", "description": "创建后是否立即打开该节点。默认 true。" }
+                    "parent_path": { "type": "string", "description": "父目录路径，例如 产品文档/接口。只有拿不到 parent_id 时再使用，适合已知层级路径时定位。" },
+                    "parent_name": { "type": "string", "description": "父目录名称。只有拿不到 parent_id 和 parent_path 时再使用，可能存在重名风险。" },
+                    "name": { "type": "string", "description": "新建节点名称。必填。" },
+                    "node_type": { "type": "string", "description": "新建节点类型。doc=文档，dir=目录。" , "enum": ["doc", "dir"] },
+                    "open_after_create": { "type": "boolean", "description": "创建后是否立即打开该节点。默认 true；若只需创建结构不切换视图，可传 false。" }
                 },
                 "required": ["name", "node_type"],
                 "additionalProperties": false,
@@ -799,7 +770,7 @@ fn agent_function_tools() -> Vec<Tool> {
         ),
         function_tool(
             "move_tree_node",
-            "移动一个文档或目录到同一项目内的另一个目录下，或移动到项目根目录。适合“把某篇文档移到某个目录”“把某个目录移到根目录”。优先传源节点 ID 和目标父目录 ID；路径和名称只作为兜底。当前不支持跨项目移动。",
+            "移动一个文档或目录到同一项目内的另一个目录下，或移动到项目根目录。适用于“把某篇文档移到某个目录”“把某个目录提升到根目录”“调整父目录归属”这类结构性操作。优先传源节点 ID 和目标父目录 ID；路径和名称只作为兜底。当前不支持跨项目移动。",
             json!({
                 "type": "object",
                 "properties": {
@@ -819,7 +790,7 @@ fn agent_function_tools() -> Vec<Tool> {
         ),
         function_tool(
             "open_tree_node",
-            "点击并打开某个文档或目录。适合“打开某篇文档”“进入某个目录”“点击某个节点”。可以通过 node_id、node_path 或 node_name 指定目标；如果同时传了项目信息，会先切到对应项目再打开节点。",
+            "点击并打开某个文档或目录。适用于“打开某篇文档”“进入某个目录”“点击文档树中的某个节点”。可以通过 node_id、node_path 或 node_name 指定目标；如果同时传了项目信息，会先切到对应项目再打开节点。若目标是文档，工具会等待编辑器初始化完成后再返回。",
             json!({
                 "type": "object",
                 "properties": {
@@ -834,7 +805,7 @@ fn agent_function_tools() -> Vec<Tool> {
         ),
         function_tool(
             "read_document",
-            "读取指定 Markdown 文档的完整正文和元信息。适合在完善、修复、续写、重写文档前先读取原文。默认读取当前文档；也可以通过项目和文档定位参数读取其他文档。",
+            "读取指定 Markdown 文档的已保存正文和元信息。适用于在完善、修复、续写、重写文档前读取后端已保存版本，也适用于比较“已保存内容”与“编辑器实时快照”的差异。默认读取当前文档；也可以通过项目和文档定位参数读取其他文档。注意：当当前文档存在未保存修改时，应优先结合 read_editor_snapshot 一起使用。",
             json!({
                 "type": "object",
                 "properties": {
@@ -849,23 +820,23 @@ fn agent_function_tools() -> Vec<Tool> {
         ),
         function_tool(
             "read_editor_snapshot",
-            "读取当前编辑器中的实时内容快照（包含未保存修改）。可选传入项目和文档定位参数，工具会先打开目标文档，再返回编辑器当前内容；支持 max_chars 控制返回长度。",
+            "读取当前编辑器中的实时内容快照，优先返回未保存的实时草稿。适用于用户刚改过文档、模型需要基于最新未保存内容继续写作、润色或判断是否应追加/替换时使用。可选传入项目和文档定位参数，工具会先打开目标文档，再返回编辑器当前内容；若当前没有激活编辑器但存在本地草稿缓存，也会返回草稿缓存；只有两者都不存在时才回退到已保存正文。支持 max_chars 控制返回长度。",
             json!({
                 "type": "object",
                 "properties": {
                     "project_id": { "type": "integer", "description": "目标项目 ID。优先使用。" },
                     "project_name": { "type": "string", "description": "目标项目名称。只有拿不到 project_id 时再使用。" },
-                    "doc_id": { "type": "integer", "description": "目标文档 ID。优先使用。" },
-                    "doc_path": { "type": "string", "description": "目标文档路径。只有拿不到 doc_id 时再使用。" },
-                    "doc_name": { "type": "string", "description": "目标文档名称。只有拿不到 doc_id 和 doc_path 时再使用。" },
-                    "max_chars": { "type": "integer", "description": "可选，限制返回内容的最大字符数。默认不截断。" }
+                    "doc_id": { "type": "integer", "description": "目标文档 ID。优先使用，用于稳定定位文档。" },
+                    "doc_path": { "type": "string", "description": "目标文档路径。只有拿不到 doc_id 时再使用，适合已知目录层级时定位。" },
+                    "doc_name": { "type": "string", "description": "目标文档名称。只有拿不到 doc_id 和 doc_path 时再使用，可能存在重名风险。" },
+                    "max_chars": { "type": "integer", "description": "可选，限制返回内容的最大字符数。适合只读取开头摘要、避免超长正文。默认不截断。" }
                 },
                 "additionalProperties": false,
             }),
         ),
         function_tool(
             "save_current_document",
-            "保存当前正在编辑的 Markdown 文档。可选传入项目和文档定位参数，工具会先打开目标文档再执行保存。适合用户明确要求“保存”“提交修改”“应用更改”时调用。",
+            "保存当前正在编辑的 Markdown 文档。适用于用户明确要求“保存”“提交修改”“应用更改”“确认保存”时调用。可选传入项目和文档定位参数，工具会先打开目标文档再执行保存；如果编辑器尚未初始化完成会报错，不应在仅需生成草稿时调用。",
             json!({
                 "type": "object",
                 "properties": {
@@ -880,7 +851,7 @@ fn agent_function_tools() -> Vec<Tool> {
         ),
         function_tool(
             "update_tree_node_meta",
-            "修改文档树节点元信息（当前支持重命名文档或目录）。可选传入项目和节点定位参数，工具会先打开目标节点再执行修改。适合用户明确要求“重命名文档”“重命名目录”“修改节点名称”时调用。",
+            "修改文档树节点元信息（当前主要支持重命名文档或目录）。适用于“重命名文档”“重命名目录”“修改节点名称”这类非正文操作。可选传入项目和节点定位参数，工具会先打开目标节点再执行修改；文档和目录都支持。",
             json!({
                 "type": "object",
                 "properties": {
@@ -900,7 +871,7 @@ fn agent_function_tools() -> Vec<Tool> {
         ),
         function_tool(
             "delete_tree_nodes",
-            "删除一个或多个文档或目录。支持 node_ids 或 node_paths 批量指定目标；删除前应先通过 get_project_tree 确认目标路径和节点，避免误删。",
+            "删除一个或多个文档或目录。适用于明确删除文档/目录的场景，支持批量删除。删除前应先通过 get_project_tree 确认目标路径和节点，避免误删；优先使用 node_ids，路径仅作兜底。",
             json!({
                 "type": "object",
                 "properties": {
@@ -922,7 +893,7 @@ fn agent_function_tools() -> Vec<Tool> {
         ),
         function_tool(
             "get_markdown_editor_runtime",
-            "获取当前 Markdown 编辑器运行时说明。返回结果会包含编辑器是否可用、当前文档、可调用方法、每个方法的用途说明、可用全局对象和使用建议，便于后续通过 execute_browser_javascript 细粒度操作编辑器。",
+            "获取当前 Markdown 编辑器运行时说明。适用于模型需要了解当前编辑器是否可用、当前文档是谁、有哪些桥接方法可调用、每个方法适合做什么，以及执行 JavaScript 时可直接访问哪些对象。常用于在调用 execute_browser_javascript 前先做能力探测。",
             json!({
                 "type": "object",
                 "properties": {},
@@ -931,11 +902,11 @@ fn agent_function_tools() -> Vec<Tool> {
         ),
         function_tool(
             "get_browser_runtime",
-            "获取浏览器运行时摘要和可用对象说明。返回结果会包含 location、document、history、navigator、viewport、storage 摘要，以及 window、document、editor、markflow 等可用于 execute_browser_javascript 的对象说明，用于判断后续是否需要执行 JavaScript。",
+            "获取浏览器运行时摘要和可用对象说明。适用于模型需要判断当前 URL、页面标题、视口大小、浏览器环境、本地存储 key 摘要，以及 execute_browser_javascript 中可直接使用哪些对象。通常用于执行 JavaScript 之前先做环境确认。",
             json!({
                 "type": "object",
                 "properties": {
-                    "include_storage": { "type": "boolean", "description": "是否把 localStorage 和 sessionStorage 的 key 摘要一并返回。默认 false。" }
+                    "include_storage": { "type": "boolean", "description": "是否把 localStorage 和 sessionStorage 的 key 摘要一并返回。默认 false；只有在需要排查本地状态或读取存储线索时才建议开启。" }
                 },
                 "additionalProperties": false,
             }),

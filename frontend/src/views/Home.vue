@@ -186,6 +186,7 @@ import request from '@/utils/request'
 import { useSystemStore } from '@/stores/system'
 import { describeAgentEditorBridge, getAgentEditorBridge } from '@/utils/agentEditorBridge'
 import { registerAgentToolRuntime, unregisterAgentToolRuntime } from '@/utils/agentTools'
+import { getDocDraftContent, hasDocDraft } from '@/utils/docDraftCache'
 
 const router = useRouter()
 const route = useRoute()
@@ -504,7 +505,14 @@ async function getCurrentPageState() {
     : null
   const editorBridge = describeAgentEditorBridge()
   const liveEditor = getAgentEditorBridge()
-  const content = liveEditor?.getValue() || docs.currentNode?.content || ''
+  const currentDocId = docs.currentNode?.node_type === 'doc' ? docs.currentNode.id : null
+  const draftCacheContent = currentDocId !== null ? getDocDraftContent(currentDocId) : null
+  const snapshotSource = liveEditor
+    ? 'editor_bridge'
+    : draftCacheContent !== null
+      ? 'draft_cache'
+      : 'saved_document'
+  const content = liveEditor?.getValue() || draftCacheContent || docs.currentNode?.content || ''
 
   return {
     route: {
@@ -525,6 +533,8 @@ async function getCurrentPageState() {
     current_node: currentEntry ? serializeNodeEntry(currentEntry) : null,
     editor: {
       ...editorBridge,
+      snapshot_source: snapshotSource,
+      unsaved_changes: currentDocId !== null ? hasDocDraft(currentDocId) : false,
       content_length: content.length,
       content_preview: content.slice(0, 500),
     },
@@ -1118,20 +1128,31 @@ async function readEditorSnapshotTool(rawArgs: Record<string, any>) {
   }
 
   const bridge = await waitForEditorBridge(target.entry.node.id)
-  const editorContent = bridge?.getValue() ?? target.entry.node.content ?? ''
-  const savedContent = target.entry.node.content || ''
+  const cachedDraft = getDocDraftContent(target.entry.node.id)
+  const savedData = await request.get(`/docs/${target.entry.node.id}`) as { node?: DocNode }
+  const savedContent = savedData.node?.content || ''
+  const editorContent = bridge?.getValue() ?? cachedDraft ?? savedContent
   const truncated = maxChars !== null && editorContent.length > maxChars
   const outputContent = truncated ? editorContent.slice(0, maxChars) : editorContent
 
   return {
-    source: bridge ? 'editor_bridge' : 'doc_cache',
+    source: bridge
+      ? 'editor_bridge'
+      : cachedDraft !== null
+        ? 'draft_cache'
+        : 'saved_document',
     document: serializeNodeEntry(target.entry),
     content: outputContent,
     content_length: editorContent.length,
+    content_preview: outputContent.slice(0, 300),
+    saved_content_preview: savedContent.slice(0, 300),
     saved_content_length: savedContent.length,
     unsaved_changes: editorContent !== savedContent,
     truncated,
     max_chars: maxChars,
+    usage_hint: bridge || cachedDraft !== null
+      ? '当前返回的是实时编辑快照，可用于判断未保存修改。'
+      : '当前没有可用的未保存快照，返回的是已保存正文。',
     state: await getCurrentPageState(),
   }
 }

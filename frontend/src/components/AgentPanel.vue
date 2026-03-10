@@ -1440,6 +1440,10 @@ async function sendMessage() {
   let wroteDocument = false
   let consumeAssistantText = (_rawChunk: string, _force = false) => {}
   let handleAssistantChunk = (_rawChunk: string) => {}
+  let routeChunk = (_rawChunk: string, _force = false) => {}
+  let recoverTrailingActionMarker = () => {}
+  let buildVisibleAssistantContent = (_source = rawAssistantContent, _streamMode = false) => _source
+  let appendUnsavedDraftNotice = () => {}
 
   try {
     const abortController = new AbortController()
@@ -1469,7 +1473,7 @@ async function sendMessage() {
       scrollMessagesToBottom()
     }
 
-    const buildVisibleAssistantContent = (source = rawAssistantContent, streamMode = false) => {
+    buildVisibleAssistantContent = (source = rawAssistantContent, streamMode = false) => {
       let visible = source
         .replace(/\s*\[\[ACTION:(append|replace|rewrite_section|replace_block)\]\][\s\S]*?\[\[\/ACTION\]\]\s*/gi, '\n')
 
@@ -1494,7 +1498,7 @@ async function sendMessage() {
         .trim()
     }
 
-    const appendUnsavedDraftNotice = () => {
+    appendUnsavedDraftNotice = () => {
       if (!wroteDocument || streamAborted || streamFailed) return
       if (/(保存|save)/i.test(liveAssistantContent.value)) return
       const prefix = liveAssistantContent.value.trim() ? '\n\n' : ''
@@ -1549,7 +1553,7 @@ async function sendMessage() {
       }
     }
 
-    const recoverTrailingActionMarker = () => {
+    recoverTrailingActionMarker = () => {
       if (routeAction && routeAction !== 'chat') return
       if (props.docType !== 'doc' || !props.docId) return
 
@@ -1649,7 +1653,7 @@ async function sendMessage() {
       return best
     }
 
-    const routeChunk = (rawChunk: string, force = false) => {
+    routeChunk = (rawChunk: string, force = false) => {
       if (rawChunk) {
         actionProbe += rawChunk
       }

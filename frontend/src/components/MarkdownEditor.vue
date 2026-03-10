@@ -20,6 +20,14 @@
         <div class="sy-editor-actions">
           <div class="sy-shortcut-hint">上传、拖拽、粘贴都可插入附件</div>
           <button class="ghost-btn" @click="emit('share', node)">分享</button>
+          <button
+            v-if="isDirty"
+            class="ghost-btn danger"
+            :disabled="saving"
+            @click="discardChanges"
+          >
+            <span>取消保存</span>
+          </button>
           <button class="save-btn" :class="{ dirty: isDirty }" :disabled="saving" @click="save">
             <span>{{ saving ? '保存中...' : '保存' }}</span>
             <kbd>⌘S</kbd>
@@ -103,7 +111,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import Vditor from 'vditor'
 import 'vditor/dist/index.css'
 
@@ -125,6 +133,12 @@ import {
   registerAgentEditorBridge,
   unregisterAgentEditorBridge,
 } from '@/utils/agentEditorBridge'
+import {
+  clearDocDraftContent,
+  getDocDraftContent,
+  hasDocDraft,
+  setDocDraftContent,
+} from '@/utils/docDraftCache'
 import VditorPreview from '@/components/VditorPreview.vue'
 import { createManagedUploadTask, removeManagedUpload, type ManagedUploadTask } from '@/utils/managedUploads'
 import { uploadFile, uploadImage } from '@/utils/uploads'
@@ -182,7 +196,27 @@ function syncDraftFromEditor() {
   const value = editor.getValue()
   draft.value = value
   isDirty.value = value !== originalContent
+  syncDocDraftCache(props.node.id, value, originalContent)
   setAgentEditorSnapshot(props.node.id, value)
+}
+
+function resolveInitialContent(docId: number, savedContent: string) {
+  if (!hasDocDraft(docId)) return savedContent
+  const cached = getDocDraftContent(docId)
+  if (cached === null) return savedContent
+  return cached
+}
+
+function syncDocDraftCache(docId: number, value: string, savedContent: string) {
+  if (value === savedContent) {
+    clearDocDraftContent(docId)
+    return
+  }
+  setDocDraftContent(docId, value)
+}
+
+function persistCurrentDraft(docId = props.node.id) {
+  syncDocDraftCache(docId, draft.value, originalContent)
 }
 
 function getEditorScrollElement() {
@@ -563,8 +597,12 @@ async function initEditor() {
     editor = null
   }
 
+  const initialValue = resolveInitialContent(props.node.id, draft.value)
+  draft.value = initialValue
+  isDirty.value = initialValue !== originalContent
+
   editor = new Vditor(editorRef.value, {
-    value: draft.value,
+    value: initialValue,
     cdn: VDITOR_CDN,
     tab: '    ',
     mode: 'sv',
@@ -629,6 +667,7 @@ async function initEditor() {
     input(value) {
       draft.value = value
       isDirty.value = value !== originalContent
+      syncDocDraftCache(props.node.id, value, originalContent)
       setAgentEditorSnapshot(props.node.id, value)
       syncAgentEditorBridge()
     },
@@ -645,6 +684,7 @@ async function save() {
     draft.value = value
     originalContent = value
     isDirty.value = false
+    clearDocDraftContent(props.node.id)
     ElMessage({
       message: '已保存',
       type: 'success',
@@ -657,6 +697,39 @@ async function save() {
     saving.value = false
     syncAgentEditorBridge()
   }
+}
+
+async function discardChanges() {
+  if (saving.value || !editor || !isDirty.value) return
+
+  try {
+    await ElMessageBox.confirm(
+      '当前未保存内容将被丢弃，并恢复到上次保存后的版本。是否继续？',
+      '取消未保存修改',
+      {
+        confirmButtonText: '恢复已保存内容',
+        cancelButtonText: '继续编辑',
+        type: 'warning',
+      },
+    )
+  } catch {
+    return
+  }
+
+  resetWriterState()
+  draft.value = originalContent
+  isDirty.value = false
+  editor.setValue(originalContent, true)
+  clearDocDraftContent(props.node.id)
+  setAgentEditorSnapshot(props.node.id, originalContent)
+  syncAgentEditorBridge()
+
+  ElMessage({
+    message: '已恢复到上次保存的内容',
+    type: 'success',
+    duration: 1200,
+    offset: 60,
+  })
 }
 
 function handleBeforeUnload(event: BeforeUnloadEvent) {
@@ -679,13 +752,16 @@ function handleSaveHotkey(event: KeyboardEvent) {
 
 watch(
   () => props.node.id,
-  async () => {
+  async (nextId, previousId) => {
+    if (typeof previousId === 'number') {
+      persistCurrentDraft(previousId)
+      clearAgentEditorSnapshot(previousId)
+    }
     resetWriterState()
-    clearAgentEditorSnapshot(props.node.id)
-    const next = props.node.content || ''
+    const next = resolveInitialContent(nextId, props.node.content || '')
     draft.value = next
-    originalContent = next
-    isDirty.value = false
+    originalContent = props.node.content || ''
+    isDirty.value = next !== originalContent
     if (!editor) {
       await initEditor()
       return
@@ -701,12 +777,14 @@ watch(
   (value) => {
     const next = value || ''
     if (isDirty.value || !editor) return
-    draft.value = next
+    const restored = resolveInitialContent(props.node.id, next)
+    draft.value = restored
     originalContent = next
-    if (editor.getValue() !== next) {
-      editor.setValue(next, true)
+    isDirty.value = restored !== originalContent
+    if (editor.getValue() !== restored) {
+      editor.setValue(restored, true)
     }
-    setAgentEditorSnapshot(props.node.id, next)
+    setAgentEditorSnapshot(props.node.id, restored)
     syncAgentEditorBridge()
   }
 )
@@ -744,6 +822,7 @@ onUnmounted(() => {
     syncFullscreenLock()
   }
   resetWriterState()
+  persistCurrentDraft()
   unregisterAgentEditorBridge(props.node.id)
   clearAgentEditorSnapshot(props.node.id)
   editorScrollEl?.removeEventListener('scroll', syncPreviewScrollFromEditor)

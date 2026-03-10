@@ -39,7 +39,8 @@ export const useDocsStore = defineStore('docs', () => {
 
   async function fetchNode(id: number) {
     const data = await request.get(`/docs/${id}`) as any
-    currentNode.value = data.node
+    const nextNode = data.node as DocNode
+    currentNode.value = nextNode
     if (data.stats) {
       currentStats.value = data.stats
     }
