@@ -77,9 +77,9 @@
 
       <section class="agent-main">
         <div ref="messagesRef" class="agent-messages">
-          <template v-if="currentSession?.messages.length">
+          <template v-if="visibleMessages.length">
             <article
-              v-for="message in currentSession.messages"
+              v-for="message in visibleMessages"
               :key="message.id"
               class="agent-message"
               :class="message.role"
@@ -332,11 +332,13 @@ import {
   getAgentEditorSnapshot,
   type AgentWriterMode,
 } from '@/utils/agentWriter'
+import { getAgentEditorBridge } from '@/utils/agentEditorBridge'
+import { hasDocDraft } from '@/utils/docDraftCache'
 
 type PageScope = 'overview' | 'editor' | 'dir'
 type DocType = 'doc' | 'dir' | null
-type SessionRole = 'user' | 'assistant'
-type RequestRole = SessionRole | 'system'
+type SessionRole = 'user' | 'assistant' | 'system'
+type RequestRole = SessionRole
 type StreamAction = 'chat' | AgentWriterMode
 type RouteKind = 'overview' | 'project' | 'doc'
 
@@ -433,9 +435,11 @@ const REQUEST_RECENT_MESSAGE_COUNT = 8
 const REQUEST_SUMMARY_TRIGGER_CHARS = 6000
 const REQUEST_SUMMARY_MAX_ITEMS = 6
 const REQUEST_SUMMARY_ITEM_CHARS = 240
+const MAX_SEMANTIC_CONTINUATION_ROUNDS = 2
 
 const props = defineProps<{
   pageScope: PageScope
+  pageState: string
   projectId: number | null
   projectName: string
   docId: number | null
@@ -444,6 +448,9 @@ const props = defineProps<{
   docContent: string
   projectCatalog: string
   currentNodeCatalog: string
+  editorAvailable: boolean
+  editorSnapshotSource: string
+  editorUnsavedChanges: boolean
 }>()
 
 const emit = defineEmits<{
@@ -508,6 +515,9 @@ const panelStyle = computed(() => ({
 }))
 
 const currentSession = computed(() => sessions.value.find((session) => session.id === currentSessionId.value) || null)
+const visibleMessages = computed(() =>
+  (currentSession.value?.messages || []).filter((message) => message.role === 'user' || message.role === 'assistant'),
+)
 const activeProvider = computed(() => providers.value.find((provider) => provider.id === activeProviderId.value) || null)
 const selectedProviderId = computed({
   get: () => activeProviderId.value,
@@ -773,7 +783,13 @@ async function refreshProvidersState() {
 
 function normalizeMessage(raw: any): AgentMessage | null {
   if (!raw || typeof raw !== 'object') return null
-  const role = raw.role === 'assistant' ? 'assistant' : raw.role === 'user' ? 'user' : null
+  const role = raw.role === 'assistant'
+    ? 'assistant'
+    : raw.role === 'user'
+      ? 'user'
+      : raw.role === 'system'
+        ? 'system'
+        : null
   if (!role) return null
 
   return {
@@ -1211,7 +1227,38 @@ function openProviderManagerFromModelDialog() {
 
 function currentDocContent() {
   if (!props.docId) return ''
+  const liveBridge = getAgentEditorBridge()
+  if (liveBridge?.docId === props.docId) {
+    return liveBridge.getValue()
+  }
   return getAgentEditorSnapshot(props.docId) ?? props.docContent ?? ''
+}
+
+function currentDocumentHasUnsavedChanges() {
+  if (!props.docId) return false
+  const liveBridge = getAgentEditorBridge()
+  if (liveBridge?.docId === props.docId) {
+    return liveBridge.getValue() !== (props.docContent ?? '')
+  }
+  const snapshot = getAgentEditorSnapshot(props.docId)
+  if (snapshot !== null) {
+    return snapshot !== (props.docContent ?? '')
+  }
+  if (hasDocDraft(props.docId)) return true
+  return false
+}
+
+function currentEditorAvailable() {
+  const liveBridge = getAgentEditorBridge()
+  return Boolean(liveBridge && (!props.docId || liveBridge.docId === props.docId))
+}
+
+function currentEditorSnapshotSource() {
+  const liveBridge = getAgentEditorBridge()
+  if (liveBridge?.docId === props.docId) return 'editor_bridge'
+  if (props.docId && getAgentEditorSnapshot(props.docId) !== null) return 'agent_snapshot'
+  if (props.docId && hasDocDraft(props.docId)) return 'draft_cache'
+  return 'saved_document'
 }
 
 function compactMessageText(content: string, maxChars = REQUEST_SUMMARY_ITEM_CHARS) {
@@ -1221,9 +1268,68 @@ function compactMessageText(content: string, maxChars = REQUEST_SUMMARY_ITEM_CHA
   return `${compact.slice(0, maxChars)}...`
 }
 
+function compactJsonLike(value: unknown, maxChars = REQUEST_SUMMARY_ITEM_CHARS) {
+  if (value === null || value === undefined) return ''
+  const raw = typeof value === 'string' ? value : JSON.stringify(value)
+  return compactMessageText(raw || '', maxChars)
+}
+
+function buildToolExecutionMemoryMessage(calls: AgentToolCall[], outputs: AgentToolOutputPayload[]) {
+  if (!calls.length) return ''
+
+  const outputByCallId = new Map(outputs.map((output) => [output.call_id, output]))
+  const touchedSave = calls.some((call) => call.name === 'save_current_document')
+  const lines = [
+    '以下是本轮当前请求的执行账本更新。请把已确认结果视为已发生事实，并基于它继续推进后续步骤。',
+    '在决定下一步前，先自行判断：哪些步骤已完成、哪些步骤仍待执行、当前保存状态是否仍然有效。',
+    '同一用户请求里的步骤一旦完成，后续即使环境状态发生变化，也不要回滚或重做该步骤。',
+  ]
+
+  calls.forEach((call, index) => {
+    const output = outputByCallId.get(call.call_id)
+    lines.push(`${index + 1}. 已执行工具：${call.name}`)
+
+    const argsSummary = compactMessageText(call.arguments || '', 320)
+    if (argsSummary) {
+      lines.push(`参数：${argsSummary}`)
+    }
+
+    if (output) {
+      const resultSummary = compactJsonLike(output.output, 360)
+      if (resultSummary) {
+        lines.push(`结果：${resultSummary}`)
+      }
+    }
+  })
+
+  if (touchedSave) {
+    lines.push('账本提示：保存只代表该次调用时刻之前已经形成的内容被提交；如果后续又出现新的正文或修改结果，应重新判断保存状态是否仍然有效。')
+    lines.push('若保存工具返回 saved=false 或 already_saved=true，说明这次调用没有产生新的状态变化；应先判断是否缺少前置正文或新的未保存修改，不要机械重复同一个保存。')
+  }
+
+  return lines.join('\n')
+}
+
+function extractSaveNoopState(outputs: AgentToolOutputPayload[]) {
+  for (const output of outputs) {
+    if (output.name !== 'save_current_document') continue
+    const payload = output.output
+    if (!payload || typeof payload !== 'object') continue
+    const result = (payload as Record<string, any>).result
+    if (!result || typeof result !== 'object') continue
+    const saved = result.saved === true
+    const alreadySaved = result.already_saved === true || result.alreadySaved === true
+    if (!saved && alreadySaved) {
+      return true
+    }
+  }
+  return false
+}
+
 function buildHistorySummary(messages: AgentMessage[]) {
   const userItems: string[] = []
   const assistantItems: string[] = []
+  const systemItems: string[] = []
 
   for (const message of messages) {
     const compact = compactMessageText(message.content)
@@ -1236,12 +1342,19 @@ function buildHistorySummary(messages: AgentMessage[]) {
       continue
     }
 
-    if (assistantItems.length < REQUEST_SUMMARY_MAX_ITEMS) {
-      assistantItems.push(`- ${compact}`)
+    if (message.role === 'assistant') {
+      if (assistantItems.length < REQUEST_SUMMARY_MAX_ITEMS) {
+        assistantItems.push(`- ${compact}`)
+      }
+      continue
+    }
+
+    if (systemItems.length < REQUEST_SUMMARY_MAX_ITEMS) {
+      systemItems.push(`- ${compact}`)
     }
   }
 
-  if (!userItems.length && !assistantItems.length) return ''
+  if (!userItems.length && !assistantItems.length && !systemItems.length) return ''
 
   const parts = ['以下是当前会话中较早消息的摘要，请基于此继续对话，不要假设摘要之外的旧细节仍然准确。']
   if (userItems.length) {
@@ -1252,11 +1365,16 @@ function buildHistorySummary(messages: AgentMessage[]) {
     parts.push('较早的助手答复与已完成事项：')
     parts.push(...assistantItems)
   }
+  if (systemItems.length) {
+    parts.push('较早的系统记录与工具执行事实：')
+    parts.push(...systemItems)
+  }
   return parts.join('\n')
 }
 
-function buildConversationMessages(messages: AgentMessage[]): AgentRequestMessage[] {
-  const nonEmptyMessages = messages
+function buildConversationMessages(messages: AgentMessage[], transientMessages: AgentMessage[] = []): AgentRequestMessage[] {
+  const mergedMessages = [...messages, ...transientMessages]
+  const nonEmptyMessages = mergedMessages
     .map((message) => ({
       ...message,
       content: message.content.trim(),
@@ -1304,12 +1422,16 @@ function buildRequestBody(
     mode: props.docType === 'doc' ? 'auto' : 'chat',
     context: {
       page_scope: props.pageScope,
+      page_state: props.pageState || null,
       project_name: props.projectName || null,
       doc_id: props.docId,
       doc_name: props.docName || null,
       doc_content: currentDocContent(),
       project_catalog: props.projectCatalog || null,
       current_node_catalog: props.currentNodeCatalog || null,
+      editor_available: currentEditorAvailable(),
+      editor_snapshot_source: currentEditorSnapshotSource(),
+      editor_unsaved_changes: currentDocumentHasUnsavedChanges(),
     },
     previous_response_id: options.previousResponseId || null,
     tool_outputs: options.toolOutputs || null,
@@ -1410,7 +1532,7 @@ async function sendMessage() {
   }
 
   const userMessage: AgentMessage = { id: genId(), role: 'user', content: text }
-  const assistantMessage: AgentMessage = { id: genId(), role: 'assistant', content: '', reasoning: '' }
+  let assistantMessage: AgentMessage = { id: genId(), role: 'assistant', content: '', reasoning: '' }
   session.messages.push(userMessage, assistantMessage)
   session.updatedAt = Date.now()
   session.providerId = provider.id
@@ -1437,6 +1559,11 @@ async function sendMessage() {
   let pendingToolOutputs: AgentToolOutputPayload[] | null = null
   let streamAborted = false
   let previousResponseId: string | null = session.previousResponseId
+  const toolExecutionMemories: AgentMessage[] = []
+  const transientToolExecutionMemories: AgentMessage[] = []
+  const userRequestedSave = /(保存|存档|持久化|提交|应用更改|apply|save)/i.test(text)
+  const compositeWriteThenSaveRequest = props.docType === 'doc' && userRequestedSave
+  let semanticContinuationRounds = 0
   let toolCallRounds = 0
   const toolCallSignatureHits = new Map<string, number>()
   let rawAssistantContent = ''
@@ -1448,10 +1575,78 @@ async function sendMessage() {
   let recoverTrailingActionMarker = () => {}
   let buildVisibleAssistantContent = (_source = rawAssistantContent, _streamMode = false) => _source
   let appendUnsavedDraftNotice = () => {}
+  let finalizePendingAssistantOutput = () => {}
 
   try {
     const abortController = new AbortController()
     activeStreamController = abortController
+
+    const pushExecutionLedgerMessage = (content: string) => {
+      const normalized = content.trim()
+      if (!normalized) return
+      const message: AgentMessage = {
+        id: genId(),
+        role: 'system',
+        content: normalized,
+      }
+      transientToolExecutionMemories.push(message)
+      toolExecutionMemories.push(message)
+    }
+
+    const resetSemanticContinuationBudget = () => {
+      semanticContinuationRounds = 0
+    }
+
+    const shouldTriggerSemanticContinuation = (finalContent: string) => {
+      if (semanticContinuationRounds >= MAX_SEMANTIC_CONTINUATION_ROUNDS) return false
+      const normalized = finalContent.trim()
+      if (!normalized) return false
+      const editorStillUnsaved = currentDocumentHasUnsavedChanges()
+      const hasContinuationMarker = /\[\[CONTINUE\]\]/i.test(normalized)
+      const awaitingUserConfirmation =
+        /请确认|是否确认|请回复|确认后再执行|确认后我再执行|确认后我马上执行|请一次性确认|需要一次性确认|确认以上|确认上条|允许我|是否允许|是否接受/.test(normalized)
+      const reportsUnsaved = /保存状态：\s*未保存/.test(normalized) || /尚未保存/.test(normalized)
+      const reportsSaved = /保存状态：\s*已保存/.test(normalized) || /已保存文档|已经保存文档|保存完成/.test(normalized)
+      const reportsPending = /未执行动作|仍待执行|继续执行|尚待处理|正在处理中/.test(normalized)
+      const reportsWillContinue = /我将继续|继续补全|继续处理|随后切到|接着切到|接着处理|下一步处理|下一步将|随后继续|然后继续/.test(normalized)
+      const promisedFollowupSave = /接下来为你保存|然后为你保存|随后保存|继续保存|准备保存文档|正在提交保存|正在保存/.test(normalized)
+      const finalizedComplete = /已完成[:：]|当前无未保存修改|已按要求.*完成保存|并已保存文档/.test(normalized)
+      if (awaitingUserConfirmation) {
+        return false
+      }
+      if (hasContinuationMarker) {
+        return true
+      }
+      if (finalizedComplete && !editorStillUnsaved && !reportsPending && !reportsWillContinue && !promisedFollowupSave) {
+        return false
+      }
+      const needsSaveFollowup =
+        userRequestedSave
+        && !reportsSaved
+        && (editorStillUnsaved || wroteDocument || reportsUnsaved || promisedFollowupSave)
+      return needsSaveFollowup || promisedFollowupSave || reportsPending || reportsWillContinue
+    }
+
+    const enqueueSemanticContinuation = (finalContent: string) => {
+      semanticContinuationRounds += 1
+      pushExecutionLedgerMessage([
+        '执行账本更新：上一段响应已结束，但根据当前账本与助手收尾，仍存在未完成步骤。',
+        '继续推进剩余步骤，不要重复已经完成的正文输出或已完成工具。',
+        userRequestedSave
+          ? '若正文已完成且用户目标包含保存，请优先判断当前未保存状态是否需要通过 save_current_document 完成提交。'
+          : '若只剩校验、导航或补充说明，请继续完成这些剩余动作。',
+        `当前本地未保存状态：${currentDocumentHasUnsavedChanges() ? '未保存' : '已保存或无改动'}`,
+        `上一段助手收尾摘要：${compactMessageText(finalContent, 320)}`,
+      ].join('\n'))
+    }
+
+    if (compositeWriteThenSaveRequest) {
+      pushExecutionLedgerMessage([
+        '执行账本提示：当前用户请求包含前置内容产出与后续提交动作的复合语义。',
+        '请先判断后续动作是否依赖新的正文或状态变化已经发生；若依赖尚未满足，先完成正文协议输出，再决定是否需要保存或提交。',
+        '不要把某个被用户提到的后续动作直接当成本轮第一步；若后续动作尚未真正完成，不要只口头承诺“接下来处理”，要继续完成或明确说明受阻原因。',
+      ].join('\n'))
+    }
 
     const appendAssistantContent = (content: string) => {
       if (!content) return
@@ -1480,6 +1675,7 @@ async function sendMessage() {
     buildVisibleAssistantContent = (source = rawAssistantContent, streamMode = false) => {
       let visible = source
         .replace(/\s*\[\[ACTION:(append|replace|rewrite_section|replace_block)\]\][\s\S]*?\[\[\/ACTION\]\]\s*/gi, '\n')
+        .replace(/\s*\[\[CONTINUE\]\]\s*/gi, '\n')
 
       if (streamMode) {
         const upperVisible = visible.toUpperCase()
@@ -1569,6 +1765,7 @@ async function sendMessage() {
         routeAction = mode
         dispatchAgentWriterStart({ docId: props.docId, mode, save: false })
         writerStarted = true
+        wroteDocument = true
         if (body) {
           dispatchAgentWriterChunk({ docId: props.docId, chunk: body })
         }
@@ -1634,10 +1831,48 @@ async function sendMessage() {
 
     const completeWriterBlock = () => {
       if (routeAction && routeAction !== 'chat' && props.docId && writerStarted) {
+        wroteDocument = true
+        resetSemanticContinuationBudget()
         dispatchAgentWriterComplete({ docId: props.docId })
         writerStarted = false
+        pushExecutionLedgerMessage([
+          '执行账本更新：本轮正文写入步骤已完成。',
+          '当前文档应视为存在新的未保存修改；如果用户要求保存，下一步应重新判断并在需要时调用 save_current_document。',
+        ].join('\n'))
       }
       routeAction = 'chat'
+    }
+
+    const resetStreamingRoundState = () => {
+      routeAction = null
+      prefixProbe = ''
+      pendingRoute = null
+      writerStarted = false
+      renderBuffer = ''
+      inThinkBlock = false
+      rawAssistantContent = ''
+      completedAssistantContent = ''
+      actionProbe = ''
+      liveAssistantContent.value = ''
+      liveAssistantReasoning.value = ''
+    }
+
+    const startContinuationAssistantMessage = () => {
+      assistantMessage.content = liveAssistantContent.value
+      assistantMessage.reasoning = liveAssistantReasoning.value
+
+      assistantMessage = {
+        id: genId(),
+        role: 'assistant',
+        content: '',
+        reasoning: '',
+      }
+      session.messages.push(assistantMessage)
+      session.updatedAt = Date.now()
+      sessions.value = [...sessions.value]
+      streamingAssistantId.value = assistantMessage.id
+      resetStreamingRoundState()
+      scrollMessagesToBottom()
     }
 
     const findNextActionOpen = (input: string) => {
@@ -1809,10 +2044,29 @@ async function sendMessage() {
       routeChunk(flushed)
     }
 
+    finalizePendingAssistantOutput = () => {
+      if (!routeAction && prefixProbe.trim()) {
+        const flushed = prefixProbe
+        prefixProbe = ''
+        handleAssistantChunk(flushed)
+      }
+      routeChunk('', true)
+      consumeAssistantText('', true)
+      recoverTrailingActionMarker()
+      if (routeAction && routeAction !== 'chat') {
+        if (!/\[\[\/ACTION\]\]/i.test(rawAssistantContent)) {
+          throw new Error('模型在正文动作未完整闭合时请求了后续工具，已中止执行')
+        }
+        completeWriterBlock()
+      }
+      const finalizedSource = completedAssistantContent || rawAssistantContent
+      liveAssistantContent.value = buildVisibleAssistantContent(finalizedSource)
+    }
+
     while (true) {
       assistantMessage.content = liveAssistantContent.value
       assistantMessage.reasoning = liveAssistantReasoning.value
-      const requestMessages = buildConversationMessages(session.messages)
+      const requestMessages = buildConversationMessages(session.messages, transientToolExecutionMemories)
       const token = localStorage.getItem('token')
       const response = await fetch('/api/agent/chat/stream', {
         method: 'POST',
@@ -1876,6 +2130,12 @@ async function sendMessage() {
           const mode = parsed.data.mode === 'chat_fallback' ? 'chat_fallback' : 'responses'
           agentTransportMode.value = mode
         } else if (parsed.event === 'tool.calls.required') {
+          const completedContent = typeof parsed.data.content === 'string' ? parsed.data.content : ''
+          if (completedContent) {
+            completedAssistantContent = completedContent
+            appendCompletedTail(completedContent)
+          }
+          finalizePendingAssistantOutput()
           toolResponseId = typeof parsed.data.response_id === 'string' ? parsed.data.response_id : ''
           if (toolResponseId.trim()) {
             previousResponseId = toolResponseId.trim()
@@ -1913,6 +2173,13 @@ async function sendMessage() {
       }
 
       if (!requiredToolCalls.length) {
+        finalizePendingAssistantOutput()
+        const finalContent = completedAssistantContent || rawAssistantContent
+        if (shouldTriggerSemanticContinuation(finalContent)) {
+          enqueueSemanticContinuation(finalContent)
+          startContinuationAssistantMessage()
+          continue
+        }
         break
       }
 
@@ -1938,6 +2205,20 @@ async function sendMessage() {
       }
 
       pendingToolOutputs = await executeAgentToolCalls(requiredToolCalls)
+      if (pendingToolOutputs.length) {
+        resetSemanticContinuationBudget()
+      }
+      const toolMemory = buildToolExecutionMemoryMessage(requiredToolCalls, pendingToolOutputs)
+      if (toolMemory) {
+        pushExecutionLedgerMessage(toolMemory)
+      }
+      if (!wroteDocument && extractSaveNoopState(pendingToolOutputs)) {
+        pushExecutionLedgerMessage([
+          '执行账本纠偏：本轮到目前为止还没有输出任何正文协议 [[ACTION:...]]。',
+          '刚才的保存工具返回“没有产生新的保存动作/already_saved=true”，说明该动作的语义前提尚未满足，当前并没有新的结果可提交。',
+          '下一步不要再次重复同一个保存；应先完成能够产生新状态变化的正文协议，再根据新的结果判断是否还需要提交。',
+        ].join('\n'))
+      }
     }
   } catch (error: any) {
     if (error?.name === 'AbortError') {
@@ -1951,24 +2232,20 @@ async function sendMessage() {
     activeStreamController = null
     if (!streamFailed) {
       try {
-        if (!routeAction && prefixProbe.trim()) {
-          handleAssistantChunk(prefixProbe)
-        }
-        routeChunk('', true)
-        consumeAssistantText('', true)
-        recoverTrailingActionMarker()
-        const finalizedSource = completedAssistantContent || rawAssistantContent
-        liveAssistantContent.value = buildVisibleAssistantContent(finalizedSource)
+        finalizePendingAssistantOutput()
         appendUnsavedDraftNotice()
-        if (routeAction && routeAction !== 'chat' && props.docId && (!streamAborted || writerStarted)) {
-          dispatchAgentWriterComplete({ docId: props.docId })
-        }
       } catch (finalizeError) {
         console.error('agent stream finalize failed', finalizeError)
       }
     }
     assistantMessage.content = liveAssistantContent.value
     assistantMessage.reasoning = liveAssistantReasoning.value
+    if (!assistantMessage.content.trim() && !assistantMessage.reasoning?.trim()) {
+      session.messages = session.messages.filter((message) => message.id !== assistantMessage.id)
+    }
+    if (toolExecutionMemories.length) {
+      session.messages.push(...toolExecutionMemories)
+    }
     session.previousResponseId = previousResponseId
     session.lastSyncedMessageCount = 0
     session.updatedAt = Date.now()

@@ -1,3 +1,10 @@
+export interface AgentEditorSaveResult {
+  saved: boolean
+  alreadySaved?: boolean
+  inFlight?: boolean
+  contentLength?: number
+}
+
 export interface AgentEditorBridge {
   docId: number
   docName: string
@@ -8,7 +15,7 @@ export interface AgentEditorBridge {
   replaceValue: (value: string) => void
   focus: () => void
   scrollToBottom: () => void
-  save: () => Promise<void>
+  save: () => Promise<AgentEditorSaveResult>
 }
 
 let currentBridge: AgentEditorBridge | null = null

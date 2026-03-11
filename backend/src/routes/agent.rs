@@ -19,8 +19,8 @@ use async_openai::{
             ChatCompletionRequestAssistantMessage, ChatCompletionRequestMessage,
             ChatCompletionRequestSystemMessage, ChatCompletionRequestToolMessage,
             ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessage,
-            ChatCompletionTool, ChatCompletionTools, CreateChatCompletionRequestArgs,
-            FinishReason, FunctionCall as ChatFunctionCall, FunctionObject,
+            ChatCompletionTool, ChatCompletionTools, CreateChatCompletionRequestArgs, FinishReason,
+            FunctionCall as ChatFunctionCall, FunctionObject,
         },
         responses::{
             CreateResponseArgs, EasyInputContent, EasyInputMessage, FunctionCallOutput,
@@ -127,12 +127,16 @@ pub struct AgentMessagePayload {
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct AgentContextPayload {
     pub page_scope: Option<String>,
+    pub page_state: Option<String>,
     pub project_name: Option<String>,
     pub doc_id: Option<i64>,
     pub doc_name: Option<String>,
     pub doc_content: Option<String>,
     pub project_catalog: Option<String>,
     pub current_node_catalog: Option<String>,
+    pub editor_available: Option<bool>,
+    pub editor_snapshot_source: Option<String>,
+    pub editor_unsaved_changes: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -168,6 +172,7 @@ enum AgentStreamOutcome {
     },
     ToolCalls {
         response_id: String,
+        text: String,
         calls: Vec<AgentToolCallRequest>,
     },
 }
@@ -190,12 +195,16 @@ fn summarize_context_for_log(ctx: Option<&AgentContextPayload>) -> serde_json::V
     match ctx {
         Some(ctx) => json!({
             "page_scope": ctx.page_scope,
+            "page_state": ctx.page_state,
             "project_name": ctx.project_name,
             "doc_id": ctx.doc_id,
             "doc_name": ctx.doc_name,
             "doc_content": ctx.doc_content.as_deref().map(|value| preview_for_log(value, 600)),
             "project_catalog": ctx.project_catalog.as_deref().map(|value| preview_for_log(value, 400)),
             "current_node_catalog": ctx.current_node_catalog.as_deref().map(|value| preview_for_log(value, 400)),
+            "editor_available": ctx.editor_available,
+            "editor_snapshot_source": ctx.editor_snapshot_source,
+            "editor_unsaved_changes": ctx.editor_unsaved_changes,
         }),
         None => serde_json::Value::Null,
     }
@@ -401,10 +410,8 @@ fn normalize_write_mode(value: Option<&str>) -> Option<String> {
 
 fn build_system_prompt(
     mode: &str,
-    write_mode: Option<&str>,
     username: &str,
     ctx: &AgentContextPayload,
-    use_tools: bool,
 ) -> String {
     let mut parts = vec![
         "你是 MarkFlow 内置的智能文档助手。请使用中文，回答要直接、可执行、少废话。".to_string(),
@@ -414,6 +421,9 @@ fn build_system_prompt(
 
     if let Some(scope) = ctx.page_scope.as_deref() {
         parts.push(format!("当前页面作用域：{}", scope));
+    }
+    if let Some(page_state) = ctx.page_state.as_deref() {
+        parts.push(format!("当前页面状态：{}", page_state));
     }
     if let Some(project_name) = ctx.project_name.as_deref() {
         parts.push(format!("当前项目：{}", project_name));
@@ -438,62 +448,66 @@ fn build_system_prompt(
     {
         parts.push(format!("当前项目可见目录/文档：{}", current_node_catalog));
     }
-
-    if use_tools {
-        parts.push(
-            r#"文档正文规则：
-1. 生成或修改正文时，工具只用于定位/打开/创建空文档/读取正文或快照/保存/改元信息；正文必须由 assistant 文本流输出，禁止在 create_tree_node 中携带完整正文。
-2. 所有必要工具调用完成后，才能输出正文协议；正文最开头必须是 [[ACTION:append]]、[[ACTION:replace]]、[[ACTION:rewrite_section]]、[[ACTION:replace_block]] 之一，并以 [[/ACTION]] 结束；标记内写入编辑器，标记外显示在聊天面板。
-3. rewrite_section 块必须含 [[TARGET]]标题[[/TARGET]] 和 [[CONTENT]]完整小节[[/CONTENT]]；replace_block 块必须含 [[FIND]]原片段[[/FIND]] 和 [[REPLACE]]新片段[[/REPLACE]]。
-4. 局部改写后必须清理旧内容，禁止重复；若是移动内容，必须满足“源位置删除 + 目标位置插入”，最终只保留一份。
-5. 协议标记必须完整、精确、无半截；[[/ACTION]] 后继续聊天，不得立即结束。
-6. [[/ACTION]] 后按固定结构输出：`操作类型：...`、`修改位置：...`、`保存状态：已保存/未保存`；然后输出 `优化建议：`（3-5 条）和 `本次修改总结：\r\n` (总结内容)。
-工具与读取规则：
-1. 优先用工具完成页面导航、项目管理、文档树、正文读取、保存、重命名、浏览器自动化；不要输出旧版 [[ROUTE:...]]。
-2. 工具调用要“按需、一次到位”：同一轮内若已拿到足够信息，不要重复调用同一工具（尤其是 get_current_page_state、read_document、read_editor_snapshot）。
-3. get_current_page_state 只在无法确认当前项目/文档/未保存状态时调用；同一轮最多调用一次。若上下文已明确目标，不要先调状态工具再重复确认。
-4. 读取当前文档时：若已知存在未保存修改或用户刚改过内容，优先 read_editor_snapshot；否则 read_document。当前文档未保存时，禁止只依赖 read_document 做续写/替换判断。
-5. 仅保存当前文档时必须调用 save_current_document；仅修改项目元信息时调用 update_project；仅重命名文档/目录时调用 update_tree_node_meta。
-6. 除非用户明确授权保存，否则默认生成未保存草稿，并在保存状态中写“未保存”；不要擅自声称已保存。
-7. 填表、点按钮、弹窗、细粒度编辑器操作优先用专用工具；专用工具不足时才用 execute_browser_javascript。工具完成后用简短中文总结，不要复述整段 JSON。
-8. 防循环约束：连续两次工具调用若没有新增关键信息，立即停止继续探测，直接给出当前最佳结果；如确实缺信息，只提出一个最小澄清问题。
-动作选择规则：
-1. 先判断编辑意图（追加/插入/替换/润色/重写），再判断影响范围（片段/小节/多节/大部分/整篇），最后决定协议动作。
-2. append / replace / rewrite_section / replace_block 是协议动作，不等同于编辑意图；能局部解决时不要整体重写。
-3. 一般规则：局部新增优先 append；整篇改写或大范围重排用 replace；按标题整节改写用 rewrite_section；替换指定片段用 replace_block。"#
-                .to_string(),
-        );
-    } else {
-        match mode {
-            "chat" => {
-                parts.push("本轮只进行对话回答，不要输出任何 [[ACTION:...]] 动作标记。".to_string());
-            }
-            "write" => {
-                let action = match write_mode {
-                    Some("replace") => "replace",
-                    _ => "append",
-                };
-                parts.push(format!(
-                    "本轮必须以 [[ACTION:{}]] 开头输出正文，不要输出其他动作标记，也不要解释动作选择。",
-                    action
-                ));
-                parts.push(
-                    r#"正文必须包在 [[ACTION:...]]...[[/ACTION]] 内；标记内才是写入文档的 Markdown。[[/ACTION]] 后继续输出聊天文本，并按以下结构给出：`操作类型：...`、`修改位置：...`、`保存状态：已保存/未保存`；若未保存，再输出 `原因：...`；然后输出 `优化建议：`（3-5 条）和 `本次修改总结：\r\n`（总结内容）。"#
-                        .to_string(),
-                );
-            }
-            _ => {
-                parts.push(
-                    r#"最终开头只能选择一个动作：[[ACTION:chat]]、[[ACTION:append]]、[[ACTION:replace]]、[[ACTION:rewrite_section]]、[[ACTION:replace_block]]。
-聊天答复用 [[ACTION:chat]]；继续补写通常用 [[ACTION:append]]；整篇改写用 [[ACTION:replace]]；按标题整节重写用 [[ACTION:rewrite_section]]；替换指定片段用 [[ACTION:replace_block]]。
-若是文档动作，必须输出 [[/ACTION]]，且只有标记内内容属于文档正文。rewrite_section 必须带 TARGET/CONTENT；replace_block 必须带 FIND/REPLACE；局部改写后要清理旧内容，移动内容时最终只保留一份。
-[[/ACTION]] 后继续输出聊天文本，并按以下结构给出：`操作类型：...`、`修改位置：...`、`保存状态：已保存/未保存`；若未保存，再输出 `原因：...`；然后输出 `优化建议：`（3-5 条）和 `本次修改总结：\r\n`（总结内容）。
-若用户明确要求切换页面，可在最前面额外输出一个路由标记：[[ROUTE:overview]]、[[ROUTE:project:项目名]]、[[ROUTE:doc:文档名]]；只有目标名称明确时才可输出，禁止编造名称。"#
-                        .to_string(),
-                );
-            }
-        }
+    if let Some(editor_available) = ctx.editor_available {
+        parts.push(format!(
+            "当前编辑器是否可用：{}",
+            if editor_available { "是" } else { "否" }
+        ));
     }
+    if let Some(snapshot_source) = ctx
+        .editor_snapshot_source
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        parts.push(format!("当前编辑器快照来源：{}", snapshot_source));
+    }
+    if let Some(unsaved_changes) = ctx.editor_unsaved_changes {
+        parts.push(format!(
+            "当前文档未保存修改：{}",
+            if unsaved_changes { "是" } else { "否" }
+        ));
+    }
+
+    parts.push(
+        r#"## 执行规则
+               1. 分析用户语义，若是多行动任务，先抽取动作并给出精简执行顺序，等待用户确认；确认后再执行。执行期间维护内部执行账本：已完成、未完成、受阻。步骤一旦完成，不要回头重做（**步骤幂等性：已完成的步骤不重新执行**）；若后续环境因新步骤变化，也不要把后创建/后修改的内容误算进前一步。
+               1.1 若同一轮同时存在“高风险操作确认”（如全量删除、覆盖）与“语义歧义澄清”，必须合并成**一条**确认消息一次问完，列出所有待确认点；不要拆成多轮重复确认。
+               1.2 对同一确认点只允许问一次。用户已明确回答后，不得仅因措辞不同而重复追问；除非用户答复彼此冲突，或后续出现新的关键信息使原确认失效。
+               1.3 若歧义只是明显笔误或近似表达（如“补全/不全”），应在同一条确认里给出你的高概率解释，请用户一次性确认；不要先确认执行顺序，再单独追问该笔误。
+               2. 正文只能由 assistant 文本流输出；`[[ACTION:...]]` 标记块属于协议层，其内容由编辑器解析写入，标记外的文字显示在聊天面板。工具只用于定位、打开、创建空文档、读取、保存、重命名、导航等，禁止在 `create_tree_node` 中携带完整正文。
+               3. 正文协议只能用 `[[ACTION:append]]`、`[[ACTION:replace]]`、`[[ACTION:rewrite_section]]`、`[[ACTION:replace_block]]` 之一，并以 `[[/ACTION]]` 结束；标记内写入编辑器，标记外显示在聊天面板。
+               4. `rewrite_section` 块必须含 `[[TARGET]]标题[[/TARGET]]` 和 `[[CONTENT]]完整小节[[/CONTENT]]`；`replace_block` 块必须含 `[[FIND]]原片段[[/FIND]]` 和 `[[REPLACE]]新片段[[/REPLACE]]`。
+               5. 局部改写后必须清理旧内容，禁止重复（**内容唯一性：同一内容在文档中只保留一份**）；若是移动内容，必须满足"源位置删除 + 目标位置插入"，最终只保留一份。
+               6. 协议标记必须完整、精确、无半截；`[[/ACTION]]` 后继续聊天，不得立即结束。若后续步骤还需要工具（例如保存、重命名、读取校验），继续执行，不要因为已经输出正文就停止。
+               6.1 若当前响应结束后，基于同一用户请求仍有剩余步骤需要系统自动继续（例如写完当前文档后还要保存、切换到下一篇文档继续写、继续执行同一计划中的后续动作），请在聊天文本末尾额外输出固定标记 `[[CONTINUE]]`。
+               6.2 `[[CONTINUE]]` 只用于表示“本轮之后系统应自动继续剩余步骤”；不要用于普通解释、总结或下一步建议。
+               6.3 如果当前是在等待用户确认、等待澄清或等待外部条件满足，则禁止输出 `[[CONTINUE]]`。
+               7. 按用户语义决定顺序。先判断每个动作的语义依赖：若某个动作依赖"新的正文/修改结果已经产生"，则必须先完成对应正文协议，再执行该动作；不要因为用户提到某个后续动作，就把它提前到依赖满足之前。
+               8. 对单行动复合目标也按"语义依赖"理解，而不是把短句切成彼此独立的机械步骤。若后续动作的成立前提是前面的正文或状态变化已经发生，就先完成前置变化，再进入后续动作。
+                  > **单行动复合目标定义：** 用户语义上是一个整体意图，内部子步骤之间存在强依赖、无需分步确认。
+                  > 示例：`"把第三段改成列表格式并加粗关键词"` = 单行动复合目标（改写与格式化一体，无需拆分确认）。
+                  > 对比：`"先把第三段改成列表，再把整篇文章翻译成英文"` = 多行动任务（需抽取动作并确认执行顺序）。
+               9. 当某个后续动作语义上依赖正文已经写入、替换、改写或确认完成时，不要只在聊天区口头承诺"接下来处理"就结束本轮；应继续执行到正文已通过协议标记写入编辑器为止。此处"完成"指正文已写入编辑器，不等于已保存；保存行为仍遵循规则15，须用户授权后方可执行。若本轮响应结束后仍需系统自动推进这些剩余步骤，使用 `[[CONTINUE]]` 明确标记。
+               10. 优先用工具完成页面导航、项目管理、文档树、正文读取、保存、重命名、浏览器自动化；不要输出旧版 `[[ROUTE:...]]`。
+               11. 工具调用要按需、一次到位。若上下文已明确目标，不要重复调用同一工具；尤其避免重复调用 `get_current_page_state`、`read_document`、`read_editor_snapshot`。读取类工具（`get_current_page_state` / `read_editor_snapshot` / `read_document`）因用途不同，各允许独立调用一次，不计入"重复调用"限制。
+               12. `get_current_page_state` 只在无法确认当前项目、文档、未保存状态时使用；同一轮最多调用一次。
+               13. 读取当前文档时：若已知存在未保存修改或用户刚改过内容，优先 `read_editor_snapshot`；否则 `read_document`。当前文档未保存时，不要只依赖 `read_document` 做续写/替换判断。
+               14. 仅保存当前文档时调用 `save_current_document`；仅修改项目元信息时调用 `update_project`；仅重命名文档/目录时调用 `update_tree_node_meta`。
+               15. 除非用户明确授权保存，否则默认生成未保存草稿，并在保存状态中写"未保存"；不要擅自声称已保存。
+               16. 若某个工具结果明确表明"没有产生新的状态变化"或"动作未实际生效"，不要把它当成已完成；应重新判断前置依赖是否满足，而不是机械重复同一工具。
+               17. 特别是当 `save_current_document` 返回 `saved=false`、`already_saved=true` 或"没有产生新的保存动作"时，说明这次保存没有提交新内容；此时应重新判断是否缺少前置正文或新的未保存变化，不要继续重复保存。若重新判断后仍无法满足前置条件（如正文尚未写入、无未保存变化），应停止保存尝试，向用户说明受阻原因并等待进一步指示；禁止重复调用 `save_current_document`。
+               18. 若连续两次工具调用没有新增关键信息，立即停止探测并给出当前最佳结果；如确实缺信息，只提出一个最小澄清问题。若存在多个最小确认点，合并成一个一次性确认，不要拆开重复询问。
+               ---
+               ## 动作选择规则
+               1. 先判断编辑意图，再判断影响范围，再选择协议动作。`append` / `replace` / `rewrite_section` / `replace_block` 是协议动作，不等同于编辑意图；能局部解决时不要整体重写。
+               2. 一般规则：局部新增优先 `append`；整篇改写或大范围重排用 `replace`；按标题整节改写用 `rewrite_section`；替换指定片段用 `replace_block`。
+               3. 多行动执行顺序遵循"依赖准备 -> 执行动作 -> 完成判定 -> 进入下一步"。若当前步骤本身就是写正文，可以先输出 `[[ACTION:...]]`，待正文写入完成后再进入后续保存或校验步骤。
+               4. 每个动作都要记录产物并在后续复用（如 `project_id`、`node_id`、当前打开节点、最近一次保存是否已失效），禁止反复猜测同一目标。
+               5. 若动作间存在冲突（例如后续要编辑的目标已被删除或移动），先消解冲突；无法消解时只提出一个最小澄清问题。若该问题已问过并得到回答，不得改写后再次询问同一冲突。
+               6. 单行动执行结束后，在聊天区给出精简收尾：本次行动总结，下一步建议。
+               7. 多行动执行结束后，在聊天区给出精简收尾：已完成动作、失败动作（如有）、未执行动作（如有）与下一步建议。"#
+            .to_string(),
+    );
 
     if matches!(mode, "auto" | "write") {
         if let Some(content) = ctx
@@ -510,7 +524,11 @@ fn build_system_prompt(
 }
 
 fn build_response_input(payload: &AgentChatStreamRequest) -> Vec<InputItem> {
-    if let Some(outputs) = payload.tool_outputs.as_ref().filter(|items| !items.is_empty()) {
+    if let Some(outputs) = payload
+        .tool_outputs
+        .as_ref()
+        .filter(|items| !items.is_empty())
+    {
         let mut items: Vec<InputItem> = payload
             .messages
             .iter()
@@ -537,7 +555,11 @@ fn build_response_input(payload: &AgentChatStreamRequest) -> Vec<InputItem> {
 
         for output in outputs {
             if let (Some(name), Some(arguments)) = (
-                output.name.as_deref().map(str::trim).filter(|value| !value.is_empty()),
+                output
+                    .name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty()),
                 output
                     .arguments
                     .as_deref()
@@ -873,7 +895,7 @@ fn agent_function_tools() -> Vec<Tool> {
         ),
         function_tool(
             "delete_tree_nodes",
-            "删除一个或多个文档或目录。适用于明确删除文档/目录的场景，支持批量删除。删除前应先通过 get_project_tree 确认目标路径和节点，避免误删；优先使用 node_ids，路径仅作兜底。",
+            "删除一个或多个文档或目录。适用于明确删除文档/目录的场景，支持批量删除。删除前应先通过 get_project_tree 确认目标路径和节点，避免误删；优先使用 node_ids，路径其次；如果当前项目树中按名称能唯一精确匹配，也可直接传 node_names 删除。",
             json!({
                 "type": "object",
                 "properties": {
@@ -887,6 +909,11 @@ fn agent_function_tools() -> Vec<Tool> {
                     "node_paths": {
                         "type": "array",
                         "description": "要删除的节点路径列表。只有拿不到 node_ids 时再使用。",
+                        "items": { "type": "string" }
+                    },
+                    "node_names": {
+                        "type": "array",
+                        "description": "要删除的节点名称列表。仅当当前项目内能唯一精确匹配时使用；若存在重名，应改用 node_ids 或 node_paths。",
                         "items": { "type": "string" }
                     }
                 },
@@ -957,7 +984,11 @@ fn build_chat_completion_messages(
         messages.push(next_message);
     }
 
-    if let Some(outputs) = payload.tool_outputs.as_ref().filter(|items| !items.is_empty()) {
+    if let Some(outputs) = payload
+        .tool_outputs
+        .as_ref()
+        .filter(|items| !items.is_empty())
+    {
         let tool_calls: Vec<ChatCompletionMessageToolCalls> = outputs
             .iter()
             .filter_map(|output| {
@@ -1060,7 +1091,7 @@ async fn stream_via_responses(
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-        request.previous_response_id(previous_response_id.to_string());
+            request.previous_response_id(previous_response_id.to_string());
         }
     }
     let request = request
@@ -1221,6 +1252,7 @@ async fn stream_via_responses(
         }
         return Ok(AgentStreamOutcome::ToolCalls {
             response_id,
+            text: final_text,
             calls: tool_calls,
         });
     }
@@ -1286,7 +1318,9 @@ async fn stream_via_chat_completions(
                             if !send_json_event(tx, "message.delta", json!({ "content": content }))
                                 .await
                             {
-                                return Err(AgentStreamError::Fatal("客户端连接已关闭".to_string()));
+                                return Err(AgentStreamError::Fatal(
+                                    "客户端连接已关闭".to_string(),
+                                ));
                             }
                         }
                     }
@@ -1302,7 +1336,9 @@ async fn stream_via_chat_completions(
                             if !send_json_event(tx, "message.delta", json!({ "content": refusal }))
                                 .await
                             {
-                                return Err(AgentStreamError::Fatal("客户端连接已关闭".to_string()));
+                                return Err(AgentStreamError::Fatal(
+                                    "客户端连接已关闭".to_string(),
+                                ));
                             }
                         }
                     }
@@ -1357,14 +1393,22 @@ async fn stream_via_chat_completions(
                             tracing::info!(
                                 "agent stream #{} chat.tool_calls.required response_id={} calls={}",
                                 request_id,
-                                if response_id.trim().is_empty() { model } else { &response_id },
-                                json!(calls.iter().map(|call| {
-                                    json!({
-                                        "call_id": call.call_id,
-                                        "name": call.name,
-                                        "arguments": preview_for_log(&call.arguments, 600),
+                                if response_id.trim().is_empty() {
+                                    model
+                                } else {
+                                    &response_id
+                                },
+                                json!(calls
+                                    .iter()
+                                    .map(|call| {
+                                        json!({
+                                            "call_id": call.call_id,
+                                            "name": call.name,
+                                            "arguments": preview_for_log(&call.arguments, 600),
+                                        })
                                     })
-                                }).collect::<Vec<_>>()).to_string()
+                                    .collect::<Vec<_>>())
+                                .to_string()
                             );
                             return Ok(AgentStreamOutcome::ToolCalls {
                                 response_id: if response_id.trim().is_empty() {
@@ -1372,6 +1416,7 @@ async fn stream_via_chat_completions(
                                 } else {
                                     response_id
                                 },
+                                text: final_text,
                                 calls,
                             });
                         }
@@ -1696,7 +1741,10 @@ pub async fn chat_stream(
         )
             .into_response());
     }
-    let has_messages = payload.messages.iter().any(|message| !message.content.trim().is_empty());
+    let has_messages = payload
+        .messages
+        .iter()
+        .any(|message| !message.content.trim().is_empty());
     let has_tool_outputs = payload
         .tool_outputs
         .as_ref()
@@ -1730,8 +1778,8 @@ pub async fn chat_stream(
     let write_mode = normalize_write_mode(payload.write_mode.as_deref());
     let username = user.username.clone();
     let request_id = NEXT_AGENT_STREAM_LOG_ID.fetch_add(1, Ordering::Relaxed);
-    let responses_prompt = build_system_prompt(&mode, write_mode.as_deref(), &username, &ctx, true);
-    let fallback_prompt = build_system_prompt(&mode, write_mode.as_deref(), &username, &ctx, true);
+    let responses_prompt = build_system_prompt(&mode, &username, &ctx);
+    let fallback_prompt = build_system_prompt(&mode, &username, &ctx);
 
     tracing::info!(
         "agent stream request #{}: {}",
@@ -1763,7 +1811,16 @@ pub async fn chat_stream(
             }),
         )
         .await;
-        let outcome = match stream_via_responses(request_id, &client, &payload, &responses_prompt, &model, &tx).await {
+        let outcome = match stream_via_responses(
+            request_id,
+            &client,
+            &payload,
+            &responses_prompt,
+            &model,
+            &tx,
+        )
+        .await
+        {
             Ok(outcome) => {
                 let _ = send_json_event(
                     &tx,
@@ -1834,24 +1891,34 @@ pub async fn chat_stream(
                 .await;
                 let _ = send_json_event(&tx, "done", json!({})).await;
             }
-            Ok(AgentStreamOutcome::ToolCalls { response_id, calls }) => {
+            Ok(AgentStreamOutcome::ToolCalls {
+                response_id,
+                text,
+                calls,
+            }) => {
                 tracing::info!(
-                    "agent stream #{} tool.calls.required response_id={} calls={}",
+                    "agent stream #{} tool.calls.required response_id={} text={} calls={}",
                     request_id,
                     response_id,
-                    json!(calls.iter().map(|call| {
-                        json!({
-                            "call_id": call.call_id,
-                            "name": call.name,
-                            "arguments": preview_for_log(&call.arguments, 600),
+                    preview_for_log(&text, 1000),
+                    json!(calls
+                        .iter()
+                        .map(|call| {
+                            json!({
+                                "call_id": call.call_id,
+                                "name": call.name,
+                                "arguments": preview_for_log(&call.arguments, 600),
+                            })
                         })
-                    }).collect::<Vec<_>>()).to_string()
+                        .collect::<Vec<_>>())
+                    .to_string()
                 );
                 let _ = send_json_event(
                     &tx,
                     "tool.calls.required",
                     json!({
                         "response_id": response_id,
+                        "content": text,
                         "calls": calls,
                     }),
                 )
@@ -1859,11 +1926,7 @@ pub async fn chat_stream(
                 let _ = send_json_event(&tx, "done", json!({})).await;
             }
             Err(message) => {
-                tracing::warn!(
-                    "agent stream #{} failed message={}",
-                    request_id,
-                    message
-                );
+                tracing::warn!("agent stream #{} failed message={}", request_id, message);
                 let _ = send_json_event(&tx, "error", json!({ "error": message })).await;
             }
         }

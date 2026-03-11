@@ -130,6 +130,7 @@ import {
   type AgentWriterStartDetail,
 } from '@/utils/agentWriter'
 import {
+  type AgentEditorSaveResult,
   registerAgentEditorBridge,
   unregisterAgentEditorBridge,
 } from '@/utils/agentEditorBridge'
@@ -167,6 +168,7 @@ let writerShouldSave = false
 let writerMode: AgentWriterMode | null = null
 let writerRenderFrame: number | null = null
 let writerRenderedValue = ''
+let activeSavePromise: Promise<AgentEditorSaveResult> | null = null
 
 const wordCount = computed(() => {
   const text = draft.value
@@ -346,6 +348,7 @@ function applyWriterValue(value: string) {
   if (!editor) return
   draft.value = value
   isDirty.value = value !== originalContent
+  syncDocDraftCache(props.node.id, value, originalContent)
   editor.setValue(value, true)
   writerRenderedValue = value
   setAgentEditorSnapshot(props.node.id, value)
@@ -674,29 +677,53 @@ async function initEditor() {
   })
 }
 
-async function save() {
-  if (saving.value || !editor) return
-
-  saving.value = true
-  try {
-    const value = editor.getValue()
-    await docs.updateNode(props.node.id, { content: value })
-    draft.value = value
-    originalContent = value
-    isDirty.value = false
-    clearDocDraftContent(props.node.id)
-    ElMessage({
-      message: '已保存',
-      type: 'success',
-      duration: 1200,
-      offset: 60,
-    })
-  } catch {
-    ElMessage.error('保存失败')
-  } finally {
-    saving.value = false
-    syncAgentEditorBridge()
+async function save(): Promise<AgentEditorSaveResult> {
+  if (!editor) return { saved: false }
+  if (activeSavePromise) {
+    const result = await activeSavePromise
+    return { ...result, inFlight: true }
   }
+
+  const currentValue = editor.getValue()
+  if (currentValue === originalContent && !isDirty.value) {
+    return {
+      saved: false,
+      alreadySaved: true,
+      contentLength: currentValue.length,
+    }
+  }
+
+  activeSavePromise = (async () => {
+    saving.value = true
+    try {
+      const value = editor.getValue()
+      await docs.updateNode(props.node.id, { content: value })
+      draft.value = value
+      originalContent = value
+      isDirty.value = false
+      clearDocDraftContent(props.node.id)
+      ElMessage({
+        message: '已保存',
+        type: 'success',
+        duration: 1200,
+        offset: 60,
+      })
+      return {
+        saved: true,
+        alreadySaved: false,
+        contentLength: value.length,
+      }
+    } catch {
+      ElMessage.error('保存失败')
+      throw new Error('保存失败')
+    } finally {
+      saving.value = false
+      activeSavePromise = null
+      syncAgentEditorBridge()
+    }
+  })()
+
+  return await activeSavePromise
 }
 
 async function discardChanges() {

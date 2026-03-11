@@ -138,6 +138,7 @@
     <ShareDialog v-if="shareTarget" v-model="showShare" :node="shareTarget" />
     <AgentPanel
       :page-scope="agentPageScope"
+      :page-state="agentPageState"
       :project-id="projects.currentProject?.id ?? null"
       :project-name="projects.currentProject?.name || ''"
       :doc-id="docs.currentNode?.id ?? null"
@@ -146,6 +147,9 @@
       :doc-content="docs.currentNode?.content || ''"
       :project-catalog="agentProjectCatalog"
       :current-node-catalog="agentNodeCatalog"
+      :editor-available="agentEditorAvailable"
+      :editor-snapshot-source="agentEditorSnapshotSource"
+      :editor-unsaved-changes="agentEditorUnsavedChanges"
       @navigate="handleAgentNavigate"
     />
 
@@ -257,6 +261,15 @@ const agentPageScope = computed<'overview' | 'editor' | 'dir'>(() => {
   if (docs.currentNode?.node_type === 'doc') return 'editor'
   return 'dir'
 })
+const agentPageState = computed(() => (
+  showProjectOverview.value
+    ? 'project_overview'
+    : docs.currentNode?.node_type === 'doc'
+      ? 'document_editor'
+      : docs.currentNode?.node_type === 'dir'
+        ? 'directory_detail'
+        : 'project_workspace'
+))
 const agentProjectCatalog = computed(() =>
   projects.projects
     .slice(0, 24)
@@ -276,6 +289,18 @@ const agentNodeCatalog = computed(() => {
   }
   walk(docs.tree)
   return flat.join('、')
+})
+const agentEditorAvailable = computed(() => Boolean(getAgentEditorBridge()))
+const agentEditorSnapshotSource = computed(() => {
+  const currentDocId = docs.currentNode?.node_type === 'doc' ? docs.currentNode.id : null
+  const draftCacheContent = currentDocId !== null ? getDocDraftContent(currentDocId) : null
+  if (getAgentEditorBridge()) return 'editor_bridge'
+  if (draftCacheContent !== null) return 'draft_cache'
+  return 'saved_document'
+})
+const agentEditorUnsavedChanges = computed(() => {
+  const currentDocId = docs.currentNode?.node_type === 'doc' ? docs.currentNode.id : null
+  return currentDocId !== null ? hasDocDraft(currentDocId) : false
 })
 
 function normalizeAgentName(value: string) {
@@ -1204,16 +1229,42 @@ async function saveCurrentDocumentTool(rawArgs: Record<string, any>) {
     throw new Error('目标文档编辑器尚未完成初始化')
   }
 
-  await bridge.save()
+  const beforeSaveData = await request.get(`/docs/${target.entry.node.id}`) as { node?: DocNode }
+  const beforeSaveNode = beforeSaveData.node
+  const editorValue = bridge.getValue()
+  const savedValue = beforeSaveNode?.content || ''
+  if (!editorValue.trim() && !savedValue.trim()) {
+    return {
+      saved: false,
+      already_saved: true,
+      save_in_flight_joined: false,
+      target: serializeNodeEntry(target.entry),
+      content_length: savedValue.length,
+      updated_at: beforeSaveNode?.updated_at || null,
+      unsaved_changes_after_save: hasDocDraft(target.entry.node.id),
+      save_note: '当前文档与已保存内容都为空白内容，无需执行保存。',
+      state: await getCurrentPageState(),
+    }
+  }
+
+  const saveResult = await bridge.save()
 
   const data = await request.get(`/docs/${target.entry.node.id}`) as { node?: DocNode }
   const node = data.node
 
   return {
-    saved: true,
+    saved: saveResult.saved,
+    already_saved: saveResult.alreadySaved === true,
+    save_in_flight_joined: saveResult.inFlight === true,
     target: serializeNodeEntry(target.entry),
     content_length: (node?.content || '').length,
     updated_at: node?.updated_at || null,
+    unsaved_changes_after_save: hasDocDraft(target.entry.node.id),
+    save_note: saveResult.saved
+      ? '本次保存只提交调用 save_current_document 时刻之前已经写入编辑器的内容；若之后又有新的正文输出，需要重新判断是否再次保存。'
+      : saveResult.alreadySaved
+        ? '当前文档在这次调用时没有新的未保存修改，因此没有产生新的保存动作。'
+        : '这次调用没有产生新的保存动作，请结合当前未保存状态继续判断是否还需要保存。',
     state: await getCurrentPageState(),
   }
 }
@@ -1294,6 +1345,9 @@ async function deleteTreeNodesTool(rawArgs: Record<string, any>) {
   const nodePaths = Array.isArray(args.node_paths)
     ? args.node_paths.map((item: unknown) => normalizeToolString(item)).filter(Boolean)
     : []
+  const nodeNames = Array.isArray(args.node_names)
+    ? args.node_names.map((item: unknown) => normalizeToolString(item)).filter(Boolean)
+    : []
 
   const resolvedByPath = nodePaths
     .map((rawPath) => {
@@ -1312,9 +1366,18 @@ async function deleteTreeNodesTool(rawArgs: Record<string, any>) {
     .filter((item): item is NonNullable<typeof item> => Boolean(item))
     .map((item) => item.node.id)
 
-  const targetIds = Array.from(new Set([...nodeIds, ...resolvedByPath]))
+  const resolvedByName = nodeNames.flatMap((rawName) => {
+    const normalizedName = normalizeAgentName(rawName)
+    const matches = rows.filter((item) => normalizeAgentName(item.node.name) === normalizedName)
+    if (matches.length === 1) {
+      return [matches[0].node.id]
+    }
+    return []
+  })
+
+  const targetIds = Array.from(new Set([...nodeIds, ...resolvedByPath, ...resolvedByName]))
   if (!targetIds.length) {
-    throw new Error('delete_tree_nodes 至少需要 node_ids 或 node_paths')
+    throw new Error('delete_tree_nodes 至少需要 node_ids、node_paths 或可唯一匹配的 node_names')
   }
 
   const entries = targetIds
@@ -1381,10 +1444,11 @@ function getMarkdownEditorRuntimeTool() {
     usage_notes: [
       '如果只是读取当前文档内容，优先使用 read_document。',
       '如果需要读取未保存的编辑器实时内容，优先调用 read_editor_snapshot。',
-      '如果用户明确要求保存当前文档，优先调用 save_current_document。',
+      'save_current_document 用于提交已经完成的正文修改；如果用户语义是“先补充/改写再保存”，不要提前保存。',
+      '如果先保存后又继续输出新的正文，应把当前状态视为未保存，必要时再次调用 save_current_document。',
       '如果用户明确要求修改项目名称/描述/背景图，优先调用 update_project。',
       '如果用户明确要求重命名文档或目录，优先调用 update_tree_node_meta。',
-      'For document writes, locate/read with open_tree_node/read_document first, then emit one of: [[ACTION:append]], [[ACTION:replace]], [[ACTION:rewrite_section]], [[ACTION:replace_block]].',
+      'For document writes, use tools only as needed for locate/read/open, then emit one of: [[ACTION:append]], [[ACTION:replace]], [[ACTION:rewrite_section]], [[ACTION:replace_block]].',
       'rewrite_section payload format: [[TARGET]]Section Title[[/TARGET]][[CONTENT]]New Section Markdown[[/CONTENT]].',
       'replace_block payload format: [[FIND]]old snippet[[/FIND]][[REPLACE]]new snippet[[/REPLACE]].',
       '只有在需要细粒度 DOM/编辑器动作时再使用 execute_browser_javascript。',
