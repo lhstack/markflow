@@ -36,7 +36,7 @@ docker pull lhstack/markflow:latest
 
 - 镜像仅在发布 `v*` 版本标签时构建并推送
 - `latest` 始终指向最近一次正式版本发布
-- 同时也会发布对应版本标签，例如 `lhstack/markflow:v1.0.3`
+- 同时也会发布对应版本标签，例如 `lhstack/markflow:v1.0.4`
 
 运行容器：
 
@@ -151,6 +151,17 @@ docker logs --tail 200 markflow
 ```
 
 建议首次登录后立即修改管理员密码。
+
+## 1.0.4 版本更新
+
+以下内容基于 `v1.0.3..HEAD` 的实际 git 提交整理：
+
+- AI 文档写作链路升级为真实流式透传，前端可边生成边渲染
+- 新增文档协议动作 `append / replace / rewrite_section / replace_block`，支持局部重写与片段替换
+- 协议内容与聊天内容分流：标记内写入编辑器，标记外在聊天面板展示
+- 补齐函数调用能力：`read_editor_snapshot`、`save_current_document`、`update_tree_node_meta`、`update_project`
+- 新增本地文档草稿缓存并自动恢复，避免切换文档导致未保存内容丢失
+- 优化提示词与编辑决策逻辑，优先结合上下文判断是增量补充还是整体改写
 
 ## 1.0.3 版本更新
 
