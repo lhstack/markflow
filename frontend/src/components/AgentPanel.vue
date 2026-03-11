@@ -458,6 +458,8 @@ const FAB_WIDTH = 96
 const FAB_HEIGHT = 48
 const PANEL_WIDTH = 520
 const PANEL_HEIGHT = 720
+const MAX_TOOL_CALL_ROUNDS = 32
+const MAX_REPEAT_TOOL_SIGNATURE_HITS = 4
 
 const mounted = ref(false)
 const collapsed = ref(false)
@@ -1435,6 +1437,8 @@ async function sendMessage() {
   let pendingToolOutputs: AgentToolOutputPayload[] | null = null
   let streamAborted = false
   let previousResponseId: string | null = session.previousResponseId
+  let toolCallRounds = 0
+  const toolCallSignatureHits = new Map<string, number>()
   let rawAssistantContent = ''
   let completedAssistantContent = ''
   let wroteDocument = false
@@ -1914,6 +1918,23 @@ async function sendMessage() {
 
       if (!toolResponseId) {
         throw new Error('模型请求了工具调用，但缺少 response_id')
+      }
+
+      toolCallRounds += 1
+      if (toolCallRounds > MAX_TOOL_CALL_ROUNDS) {
+        throw new Error('工具调用轮次过多，已停止本次生成，请补充更明确的目标或范围')
+      }
+
+      const toolSignature = requiredToolCalls
+        .map((call) => `${call.name}:${(call.arguments || '').trim()}`)
+        .sort()
+        .join('||')
+      if (toolSignature) {
+        const hitCount = (toolCallSignatureHits.get(toolSignature) || 0) + 1
+        toolCallSignatureHits.set(toolSignature, hitCount)
+        if (!cycleReceivedDelta && hitCount > MAX_REPEAT_TOOL_SIGNATURE_HITS) {
+          throw new Error('检测到重复工具调用循环，已停止本次生成，请调整指令后重试')
+        }
       }
 
       pendingToolOutputs = await executeAgentToolCalls(requiredToolCalls)
