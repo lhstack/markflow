@@ -366,6 +366,7 @@ interface AgentSession {
   providerId: string | null
   model: string
   previousResponseId: string | null
+  pendingPlan: string | null
   lastSyncedMessageCount: number
   createdAt: number
   updatedAt: number
@@ -435,7 +436,7 @@ const REQUEST_RECENT_MESSAGE_COUNT = 8
 const REQUEST_SUMMARY_TRIGGER_CHARS = 6000
 const REQUEST_SUMMARY_MAX_ITEMS = 6
 const REQUEST_SUMMARY_ITEM_CHARS = 240
-const MAX_SEMANTIC_CONTINUATION_ROUNDS = 2
+const MAX_SEMANTIC_CONTINUATION_ROUNDS = 24
 
 const props = defineProps<{
   pageScope: PageScope
@@ -815,6 +816,7 @@ function normalizeSession(raw: any, provider: AgentProvider | null): AgentSessio
     providerId: typeof raw.providerId === 'string' && raw.providerId.trim() ? raw.providerId.trim() : provider?.id || null,
     model: typeof raw.model === 'string' ? raw.model.trim() : fallbackModelForProvider(provider),
     previousResponseId: typeof raw.previousResponseId === 'string' && raw.previousResponseId.trim() ? raw.previousResponseId.trim() : null,
+    pendingPlan: typeof raw.pendingPlan === 'string' && raw.pendingPlan.trim() ? raw.pendingPlan.trim() : null,
     lastSyncedMessageCount: Number.isInteger(raw.lastSyncedMessageCount) ? Math.max(0, raw.lastSyncedMessageCount) : 0,
     createdAt: Number.isFinite(raw.createdAt) ? raw.createdAt : Date.now(),
     updatedAt: Number.isFinite(raw.updatedAt) ? raw.updatedAt : Date.now(),
@@ -865,6 +867,7 @@ function ensureSession(): AgentSession {
     providerId: activeProvider.value?.id || null,
     model: fallbackModelForProvider(activeProvider.value),
     previousResponseId: null,
+    pendingPlan: null,
     lastSyncedMessageCount: 0,
     createdAt: Date.now(),
     updatedAt: Date.now(),
@@ -884,6 +887,7 @@ function createSession() {
     providerId: activeProvider.value?.id || null,
     model: fallbackModelForProvider(activeProvider.value),
     previousResponseId: null,
+    pendingPlan: null,
     lastSyncedMessageCount: 0,
     createdAt: Date.now(),
     updatedAt: Date.now(),
@@ -919,6 +923,7 @@ function clearCurrentSession() {
   session.messages = []
   session.title = '新会话'
   session.previousResponseId = null
+  session.pendingPlan = null
   session.lastSyncedMessageCount = 0
   session.updatedAt = Date.now()
   sessions.value = [...sessions.value]
@@ -974,6 +979,7 @@ function syncSessionWithActiveProvider(session: AgentSession | null) {
   if (session.providerId !== providerId) {
     session.providerId = providerId
     session.previousResponseId = null
+    session.pendingPlan = null
     session.lastSyncedMessageCount = 0
     changed = true
   }
@@ -1401,6 +1407,31 @@ function buildConversationMessages(messages: AgentMessage[], transientMessages: 
     : recentMessages
 }
 
+function extractPlanBlock(content: string) {
+  const match = content.match(/\[\[PLAN\]\]([\s\S]*?)\[\[\/PLAN\]\]/i)
+  return match?.[1]?.trim() || ''
+}
+
+function messageRequestsPlanConfirmation(content: string) {
+  return /请确认|一次性确认|确认：|是否同意|是否按此顺序执行|等待用户确认/.test(content)
+}
+
+function buildPendingPlanReplyMessage(plan: string, userReply: string) {
+  const normalizedPlan = plan.trim()
+  const normalizedReply = userReply.trim()
+  if (!normalizedPlan || !normalizedReply) return ''
+
+  return [
+    '执行账本提示：当前存在一份待确认的多行动计划，用户刚刚对这份计划作出了回复。',
+    '不要通过前端关键词硬判断；请你基于这份计划和用户最新回复做语义判断，先判定是“确认执行 / 拒绝 / 修改计划 / 仍有歧义”。',
+    '若用户语义上是在确认执行，则必须严格按该计划顺序推进，不得改名、改落点、改顺序，也不要为了后续步骤方便而提前处理后续目标。',
+    '若用户是在修改计划或补充限制，则先更新计划并再次明确确认点；未确认前不要执行。',
+    '待确认计划如下：',
+    normalizedPlan,
+    `用户最新回复：${normalizedReply}`,
+  ].join('\n')
+}
+
 function buildRequestBody(
   messages: AgentRequestMessage[],
   provider: AgentProvider,
@@ -1524,6 +1555,7 @@ async function sendMessage() {
 
   const session = ensureSession()
   syncSessionWithActiveProvider(session)
+  const existingMessages = [...session.messages]
 
   if (!session.model.trim()) {
     ElMessage.warning('请先在模型管理中配置可选模型')
@@ -1559,10 +1591,14 @@ async function sendMessage() {
   let pendingToolOutputs: AgentToolOutputPayload[] | null = null
   let streamAborted = false
   let previousResponseId: string | null = session.previousResponseId
+  const pendingPlan = session.pendingPlan?.trim() || ''
   const toolExecutionMemories: AgentMessage[] = []
   const transientToolExecutionMemories: AgentMessage[] = []
-  const userRequestedSave = /(保存|存档|持久化|提交|应用更改|apply|save)/i.test(text)
-  const compositeWriteThenSaveRequest = props.docType === 'doc' && userRequestedSave
+  const saveIntentPattern = /(保存|存档|持久化|提交|应用更改|apply|save)/i
+  const userRequestedSave = saveIntentPattern.test(text)
+  const planRequestedSave = saveIntentPattern.test(pendingPlan)
+  const taskRequestedSave = userRequestedSave || planRequestedSave
+  const compositeWriteThenSaveRequest = props.docType === 'doc' && taskRequestedSave
   let semanticContinuationRounds = 0
   let toolCallRounds = 0
   const toolCallSignatureHits = new Map<string, number>()
@@ -1611,17 +1647,21 @@ async function sendMessage() {
       const reportsWillContinue = /我将继续|继续补全|继续处理|随后切到|接着切到|接着处理|下一步处理|下一步将|随后继续|然后继续/.test(normalized)
       const promisedFollowupSave = /接下来为你保存|然后为你保存|随后保存|继续保存|准备保存文档|正在提交保存|正在保存/.test(normalized)
       const finalizedComplete = /已完成[:：]|当前无未保存修改|已按要求.*完成保存|并已保存文档/.test(normalized)
+      const saveClaimContradictedByState = taskRequestedSave && reportsSaved && editorStillUnsaved
       if (awaitingUserConfirmation) {
         return false
       }
       if (hasContinuationMarker) {
         return true
       }
+      if (saveClaimContradictedByState) {
+        return true
+      }
       if (finalizedComplete && !editorStillUnsaved && !reportsPending && !reportsWillContinue && !promisedFollowupSave) {
         return false
       }
       const needsSaveFollowup =
-        userRequestedSave
+        taskRequestedSave
         && !reportsSaved
         && (editorStillUnsaved || wroteDocument || reportsUnsaved || promisedFollowupSave)
       return needsSaveFollowup || promisedFollowupSave || reportsPending || reportsWillContinue
@@ -1632,7 +1672,7 @@ async function sendMessage() {
       pushExecutionLedgerMessage([
         '执行账本更新：上一段响应已结束，但根据当前账本与助手收尾，仍存在未完成步骤。',
         '继续推进剩余步骤，不要重复已经完成的正文输出或已完成工具。',
-        userRequestedSave
+        taskRequestedSave
           ? '若正文已完成且用户目标包含保存，请优先判断当前未保存状态是否需要通过 save_current_document 完成提交。'
           : '若只剩校验、导航或补充说明，请继续完成这些剩余动作。',
         `当前本地未保存状态：${currentDocumentHasUnsavedChanges() ? '未保存' : '已保存或无改动'}`,
@@ -1646,6 +1686,10 @@ async function sendMessage() {
         '请先判断后续动作是否依赖新的正文或状态变化已经发生；若依赖尚未满足，先完成正文协议输出，再决定是否需要保存或提交。',
         '不要把某个被用户提到的后续动作直接当成本轮第一步；若后续动作尚未真正完成，不要只口头承诺“接下来处理”，要继续完成或明确说明受阻原因。',
       ].join('\n'))
+    }
+
+    if (pendingPlan) {
+      pushExecutionLedgerMessage(buildPendingPlanReplyMessage(pendingPlan, text))
     }
 
     const appendAssistantContent = (content: string) => {
@@ -1674,6 +1718,8 @@ async function sendMessage() {
 
     buildVisibleAssistantContent = (source = rawAssistantContent, streamMode = false) => {
       let visible = source
+        .replace(/\[\[PLAN\]\]\s*/gi, '')
+        .replace(/\s*\[\[\/PLAN\]\]/gi, '')
         .replace(/\s*\[\[ACTION:(append|replace|rewrite_section|replace_block)\]\][\s\S]*?\[\[\/ACTION\]\]\s*/gi, '\n')
         .replace(/\s*\[\[CONTINUE\]\]\s*/gi, '\n')
 
@@ -2237,6 +2283,13 @@ async function sendMessage() {
       } catch (finalizeError) {
         console.error('agent stream finalize failed', finalizeError)
       }
+    }
+    const finalAssistantContent = completedAssistantContent || rawAssistantContent || assistantMessage.content || liveAssistantContent.value
+    const extractedPlan = extractPlanBlock(finalAssistantContent)
+    if (extractedPlan && messageRequestsPlanConfirmation(finalAssistantContent)) {
+      session.pendingPlan = extractedPlan
+    } else if (pendingPlan) {
+      session.pendingPlan = null
     }
     assistantMessage.content = liveAssistantContent.value
     assistantMessage.reasoning = liveAssistantReasoning.value
