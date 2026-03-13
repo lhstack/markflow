@@ -1201,7 +1201,8 @@ function normalizeSession(raw: any, provider: AgentProvider | null): AgentSessio
     ? raw.messages
       .map((message: any) => normalizeMessage(message))
       .filter((message: AgentMessage | null): message is AgentMessage => {
-        return Boolean(message) && !(message.role === 'system' && isInternalExecutionLedgerMessage(message.content))
+        if (!message) return false
+        return !(message.role === 'system' && isInternalExecutionLedgerMessage(message.content))
       })
     : []
 
@@ -2436,6 +2437,7 @@ async function sendMessage() {
     if (!detail || detail.docId !== props.docId) return
     lastWriterResult = detail
   }
+  const readLatestWriterResult = (): AgentWriterResultDetail | null => lastWriterResult
   window.addEventListener(AGENT_WRITER_RESULT_EVENT, handleWriterResult as EventListener)
 
   try {
@@ -2727,8 +2729,9 @@ async function sendMessage() {
       if (routeAction && routeAction !== 'chat' && props.docId && writerStarted) {
         lastWriterResult = null
         dispatchAgentWriterComplete({ docId: props.docId })
-        if (!lastWriterResult?.ok) {
-          throw new Error(lastWriterResult?.reason || '正文协议已输出，但编辑器没有成功应用本次写入。')
+        const writerResult = readLatestWriterResult()
+        if (!writerResult?.ok) {
+          throw new Error(writerResult?.reason || '正文协议已输出，但编辑器没有成功应用本次写入。')
         }
         wroteDocument = true
         executionState.documentWriteObserved = true
