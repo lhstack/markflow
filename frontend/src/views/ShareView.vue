@@ -74,7 +74,7 @@
           class="share-doc-content"
         >
           <article ref="previewArticleRef" class="share-paper">
-            <div class="share-paper-head">
+            <div v-if="showSharePaperHeading" class="share-paper-head">
               <div class="share-paper-kicker">SHARED NOTE</div>
               <h1>{{ content?.name || '未命名文档' }}</h1>
             </div>
@@ -180,8 +180,8 @@
           class="share-dir-content"
         >
           <article v-if="selectedDoc" ref="previewArticleRef" class="share-paper">
-            <div class="share-paper-head">
-              <div class="share-paper-kicker">SHARED NOTE</div>
+            <div class="share-paper-kicker">SHARED NOTE</div>
+            <div v-if="showSharePaperHeading" class="share-paper-head">
               <h1>{{ selectedDoc.name }}</h1>
             </div>
             <VditorPreview
@@ -804,6 +804,38 @@ const currentPreviewIdentity = computed(() => {
   if (state.value === 'dir') return `dir:${selectedDoc.value?.id ?? 'none'}`
   if (state.value === 'doc') return `doc:${content.value?.id ?? 'none'}`
   return 'none'
+})
+
+function normalizeHeadingCompareText(value: string) {
+  return value.trim().replace(/\s+/g, ' ').toLocaleLowerCase()
+}
+
+function extractFirstMarkdownH1(markdown: string) {
+  const lines = markdown.split(/\r?\n/)
+  for (const rawLine of lines) {
+    const line = rawLine.trim()
+    if (!line) continue
+    const match = line.match(/^#\s+(.+)$/)
+    if (match) {
+      return match[1].trim()
+    }
+    break
+  }
+  return ''
+}
+
+const currentPreviewDocName = computed(() => {
+  if (state.value === 'dir') return selectedDoc.value?.name || ''
+  if (state.value === 'doc') return content.value?.name || ''
+  return ''
+})
+
+const showSharePaperHeading = computed(() => {
+  const docName = normalizeHeadingCompareText(currentPreviewDocName.value)
+  if (!docName) return false
+  const firstHeading = normalizeHeadingCompareText(extractFirstMarkdownH1(currentPreviewMarkdown.value))
+  if (!firstHeading) return true
+  return docName !== firstHeading
 })
 
 watch(currentPreviewMarkdown, () => {
