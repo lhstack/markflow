@@ -17,6 +17,9 @@ export interface AgentToolRuntime {
   getCurrentPageState: () => Promise<unknown> | unknown
   listPageRoutes: () => Promise<unknown> | unknown
   navigateToPage: (args: Record<string, any>) => Promise<unknown>
+  updateProfile: (args: Record<string, any>) => Promise<unknown>
+  listUploads: (args: Record<string, any>) => Promise<unknown>
+  deleteUploads: (args: Record<string, any>) => Promise<unknown>
   listProjects: (args: Record<string, any>) => Promise<unknown>
   openProject: (args: Record<string, any>) => Promise<unknown>
   createProject: (args: Record<string, any>) => Promise<unknown>
@@ -169,6 +172,9 @@ function createMarkflowJsHelper(toolRuntime: AgentToolRuntime) {
     getCurrentPageState: () => toolRuntime.getCurrentPageState(),
     listPageRoutes: () => toolRuntime.listPageRoutes(),
     navigateToPage: (args: Record<string, any>) => toolRuntime.navigateToPage(args),
+    updateProfile: (args: Record<string, any>) => toolRuntime.updateProfile(args),
+    listUploads: (args: Record<string, any> = {}) => toolRuntime.listUploads(args),
+    deleteUploads: (args: Record<string, any>) => toolRuntime.deleteUploads(args),
     listProjects: (args: Record<string, any> = {}) => toolRuntime.listProjects(args),
     openProject: (args: Record<string, any>) => toolRuntime.openProject(args),
     createProject: (args: Record<string, any>) => toolRuntime.createProject(args),
@@ -251,6 +257,15 @@ export async function executeAgentToolCalls(calls: AgentToolCall[]): Promise<Age
         case 'navigate_to_page':
           output = await toolRuntime.navigateToPage(args)
           break
+        case 'update_profile':
+          output = await toolRuntime.updateProfile(args)
+          break
+        case 'list_uploads':
+          output = await toolRuntime.listUploads(args)
+          break
+        case 'delete_uploads':
+          output = await toolRuntime.deleteUploads(args)
+          break
         case 'list_projects':
           output = await toolRuntime.listProjects(args)
           break
@@ -317,6 +332,12 @@ export async function executeAgentToolCalls(calls: AgentToolCall[]): Promise<Age
         },
       })
     } catch (error: any) {
+      console.error('agent tool execution failed', {
+        callId: call.call_id,
+        tool: call.name,
+        arguments: call.arguments,
+        error,
+      })
       outputs.push({
         call_id: call.call_id,
         name: call.name,

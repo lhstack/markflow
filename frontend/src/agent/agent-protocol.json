@@ -1,0 +1,106 @@
+{
+  "defaultBaseUrl": "https://api.openai.com/v1",
+  "writeActions": [
+    {
+      "mode": "append",
+      "marker": "[[ACTION:append]]",
+      "payloadFormat": "直接输出要追加到文档末尾的 Markdown 内容。",
+      "example": "[[ACTION:append]]\n新增的一段 Markdown 内容\n[[/ACTION]]"
+    },
+    {
+      "mode": "replace",
+      "marker": "[[ACTION:replace]]",
+      "payloadFormat": "直接输出整篇替换后的完整 Markdown 正文。",
+      "example": "[[ACTION:replace]]\n# 新正文标题\n...\n[[/ACTION]]"
+    },
+    {
+      "mode": "rewrite_section",
+      "marker": "[[ACTION:rewrite_section]]",
+      "payloadFormat": "必须包含 [[TARGET]]章节标题[[/TARGET]] 和 [[CONTENT]]整节替换内容[[/CONTENT]]。",
+      "example": "[[ACTION:rewrite_section]]\n[[TARGET]]## 任务团队[[/TARGET]]\n[[CONTENT]]## 任务团队\n新的章节内容\n[[/CONTENT]]\n[[/ACTION]]"
+    },
+    {
+      "mode": "replace_block",
+      "marker": "[[ACTION:replace_block]]",
+      "payloadFormat": "必须包含 [[FIND]]原文片段[[/FIND]] 和 [[REPLACE]]替换片段[[/REPLACE]]，两者都不能省略。",
+      "example": "[[ACTION:replace_block]]\n[[FIND]]旧片段[[/FIND]]\n[[REPLACE]]新片段[[/REPLACE]]\n[[/ACTION]]"
+    }
+  ],
+  "control": {
+    "openMarker": "[[CONTROL]]",
+    "closeMarker": "[[/CONTROL]]",
+    "phases": [
+      "await_user_confirmation",
+      "auto_continue",
+      "needs_save",
+      "completed",
+      "in_progress"
+    ]
+  },
+  "taskAnalysis": {
+    "modes": ["chat", "plan"],
+    "complexities": ["low", "medium", "high"],
+    "intents": ["conversation", "execution"],
+    "writeScopes": ["partial", "full"]
+  },
+  "routes": [
+    {
+      "route": "home.overview",
+      "aliases": ["home.overview", "home", "overview"],
+      "path": "/",
+      "description": "项目概览页，展示当前用户的所有项目卡片。",
+      "params": []
+    },
+    {
+      "route": "home.project",
+      "aliases": ["home.project", "project"],
+      "path": "/?project={project_id}",
+      "description": "进入指定项目并展示左侧文档树，主区域停留在项目工作区。",
+      "params": ["project_id 或 project_name"]
+    },
+    {
+      "route": "home.doc",
+      "aliases": ["home.doc", "doc", "node"],
+      "path": "/?project={project_id}&doc={node_id}",
+      "description": "进入指定项目并打开某个 Markdown 文档编辑页。",
+      "params": ["project_id 或 project_name", "node_id 或 node_path 或 node_name"],
+      "nodeType": "doc"
+    },
+    {
+      "route": "home.dir",
+      "aliases": ["home.dir", "dir"],
+      "path": "/?project={project_id}&doc={node_id}",
+      "description": "进入指定项目并打开某个目录详情页。",
+      "params": ["project_id 或 project_name", "node_id 或 node_path 或 node_name"],
+      "nodeType": "dir"
+    },
+    {
+      "route": "login",
+      "aliases": ["login"],
+      "path": "/login",
+      "description": "登录页。",
+      "params": []
+    },
+    {
+      "route": "register",
+      "aliases": ["register"],
+      "path": "/register",
+      "description": "注册页。",
+      "params": []
+    },
+    {
+      "route": "login.2fa",
+      "aliases": ["login.2fa"],
+      "path": "/login/2fa",
+      "description": "两步验证页。",
+      "params": []
+    },
+    {
+      "route": "share",
+      "aliases": ["share"],
+      "path": "/s/{token}",
+      "description": "分享文档页。",
+      "params": ["share_token"]
+    }
+  ]
+}

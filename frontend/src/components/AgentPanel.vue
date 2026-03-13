@@ -77,6 +77,83 @@
 
       <section class="agent-main">
         <div ref="messagesRef" class="agent-messages">
+          <section v-if="currentSessionTaskAnalysis" class="agent-runtime-card">
+            <div class="agent-plan-card-header">
+              <span class="agent-plan-card-title">任务分析</span>
+              <span class="agent-plan-card-status" :class="{ active: currentSessionTaskAnalysis.mode === 'plan' }">
+                {{ currentSessionTaskAnalysis.mode === 'plan' ? 'Plan Mode' : 'Chat Mode' }}
+              </span>
+            </div>
+            <div class="agent-runtime-grid">
+              <span>意图：{{ currentSessionTaskAnalysis.intent || 'unknown' }}</span>
+              <span>复杂度：{{ currentSessionTaskAnalysis.complexity || 'unknown' }}</span>
+              <span>需要工具：{{ currentSessionTaskAnalysis.requiresTools ? '是' : '否' }}</span>
+              <span>需要确认：{{ currentSessionTaskAnalysis.requiresUserConfirmation ? '是' : '否' }}</span>
+            </div>
+            <pre v-if="currentSessionTaskAnalysis.deliverable" class="agent-plan-card-content">{{ currentSessionTaskAnalysis.deliverable }}</pre>
+          </section>
+
+          <section v-if="currentSessionRuntimePlan" class="agent-plan-card">
+            <div class="agent-plan-card-header">
+              <span class="agent-plan-card-title">结构化计划</span>
+              <span class="agent-plan-card-status" :class="{ active: currentSessionRuntimePlan.status === 'running' }">
+                {{ currentSessionRuntimePlan.status }}
+              </span>
+            </div>
+            <pre class="agent-plan-card-content">{{ currentSessionRuntimePlan.goal }}</pre>
+            <div class="agent-plan-steps">
+              <div
+                v-for="step in currentSessionRuntimePlan.steps"
+                :key="step.id"
+                class="agent-plan-step"
+                :class="step.status"
+              >
+                <div class="agent-plan-step-title">{{ step.title }}</div>
+                <div class="agent-plan-step-meta">{{ step.kind }} · {{ step.status }}</div>
+              </div>
+            </div>
+          </section>
+
+          <section v-if="currentSessionLastPlan" class="agent-plan-card">
+            <div class="agent-plan-card-header">
+              <span class="agent-plan-card-title">{{ currentSession?.pendingPlan ? '待确认计划' : '最近执行计划' }}</span>
+              <span class="agent-plan-card-status" :class="{ active: Boolean(currentSession?.pendingPlan) }">
+                {{ currentSession?.pendingPlan ? '进行中' : '已保留' }}
+              </span>
+            </div>
+            <pre class="agent-plan-card-content">{{ currentSessionLastPlan }}</pre>
+          </section>
+
+          <section v-if="currentSessionToolEvents.length" class="agent-runtime-card">
+            <div class="agent-plan-card-header">
+              <span class="agent-plan-card-title">工具状态</span>
+              <span class="agent-plan-card-status">{{ currentSessionToolEvents.length }}</span>
+            </div>
+            <div class="agent-tool-events">
+              <div v-for="event in currentSessionToolEvents.slice(-8)" :key="event.id" class="agent-tool-event">
+                <span class="agent-tool-event-name">{{ event.tool }}</span>
+                <span class="agent-tool-event-status">{{ event.status }}</span>
+                <span class="agent-tool-event-summary">{{ event.summary }}</span>
+              </div>
+            </div>
+          </section>
+
+          <section v-if="currentSessionArtifacts.length" class="agent-runtime-card">
+            <div class="agent-plan-card-header">
+              <span class="agent-plan-card-title">Artifacts</span>
+              <span class="agent-plan-card-status" :class="{ active: currentSessionArtifacts.some((artifact) => artifact.status === 'drafting') }">
+                {{ currentSessionArtifacts.length }}
+              </span>
+            </div>
+            <article v-for="artifact in currentSessionArtifacts.slice(-2)" :key="artifact.id" class="agent-artifact-card">
+              <div class="agent-artifact-header">
+                <span class="agent-artifact-title">{{ artifact.title }}</span>
+                <span class="agent-artifact-status">{{ artifact.status }}</span>
+              </div>
+              <pre class="agent-plan-card-content">{{ artifact.content }}</pre>
+            </article>
+          </section>
+
           <template v-if="visibleMessages.length">
             <article
               v-for="message in visibleMessages"
@@ -156,6 +233,20 @@
                         :label="model"
                         :value="model"
                       />
+                    </el-select>
+                  </div>
+
+                  <div class="agent-select-row">
+                    <span class="agent-control-label">模式：</span>
+                    <el-select
+                      v-model="currentSessionTransportMode"
+                      class="agent-model-select"
+                      size="small"
+                      :disabled="!currentSession"
+                    >
+                      <el-option label="自动" value="auto" />
+                      <el-option label="Responses" value="responses" />
+                      <el-option label="Chat" value="chat" />
                     </el-select>
                   </div>
                 </div>
@@ -326,16 +417,37 @@ import {
   type AgentToolOutputPayload,
 } from '@/utils/agentTools'
 import {
+  AGENT_WRITER_RESULT_EVENT,
   dispatchAgentWriterChunk,
   dispatchAgentWriterComplete,
   dispatchAgentWriterStart,
   getAgentEditorSnapshot,
   type AgentWriterMode,
+  type AgentWriterResultDetail,
 } from '@/utils/agentWriter'
 import { getAgentEditorBridge } from '@/utils/agentEditorBridge'
 import { hasDocDraft } from '@/utils/docDraftCache'
+import {
+  AGENT_ACTION_CLOSE_MARKER,
+  AGENT_TASK_ANALYSIS_COMPLEXITIES,
+  AGENT_TASK_ANALYSIS_INTENTS,
+  AGENT_TASK_ANALYSIS_MODES,
+  AGENT_TASK_ANALYSIS_WRITE_SCOPES,
+  AGENT_WRITE_ACTION_MODES,
+  AGENT_WRITE_ACTION_OPEN_MARKERS,
+  DEFAULT_AGENT_BASE_URL,
+  controlNeedsSave,
+  controlRequestsAutoContinuation,
+  controlRequestsPlanConfirmation,
+  extractAgentControlBlock,
+  getAgentControlBlockRegex,
+  resolveAgentEditorSnapshotSource,
+  resolveAgentWriteMode,
+  type AgentControlBlock,
+  type AgentPageScope,
+} from '@/agent/protocol'
 
-type PageScope = 'overview' | 'editor' | 'dir'
+type PageScope = AgentPageScope
 type DocType = 'doc' | 'dir' | null
 type SessionRole = 'user' | 'assistant' | 'system'
 type RequestRole = SessionRole
@@ -359,14 +471,124 @@ interface AgentRequestMessage {
   content: string
 }
 
+interface AgentRuntimePlanStep {
+  id: string
+  title: string
+  kind: string
+  description: string
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'blocked' | string
+  toolHints: string[]
+  requiresConfirmation: boolean
+}
+
+interface AgentRuntimePlan {
+  id: string
+  goal: string
+  summary: string | null
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'blocked' | string
+  steps: AgentRuntimePlanStep[]
+  createdAt: string | null
+  updatedAt: string | null
+}
+
+interface AgentTaskAnalysis {
+  intent: string
+  complexity: string
+  mode: 'chat' | 'plan' | string
+  requiresTools: boolean
+  requiresUserConfirmation: boolean
+  writeScope: 'partial' | 'full' | string | null
+  preferredWriteAction: AgentWriterMode | string | null
+  deliverable: string | null
+}
+
+interface AgentSessionMemory {
+  summary: string | null
+  activeUserGoals: string[]
+  completedFacts: string[]
+  openLoops: string[]
+  updatedAt: string | null
+}
+
+interface AgentArtifact {
+  id: string
+  type: 'markdown_doc' | 'folder_plan' | 'project_outline' | string
+  title: string
+  status: 'drafting' | 'ready' | 'applied' | 'failed' | string
+  content: string
+  relatedDocId: number | null
+}
+
+interface AgentToolEvent {
+  id: string
+  tool: string
+  status: 'requested' | 'running' | 'completed' | 'failed' | 'noop' | string
+  summary: string
+}
+
+interface AgentExecutionToolCallSummary {
+  name: string
+  arguments: string | null
+  output: string | null
+  ok: boolean | null
+  outcome: 'success' | 'noop' | 'error' | 'unknown'
+}
+
+interface AgentExecutionState {
+  pendingPlan: string | null
+  pendingPlanUserReply: string | null
+  compositeWriteThenSave: boolean
+  semanticContinuation: boolean
+  semanticContinuationRound: number
+  previousAssistantSummary: string | null
+  taskKind: string | null
+  editIntent: string | null
+  editStage: string | null
+  saveRequested: boolean
+  writeCompleted: boolean
+  planStepIndex: number | null
+  planTotalSteps: number | null
+  planCurrentStep: string | null
+  planCompletedSteps: string[]
+  documentWriteObserved: boolean
+  saveAttemptWithoutDocumentChange: boolean
+  recentToolCalls: AgentExecutionToolCallSummary[]
+}
+
+interface AgentExecutionMemory {
+  plan: string | null
+  assistantSummary: string | null
+  controlPhase: string | null
+  taskKind: string | null
+  editIntent: string | null
+  editStage: string | null
+  saveRequested: boolean
+  writeCompleted: boolean
+  planStepIndex: number | null
+  planTotalSteps: number | null
+  planCurrentStep: string | null
+  planCompletedSteps: string[]
+  documentWriteObserved: boolean
+  saveAttemptWithoutDocumentChange: boolean
+  recentToolCalls: AgentExecutionToolCallSummary[]
+}
+
 interface AgentSession {
   id: string
   title: string
   messages: AgentMessage[]
+  taskAnalysis: AgentTaskAnalysis | null
+  runtimePlan: AgentRuntimePlan | null
+  artifacts: AgentArtifact[]
+  toolEvents: AgentToolEvent[]
   providerId: string | null
   model: string
+  transportMode: 'auto' | 'responses' | 'chat'
   previousResponseId: string | null
   pendingPlan: string | null
+  lastPlan: string | null
+  lastExecutionMemory: AgentExecutionMemory | null
+  sessionMemory: AgentSessionMemory | null
   lastSyncedMessageCount: number
   createdAt: number
   updatedAt: number
@@ -437,6 +659,12 @@ const REQUEST_SUMMARY_TRIGGER_CHARS = 6000
 const REQUEST_SUMMARY_MAX_ITEMS = 6
 const REQUEST_SUMMARY_ITEM_CHARS = 240
 const MAX_SEMANTIC_CONTINUATION_ROUNDS = 24
+const ACTION_MODE_PATTERN = AGENT_WRITE_ACTION_MODES.join('|')
+const ACTION_BLOCK_REGEX = new RegExp(String.raw`\s*\[\[ACTION:(${ACTION_MODE_PATTERN})\]\][\s\S]*?\[\[/ACTION\]\]\s*`, 'gi')
+const ACTION_OPEN_REGEX = new RegExp(String.raw`\[\[ACTION:(${ACTION_MODE_PATTERN})\]\]`, 'i')
+const ACTION_WRAPPED_REGEX = new RegExp(String.raw`^\s*\[\[ACTION:(${ACTION_MODE_PATTERN})\]\]\s*([\s\S]*?)\s*\[\[/ACTION\]\]\s*$`, 'i')
+const CONTROL_BLOCK_REGEX = getAgentControlBlockRegex('gi')
+
 
 const props = defineProps<{
   pageScope: PageScope
@@ -458,7 +686,7 @@ const emit = defineEmits<{
   navigate: [target: AgentRouteTarget]
 }>()
 
-const DEFAULT_BASE_URL = 'https://api.openai.com/v1'
+const DEFAULT_BASE_URL = DEFAULT_AGENT_BASE_URL
 const PANEL_STATE_KEY = 'markflow.agent.panel.state'
 const SESSIONS_KEY = 'markflow.agent.sessions'
 const VIEWPORT_MARGIN = 24
@@ -489,7 +717,7 @@ const providers = ref<AgentProvider[]>([])
 const streamingAssistantId = ref('')
 const liveAssistantContent = ref('')
 const liveAssistantReasoning = ref('')
-const agentTransportMode = ref<'responses' | 'chat_fallback' | ''>('')
+const agentTransportMode = ref<'responses' | 'chat_fallback' | 'chat' | ''>('')
 const messagesRef = ref<HTMLElement | null>(null)
 const customModelInput = ref('')
 const modelSearchQuery = ref('')
@@ -519,6 +747,11 @@ const currentSession = computed(() => sessions.value.find((session) => session.i
 const visibleMessages = computed(() =>
   (currentSession.value?.messages || []).filter((message) => message.role === 'user' || message.role === 'assistant'),
 )
+const currentSessionLastPlan = computed(() => currentSession.value?.lastPlan?.trim() || '')
+const currentSessionTaskAnalysis = computed(() => currentSession.value?.taskAnalysis || null)
+const currentSessionRuntimePlan = computed(() => currentSession.value?.runtimePlan || null)
+const currentSessionArtifacts = computed(() => currentSession.value?.artifacts || [])
+const currentSessionToolEvents = computed(() => currentSession.value?.toolEvents || [])
 const activeProvider = computed(() => providers.value.find((provider) => provider.id === activeProviderId.value) || null)
 const selectedProviderId = computed({
   get: () => activeProviderId.value,
@@ -541,6 +774,20 @@ const currentSessionModel = computed({
       session.previousResponseId = null
       session.lastSyncedMessageCount = 0
     }
+    sessions.value = [...sessions.value]
+    persistSessions()
+  },
+})
+const currentSessionTransportMode = computed({
+  get: () => currentSession.value?.transportMode || 'auto',
+  set: (value: 'auto' | 'responses' | 'chat') => {
+    const session = currentSession.value
+    if (!session) return
+    const normalized = value === 'responses' || value === 'chat' ? value : 'auto'
+    if (session.transportMode === normalized) return
+    session.transportMode = normalized
+    session.previousResponseId = null
+    session.lastSyncedMessageCount = 0
     sessions.value = [...sessions.value]
     persistSessions()
   },
@@ -801,22 +1048,221 @@ function normalizeMessage(raw: any): AgentMessage | null {
   }
 }
 
+function normalizeTaskAnalysis(raw: any): AgentTaskAnalysis | null {
+  if (!raw || typeof raw !== 'object') return null
+  const intent = typeof raw.intent === 'string' && raw.intent.trim()
+    ? raw.intent.trim()
+    : AGENT_TASK_ANALYSIS_INTENTS[0] || ''
+  const complexity = typeof raw.complexity === 'string' && AGENT_TASK_ANALYSIS_COMPLEXITIES.includes(raw.complexity.trim() as any)
+    ? raw.complexity.trim()
+    : AGENT_TASK_ANALYSIS_COMPLEXITIES[0] || ''
+  const mode = typeof raw.mode === 'string' && AGENT_TASK_ANALYSIS_MODES.includes(raw.mode.trim() as any)
+    ? raw.mode.trim()
+    : AGENT_TASK_ANALYSIS_MODES[0] || 'chat'
+  const writeScope = typeof raw.writeScope === 'string' && AGENT_TASK_ANALYSIS_WRITE_SCOPES.includes(raw.writeScope.trim() as any)
+    ? raw.writeScope.trim()
+    : typeof raw.write_scope === 'string' && AGENT_TASK_ANALYSIS_WRITE_SCOPES.includes(raw.write_scope.trim() as any)
+      ? raw.write_scope.trim()
+      : null
+  return {
+    intent,
+    complexity,
+    mode,
+    requiresTools: raw.requiresTools === true || raw.requires_tools === true,
+    requiresUserConfirmation: raw.requiresUserConfirmation === true || raw.requires_user_confirmation === true,
+    writeScope,
+    preferredWriteAction: typeof raw.preferredWriteAction === 'string' && raw.preferredWriteAction.trim()
+      ? raw.preferredWriteAction.trim()
+      : typeof raw.preferred_write_action === 'string' && raw.preferred_write_action.trim()
+        ? raw.preferred_write_action.trim()
+        : null,
+    deliverable: typeof raw.deliverable === 'string' && raw.deliverable.trim() ? raw.deliverable.trim() : null,
+  }
+}
+
+function normalizeSessionMemory(raw: any): AgentSessionMemory | null {
+  if (!raw || typeof raw !== 'object') return null
+  const normalizeItems = (value: unknown) => Array.isArray(value)
+    ? value
+      .filter((item: unknown): item is string => typeof item === 'string' && Boolean(item.trim()))
+      .map((item: string) => item.trim())
+    : []
+  const summary = typeof raw.summary === 'string' && raw.summary.trim() ? raw.summary.trim() : null
+  const activeUserGoals = normalizeItems(raw.activeUserGoals ?? raw.active_user_goals)
+  const completedFacts = normalizeItems(raw.completedFacts ?? raw.completed_facts)
+  const openLoops = normalizeItems(raw.openLoops ?? raw.open_loops)
+  if (!summary && !activeUserGoals.length && !completedFacts.length && !openLoops.length) return null
+  return {
+    summary,
+    activeUserGoals,
+    completedFacts,
+    openLoops,
+    updatedAt: typeof raw.updatedAt === 'string'
+      ? raw.updatedAt
+      : typeof raw.updated_at === 'string'
+        ? raw.updated_at
+        : null,
+  }
+}
+
+function normalizeRuntimePlanStep(raw: any, fallbackIndex = 0): AgentRuntimePlanStep | null {
+  if (!raw || typeof raw !== 'object') return null
+  const title = typeof raw.title === 'string' && raw.title.trim() ? raw.title.trim() : ''
+  if (!title) return null
+  return {
+    id: typeof raw.id === 'string' && raw.id.trim() ? raw.id.trim() : `step_${fallbackIndex + 1}`,
+    title,
+    kind: typeof raw.kind === 'string' && raw.kind.trim() ? raw.kind.trim() : 'edit',
+    description: typeof raw.description === 'string' ? raw.description.trim() : title,
+    status: typeof raw.status === 'string' && raw.status.trim() ? raw.status.trim() : 'pending',
+    toolHints: Array.isArray(raw.toolHints ?? raw.tool_hints)
+      ? (raw.toolHints ?? raw.tool_hints)
+        .filter((item: unknown): item is string => typeof item === 'string' && Boolean(item.trim()))
+        .map((item: string) => item.trim())
+      : [],
+    requiresConfirmation: raw.requiresConfirmation === true || raw.requires_confirmation === true,
+  }
+}
+
+function normalizeRuntimePlan(raw: any): AgentRuntimePlan | null {
+  if (!raw || typeof raw !== 'object') return null
+  const goal = typeof raw.goal === 'string' && raw.goal.trim() ? raw.goal.trim() : ''
+  const steps = Array.isArray(raw.steps)
+    ? raw.steps
+      .map((step: any, index: number) => normalizeRuntimePlanStep(step, index))
+      .filter((step: AgentRuntimePlanStep | null): step is AgentRuntimePlanStep => Boolean(step))
+    : []
+  if (!goal && !steps.length) return null
+  return {
+    id: typeof raw.id === 'string' && raw.id.trim() ? raw.id.trim() : genId(),
+    goal: goal || '执行计划',
+    summary: typeof raw.summary === 'string' && raw.summary.trim() ? raw.summary.trim() : null,
+    status: typeof raw.status === 'string' && raw.status.trim() ? raw.status.trim() : 'pending',
+    steps,
+    createdAt: typeof raw.createdAt === 'string' ? raw.createdAt : typeof raw.created_at === 'string' ? raw.created_at : null,
+    updatedAt: typeof raw.updatedAt === 'string' ? raw.updatedAt : typeof raw.updated_at === 'string' ? raw.updated_at : null,
+  }
+}
+
+function normalizeArtifact(raw: any): AgentArtifact | null {
+  if (!raw || typeof raw !== 'object') return null
+  const title = typeof raw.title === 'string' && raw.title.trim() ? raw.title.trim() : ''
+  if (!title) return null
+  return {
+    id: typeof raw.id === 'string' && raw.id.trim() ? raw.id.trim() : genId(),
+    type: typeof raw.type === 'string' && raw.type.trim() ? raw.type.trim() : 'markdown_doc',
+    title,
+    status: typeof raw.status === 'string' && raw.status.trim() ? raw.status.trim() : 'drafting',
+    content: typeof raw.content === 'string' ? raw.content : '',
+    relatedDocId: Number.isFinite(raw.relatedDocId) ? Number(raw.relatedDocId) : Number.isFinite(raw.related_doc_id) ? Number(raw.related_doc_id) : null,
+  }
+}
+
+function normalizeToolEvent(raw: any): AgentToolEvent | null {
+  if (!raw || typeof raw !== 'object') return null
+  const tool = typeof raw.tool === 'string' && raw.tool.trim() ? raw.tool.trim() : ''
+  const summary = typeof raw.summary === 'string' && raw.summary.trim() ? raw.summary.trim() : ''
+  if (!tool && !summary) return null
+  return {
+    id: typeof raw.id === 'string' && raw.id.trim() ? raw.id.trim() : genId(),
+    tool: tool || 'tool',
+    status: typeof raw.status === 'string' && raw.status.trim() ? raw.status.trim() : 'completed',
+    summary: summary || `已执行工具 ${tool}`,
+  }
+}
+
+function buildRuntimePlanFromText(planText: string, goal: string) {
+  const steps = parsePlanSteps(planText).map((title, index) => ({
+    id: `step_${index + 1}`,
+    title,
+    kind: 'edit',
+    description: title,
+    status: 'pending',
+    toolHints: [],
+    requiresConfirmation: false,
+  }))
+
+  if (!steps.length) return null
+  const now = new Date().toISOString()
+  return {
+    id: genId(),
+    goal: goal.trim() || '执行计划',
+    summary: '由模型输出的正式执行计划',
+    status: 'pending',
+    steps,
+    createdAt: now,
+    updatedAt: now,
+  } satisfies AgentRuntimePlan
+}
+
 function normalizeSession(raw: any, provider: AgentProvider | null): AgentSession | null {
   if (!raw || typeof raw !== 'object') return null
   const messages = Array.isArray(raw.messages)
     ? raw.messages
       .map((message: any) => normalizeMessage(message))
-      .filter((message: AgentMessage | null): message is AgentMessage => Boolean(message))
+      .filter((message: AgentMessage | null): message is AgentMessage => {
+        return Boolean(message) && !(message.role === 'system' && isInternalExecutionLedgerMessage(message.content))
+      })
     : []
 
   return {
     id: typeof raw.id === 'string' && raw.id.trim() ? raw.id.trim() : genId(),
     title: typeof raw.title === 'string' && raw.title.trim() ? raw.title.trim() : '新会话',
     messages,
+    taskAnalysis: normalizeTaskAnalysis(raw.taskAnalysis ?? raw.task_analysis),
+    runtimePlan: normalizeRuntimePlan(raw.runtimePlan ?? raw.runtime_plan),
+    artifacts: Array.isArray(raw.artifacts)
+      ? raw.artifacts
+        .map((artifact: any) => normalizeArtifact(artifact))
+        .filter((artifact: AgentArtifact | null): artifact is AgentArtifact => Boolean(artifact))
+      : [],
+    toolEvents: Array.isArray(raw.toolEvents ?? raw.tool_events)
+      ? (raw.toolEvents ?? raw.tool_events)
+        .map((event: any) => normalizeToolEvent(event))
+        .filter((event: AgentToolEvent | null): event is AgentToolEvent => Boolean(event))
+      : [],
     providerId: typeof raw.providerId === 'string' && raw.providerId.trim() ? raw.providerId.trim() : provider?.id || null,
     model: typeof raw.model === 'string' ? raw.model.trim() : fallbackModelForProvider(provider),
+    transportMode: raw.transportMode === 'responses' || raw.transportMode === 'chat' ? raw.transportMode : 'auto',
     previousResponseId: typeof raw.previousResponseId === 'string' && raw.previousResponseId.trim() ? raw.previousResponseId.trim() : null,
     pendingPlan: typeof raw.pendingPlan === 'string' && raw.pendingPlan.trim() ? raw.pendingPlan.trim() : null,
+    lastPlan: typeof raw.lastPlan === 'string' && raw.lastPlan.trim() ? raw.lastPlan.trim() : null,
+    lastExecutionMemory: raw.lastExecutionMemory && typeof raw.lastExecutionMemory === 'object'
+        ? {
+            plan: typeof raw.lastExecutionMemory.plan === 'string' && raw.lastExecutionMemory.plan.trim() ? raw.lastExecutionMemory.plan.trim() : null,
+            assistantSummary: typeof raw.lastExecutionMemory.assistantSummary === 'string' && raw.lastExecutionMemory.assistantSummary.trim() ? raw.lastExecutionMemory.assistantSummary.trim() : null,
+            controlPhase: typeof raw.lastExecutionMemory.controlPhase === 'string' && raw.lastExecutionMemory.controlPhase.trim() ? raw.lastExecutionMemory.controlPhase.trim() : null,
+            taskKind: typeof raw.lastExecutionMemory.taskKind === 'string' && raw.lastExecutionMemory.taskKind.trim() ? raw.lastExecutionMemory.taskKind.trim() : null,
+            editIntent: typeof raw.lastExecutionMemory.editIntent === 'string' && raw.lastExecutionMemory.editIntent.trim() ? raw.lastExecutionMemory.editIntent.trim() : null,
+            editStage: typeof raw.lastExecutionMemory.editStage === 'string' && raw.lastExecutionMemory.editStage.trim() ? raw.lastExecutionMemory.editStage.trim() : null,
+            saveRequested: raw.lastExecutionMemory.saveRequested === true,
+            writeCompleted: raw.lastExecutionMemory.writeCompleted === true,
+            planStepIndex: Number.isFinite(raw.lastExecutionMemory.planStepIndex) ? Number(raw.lastExecutionMemory.planStepIndex) : null,
+            planTotalSteps: Number.isFinite(raw.lastExecutionMemory.planTotalSteps) ? Number(raw.lastExecutionMemory.planTotalSteps) : null,
+            planCurrentStep: typeof raw.lastExecutionMemory.planCurrentStep === 'string' && raw.lastExecutionMemory.planCurrentStep.trim() ? raw.lastExecutionMemory.planCurrentStep.trim() : null,
+            planCompletedSteps: Array.isArray(raw.lastExecutionMemory.planCompletedSteps)
+              ? raw.lastExecutionMemory.planCompletedSteps
+                .filter((item: unknown): item is string => typeof item === 'string' && Boolean(item.trim()))
+                .map((item: string) => item.trim())
+              : [],
+            documentWriteObserved: raw.lastExecutionMemory.documentWriteObserved === true,
+            saveAttemptWithoutDocumentChange: raw.lastExecutionMemory.saveAttemptWithoutDocumentChange === true,
+            recentToolCalls: Array.isArray(raw.lastExecutionMemory.recentToolCalls)
+            ? raw.lastExecutionMemory.recentToolCalls
+              .map((call: any) => ({
+                name: typeof call?.name === 'string' ? call.name : '',
+                arguments: typeof call?.arguments === 'string' && call.arguments.trim() ? call.arguments.trim() : null,
+                output: typeof call?.output === 'string' && call.output.trim() ? call.output.trim() : null,
+                ok: typeof call?.ok === 'boolean' ? call.ok : null,
+                outcome: call?.outcome === 'success' || call?.outcome === 'noop' || call?.outcome === 'error'
+                  ? call.outcome
+                  : 'unknown',
+              }))
+              .filter((call: AgentExecutionToolCallSummary) => Boolean(call.name.trim()))
+            : [],
+        }
+      : null,
+    sessionMemory: normalizeSessionMemory(raw.sessionMemory ?? raw.session_memory),
     lastSyncedMessageCount: Number.isInteger(raw.lastSyncedMessageCount) ? Math.max(0, raw.lastSyncedMessageCount) : 0,
     createdAt: Number.isFinite(raw.createdAt) ? raw.createdAt : Date.now(),
     updatedAt: Number.isFinite(raw.updatedAt) ? raw.updatedAt : Date.now(),
@@ -864,10 +1310,18 @@ function ensureSession(): AgentSession {
     id: genId(),
     title: '新会话',
     messages: [],
+    taskAnalysis: null,
+    runtimePlan: null,
+    artifacts: [],
+    toolEvents: [],
     providerId: activeProvider.value?.id || null,
     model: fallbackModelForProvider(activeProvider.value),
+    transportMode: 'auto',
     previousResponseId: null,
     pendingPlan: null,
+    lastPlan: null,
+    lastExecutionMemory: null,
+    sessionMemory: null,
     lastSyncedMessageCount: 0,
     createdAt: Date.now(),
     updatedAt: Date.now(),
@@ -884,10 +1338,18 @@ function createSession() {
     id: genId(),
     title: '新会话',
     messages: [],
+    taskAnalysis: null,
+    runtimePlan: null,
+    artifacts: [],
+    toolEvents: [],
     providerId: activeProvider.value?.id || null,
     model: fallbackModelForProvider(activeProvider.value),
+    transportMode: 'auto',
     previousResponseId: null,
     pendingPlan: null,
+    lastPlan: null,
+    lastExecutionMemory: null,
+    sessionMemory: null,
     lastSyncedMessageCount: 0,
     createdAt: Date.now(),
     updatedAt: Date.now(),
@@ -922,8 +1384,15 @@ function clearCurrentSession() {
   const session = ensureSession()
   session.messages = []
   session.title = '新会话'
+  session.taskAnalysis = null
+  session.runtimePlan = null
+  session.artifacts = []
+  session.toolEvents = []
   session.previousResponseId = null
   session.pendingPlan = null
+  session.lastPlan = null
+  session.lastExecutionMemory = null
+  session.sessionMemory = null
   session.lastSyncedMessageCount = 0
   session.updatedAt = Date.now()
   sessions.value = [...sessions.value]
@@ -980,6 +1449,8 @@ function syncSessionWithActiveProvider(session: AgentSession | null) {
     session.providerId = providerId
     session.previousResponseId = null
     session.pendingPlan = null
+    session.lastPlan = null
+    session.lastExecutionMemory = null
     session.lastSyncedMessageCount = 0
     changed = true
   }
@@ -1007,6 +1478,13 @@ function formatSessionTime(timestamp: number) {
   const hh = `${date.getHours()}`.padStart(2, '0')
   const mm = `${date.getMinutes()}`.padStart(2, '0')
   return `${MM}/${dd} ${hh}:${mm}`
+}
+
+function logAgentPanelError(scope: string, error: unknown, extra?: Record<string, unknown>) {
+  console.error(`agent panel error: ${scope}`, {
+    error,
+    ...extra,
+  })
 }
 
 function startDrag(event: MouseEvent) {
@@ -1062,6 +1540,7 @@ async function editProvider(providerId: string) {
       apiKey: detail.api_key || '',
     }
   } catch (error: any) {
+    logAgentPanelError('edit_provider', error, { providerId })
     providerDraft.value = {
       id: provider.id,
       name: provider.name,
@@ -1111,6 +1590,10 @@ async function saveProviderDraft() {
     syncSessionWithActiveProvider(currentSession.value)
     ElMessage.success('供应商配置已保存')
   } catch (error: any) {
+    logAgentPanelError('save_provider', error, {
+      providerId: providerDraft.value.id,
+      providerName: name,
+    })
     ElMessage.error(error.response?.data?.error || error.message || '保存供应商失败')
   }
 }
@@ -1127,6 +1610,7 @@ async function activateProvider(providerId: string | null) {
     syncSessionWithActiveProvider(currentSession.value)
     ElMessage.success('已切换激活供应商')
   } catch (error: any) {
+    logAgentPanelError('activate_provider', error, { providerId })
     ElMessage.error(error.response?.data?.error || error.message || '切换供应商失败')
   }
 }
@@ -1147,6 +1631,7 @@ async function removeProvider(providerId: string | null) {
     syncSessionWithActiveProvider(currentSession.value)
     ElMessage.success('供应商已删除')
   } catch (error: any) {
+    logAgentPanelError('remove_provider', error, { providerId })
     ElMessage.error(error.response?.data?.error || error.message || '删除供应商失败')
   }
 }
@@ -1172,6 +1657,7 @@ async function fetchProviderModels() {
     modelDraft.value.remoteModels = ids
     ElMessage.success(`已同步 ${ids.length} 个模型`)
   } catch (error: any) {
+    logAgentPanelError('fetch_provider_models', error, { providerId: provider.id })
     ElMessage.error(error.response?.data?.error || error.message || '获取模型列表失败')
   } finally {
     modelLoading.value = false
@@ -1222,6 +1708,7 @@ async function saveModelDraft() {
     showModelDialog.value = false
     ElMessage.success('模型配置已保存')
   } catch (error: any) {
+    logAgentPanelError('save_model_draft', error, { providerId: provider.id })
     ElMessage.error(error.response?.data?.error || error.message || '保存模型配置失败')
   }
 }
@@ -1229,15 +1716,6 @@ async function saveModelDraft() {
 function openProviderManagerFromModelDialog() {
   showModelDialog.value = false
   showProviderDialog.value = true
-}
-
-function currentDocContent() {
-  if (!props.docId) return ''
-  const liveBridge = getAgentEditorBridge()
-  if (liveBridge?.docId === props.docId) {
-    return liveBridge.getValue()
-  }
-  return getAgentEditorSnapshot(props.docId) ?? props.docContent ?? ''
 }
 
 function currentDocumentHasUnsavedChanges() {
@@ -1261,10 +1739,11 @@ function currentEditorAvailable() {
 
 function currentEditorSnapshotSource() {
   const liveBridge = getAgentEditorBridge()
-  if (liveBridge?.docId === props.docId) return 'editor_bridge'
-  if (props.docId && getAgentEditorSnapshot(props.docId) !== null) return 'agent_snapshot'
-  if (props.docId && hasDocDraft(props.docId)) return 'draft_cache'
-  return 'saved_document'
+  return resolveAgentEditorSnapshotSource({
+    hasLiveEditor: Boolean(liveBridge?.docId === props.docId),
+    hasAgentSnapshot: Boolean(props.docId && getAgentEditorSnapshot(props.docId) !== null),
+    hasDraftCache: Boolean(props.docId && hasDocDraft(props.docId)),
+  })
 }
 
 function compactMessageText(content: string, maxChars = REQUEST_SUMMARY_ITEM_CHARS) {
@@ -1280,40 +1759,228 @@ function compactJsonLike(value: unknown, maxChars = REQUEST_SUMMARY_ITEM_CHARS) 
   return compactMessageText(raw || '', maxChars)
 }
 
-function buildToolExecutionMemoryMessage(calls: AgentToolCall[], outputs: AgentToolOutputPayload[]) {
-  if (!calls.length) return ''
+function isInternalExecutionLedgerMessage(content: string) {
+  const normalized = content.trim()
+  if (!normalized) return false
+  return [
+    '以下是本轮当前请求的执行账本更新。',
+    '执行账本更新：',
+    '执行账本提示：',
+    '执行账本纠偏：',
+  ].some((prefix) => normalized.startsWith(prefix))
+}
+
+function summarizeToolCallBatch(calls: AgentToolCall[], outputs: AgentToolOutputPayload[]) {
+  if (!calls.length) return []
 
   const outputByCallId = new Map(outputs.map((output) => [output.call_id, output]))
-  const touchedSave = calls.some((call) => call.name === 'save_current_document')
-  const lines = [
-    '以下是本轮当前请求的执行账本更新。请把已确认结果视为已发生事实，并基于它继续推进后续步骤。',
-    '在决定下一步前，先自行判断：哪些步骤已完成、哪些步骤仍待执行、当前保存状态是否仍然有效。',
-    '同一用户请求里的步骤一旦完成，后续即使环境状态发生变化，也不要回滚或重做该步骤。',
-  ]
-
-  calls.forEach((call, index) => {
+  return calls.map((call) => {
     const output = outputByCallId.get(call.call_id)
-    lines.push(`${index + 1}. 已执行工具：${call.name}`)
+    const payload = output?.output && typeof output.output === 'object'
+      ? output.output as Record<string, any>
+      : null
+    const ok = typeof payload?.ok === 'boolean' ? payload.ok : null
+    const result = payload?.result && typeof payload.result === 'object'
+      ? payload.result as Record<string, any>
+      : null
+    let outcome: AgentExecutionToolCallSummary['outcome'] = ok === false ? 'error' : 'unknown'
 
-    const argsSummary = compactMessageText(call.arguments || '', 320)
-    if (argsSummary) {
-      lines.push(`参数：${argsSummary}`)
+    if (call.name === 'save_current_document') {
+      const savePerformed = result?.saved === true
+      const saveNoop =
+        result?.save_action === 'noop'
+        || result?.already_saved === true
+        || result?.alreadySaved === true
+        || result?.unsaved_changes_before_save === false
+      if (savePerformed) outcome = 'success'
+      else if (saveNoop) outcome = 'noop'
+      else if (ok === false) outcome = 'error'
+    } else if (ok === true) {
+      outcome = 'success'
     }
 
-    if (output) {
-      const resultSummary = compactJsonLike(output.output, 360)
-      if (resultSummary) {
-        lines.push(`结果：${resultSummary}`)
-      }
+    return {
+      name: call.name,
+      arguments: compactMessageText(call.arguments || '', 320) || null,
+      output: output ? compactJsonLike(output.output, 360) || null : null,
+      ok,
+      outcome,
     }
   })
+}
 
-  if (touchedSave) {
-    lines.push('账本提示：保存只代表该次调用时刻之前已经形成的内容被提交；如果后续又出现新的正文或修改结果，应重新判断保存状态是否仍然有效。')
-    lines.push('若保存工具返回 saved=false 或 already_saved=true，说明这次调用没有产生新的状态变化；应先判断是否缺少前置正文或新的未保存修改，不要机械重复同一个保存。')
+function parseToolArguments(argumentsText: string | null) {
+  if (!argumentsText) return null
+  try {
+    const parsed = JSON.parse(argumentsText)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, any>
+      : null
+  } catch {
+    return null
+  }
+}
+
+function summarizeRoundActions(roundToolCalls: AgentExecutionToolCallSummary[]) {
+  if (!roundToolCalls.length) return []
+
+  const createdDirs: string[] = []
+  const createdDocs: string[] = []
+  const openedTargets: string[] = []
+  let createdProject: string | null = null
+  let savedCurrentDoc = false
+  let saveNoop = false
+  let saveFailed = false
+  let checkedPageState = false
+  let readContext = false
+  const otherActions: string[] = []
+
+  for (const call of roundToolCalls) {
+    const args = parseToolArguments(call.arguments)
+    switch (call.name) {
+      case 'create_project': {
+        const name = typeof args?.name === 'string' && args.name.trim() ? args.name.trim() : ''
+        createdProject = name || '新项目'
+        break
+      }
+      case 'create_tree_node': {
+        const name = typeof args?.name === 'string' && args.name.trim() ? args.name.trim() : ''
+        const nodeType = typeof args?.node_type === 'string' ? args.node_type.trim() : ''
+        if (name) {
+          if (nodeType === 'dir') createdDirs.push(name)
+          else if (nodeType === 'doc') createdDocs.push(name)
+        }
+        break
+      }
+      case 'open_tree_node': {
+        const target = [args?.doc_name, args?.node_name, args?.doc_path, args?.node_path]
+          .find((item) => typeof item === 'string' && item.trim())
+        if (typeof target === 'string' && target.trim()) {
+          openedTargets.push(target.trim())
+        }
+        break
+      }
+      case 'save_current_document':
+        if (call.outcome === 'success') savedCurrentDoc = true
+        else if (call.outcome === 'noop') saveNoop = true
+        else if (call.outcome === 'error') saveFailed = true
+        break
+      case 'get_current_page_state':
+        checkedPageState = true
+        break
+      case 'read_document':
+      case 'read_editor_snapshot':
+      case 'get_project_tree':
+      case 'list_projects':
+        readContext = true
+        break
+      default:
+        otherActions.push(call.name)
+        break
+    }
   }
 
-  return lines.join('\n')
+  const parts: string[] = []
+  if (createdProject) {
+    parts.push(`已创建项目《${createdProject}》。`)
+  }
+  if (createdDirs.length) {
+    parts.push(
+      createdDirs.length <= 3
+        ? `已创建目录：${createdDirs.map((name) => `《${name}》`).join('、')}。`
+        : `已创建 ${createdDirs.length} 个目录。`,
+    )
+  }
+  if (createdDocs.length) {
+    parts.push(
+      createdDocs.length <= 3
+        ? `已创建文档：${createdDocs.map((name) => `《${name}》`).join('、')}。`
+        : `已创建 ${createdDocs.length} 篇文档。`,
+    )
+  }
+  if (openedTargets.length) {
+    const latestTarget = openedTargets[openedTargets.length - 1]
+    parts.push(`已打开《${latestTarget}》。`)
+  }
+  if (savedCurrentDoc) {
+    parts.push('已保存当前文档。')
+  } else if (saveNoop) {
+    parts.push('当前文档没有新的未保存改动，无需再次保存。')
+  } else if (saveFailed) {
+    parts.push('当前文档保存未成功。')
+  }
+  if (checkedPageState) {
+    parts.push('已检查当前页面状态。')
+  }
+  if (readContext) {
+    parts.push('已读取当前内容与上下文用于继续执行。')
+  }
+  if (!parts.length && otherActions.length) {
+    parts.push('本轮已完成必要的页面与数据操作。')
+  }
+
+  return parts
+}
+
+function appendRecentToolCalls(
+  existing: AgentExecutionToolCallSummary[],
+  nextBatch: AgentExecutionToolCallSummary[],
+) {
+  if (!nextBatch.length) return existing
+  return [...existing, ...nextBatch].slice(-8)
+}
+
+function buildAgentExecutionContext(state: AgentExecutionState) {
+  return {
+    pending_plan: state.pendingPlan,
+    pending_plan_user_reply: state.pendingPlanUserReply,
+    composite_write_then_save: state.compositeWriteThenSave,
+    semantic_continuation: state.semanticContinuation,
+    semantic_continuation_round: state.semanticContinuationRound,
+    previous_assistant_summary: state.previousAssistantSummary,
+    task_kind: state.taskKind,
+    edit_intent: state.editIntent,
+    edit_stage: state.editStage,
+    save_requested: state.saveRequested,
+    write_completed: state.writeCompleted,
+    plan_step_index: state.planStepIndex,
+    plan_total_steps: state.planTotalSteps,
+    plan_current_step: state.planCurrentStep,
+    plan_completed_steps: state.planCompletedSteps,
+    document_write_observed: state.documentWriteObserved,
+    save_attempt_without_document_change: state.saveAttemptWithoutDocumentChange,
+    recent_tool_calls: state.recentToolCalls,
+  }
+}
+
+function buildAgentExecutionMemory(memory: AgentExecutionMemory) {
+  return {
+    plan: memory.plan,
+    assistant_summary: memory.assistantSummary,
+    control_phase: memory.controlPhase,
+    task_kind: memory.taskKind,
+    edit_intent: memory.editIntent,
+    edit_stage: memory.editStage,
+    save_requested: memory.saveRequested,
+    write_completed: memory.writeCompleted,
+    plan_step_index: memory.planStepIndex,
+    plan_total_steps: memory.planTotalSteps,
+    plan_current_step: memory.planCurrentStep,
+    plan_completed_steps: memory.planCompletedSteps,
+    document_write_observed: memory.documentWriteObserved,
+    save_attempt_without_document_change: memory.saveAttemptWithoutDocumentChange,
+    recent_tool_calls: memory.recentToolCalls,
+  }
+}
+
+function buildAgentSessionMemory(memory: AgentSessionMemory) {
+  return {
+    summary: memory.summary,
+    active_user_goals: memory.activeUserGoals,
+    completed_facts: memory.completedFacts,
+    open_loops: memory.openLoops,
+    updated_at: memory.updatedAt,
+  }
 }
 
 function extractSaveNoopState(outputs: AgentToolOutputPayload[]) {
@@ -1324,18 +1991,32 @@ function extractSaveNoopState(outputs: AgentToolOutputPayload[]) {
     const result = (payload as Record<string, any>).result
     if (!result || typeof result !== 'object') continue
     const saved = result.saved === true
+    const saveAction = result.save_action
     const alreadySaved = result.already_saved === true || result.alreadySaved === true
-    if (!saved && alreadySaved) {
+    const unsavedChangesBeforeSave = result.unsaved_changes_before_save
+    if (!saved && (saveAction === 'noop' || alreadySaved || unsavedChangesBeforeSave === false)) {
       return true
     }
   }
   return false
 }
 
+function isReadOrSaveOnlyBatch(roundToolCalls: AgentExecutionToolCallSummary[]) {
+  if (!roundToolCalls.length) return false
+  return roundToolCalls.every((call) => [
+    'read_document',
+    'read_editor_snapshot',
+    'get_current_page_state',
+    'get_project_tree',
+    'list_projects',
+    'open_tree_node',
+    'save_current_document',
+  ].includes(call.name))
+}
+
 function buildHistorySummary(messages: AgentMessage[]) {
   const userItems: string[] = []
   const assistantItems: string[] = []
-  const systemItems: string[] = []
 
   for (const message of messages) {
     const compact = compactMessageText(message.content)
@@ -1352,15 +2033,10 @@ function buildHistorySummary(messages: AgentMessage[]) {
       if (assistantItems.length < REQUEST_SUMMARY_MAX_ITEMS) {
         assistantItems.push(`- ${compact}`)
       }
-      continue
-    }
-
-    if (systemItems.length < REQUEST_SUMMARY_MAX_ITEMS) {
-      systemItems.push(`- ${compact}`)
     }
   }
 
-  if (!userItems.length && !assistantItems.length && !systemItems.length) return ''
+  if (!userItems.length && !assistantItems.length) return ''
 
   const parts = ['以下是当前会话中较早消息的摘要，请基于此继续对话，不要假设摘要之外的旧细节仍然准确。']
   if (userItems.length) {
@@ -1371,21 +2047,57 @@ function buildHistorySummary(messages: AgentMessage[]) {
     parts.push('较早的助手答复与已完成事项：')
     parts.push(...assistantItems)
   }
-  if (systemItems.length) {
-    parts.push('较早的系统记录与工具执行事实：')
-    parts.push(...systemItems)
-  }
   return parts.join('\n')
 }
 
-function buildConversationMessages(messages: AgentMessage[], transientMessages: AgentMessage[] = []): AgentRequestMessage[] {
-  const mergedMessages = [...messages, ...transientMessages]
-  const nonEmptyMessages = mergedMessages
+function buildSessionMemory(session: AgentSession): AgentSessionMemory | null {
+  const recentUserGoals = session.messages
+    .filter((message) => message.role === 'user')
+    .slice(-3)
+    .map((message) => compactMessageText(message.content, 180))
+    .filter((item): item is string => Boolean(item))
+
+  const completedFacts: string[] = []
+  if (session.lastExecutionMemory?.assistantSummary) {
+    completedFacts.push(session.lastExecutionMemory.assistantSummary)
+  }
+  if (session.lastExecutionMemory?.planCompletedSteps?.length) {
+    completedFacts.push(...session.lastExecutionMemory.planCompletedSteps.slice(-3))
+  }
+
+  const openLoops: string[] = []
+  if (session.pendingPlan) {
+    openLoops.push(...parsePlanSteps(session.pendingPlan))
+  } else if (session.runtimePlan?.status === 'running') {
+    openLoops.push(
+      ...session.runtimePlan.steps
+        .filter((step) => step.status === 'running' || step.status === 'pending')
+        .map((step) => step.title)
+        .slice(0, 3),
+    )
+  }
+
+  const recentSummary = compactMessageText(buildHistorySummary(session.messages.slice(-6)), 400) || null
+  if (!recentSummary && !recentUserGoals.length && !completedFacts.length && !openLoops.length) {
+    return null
+  }
+
+  return {
+    summary: recentSummary,
+    activeUserGoals: recentUserGoals,
+    completedFacts: completedFacts.slice(-4),
+    openLoops: openLoops.slice(0, 4),
+    updatedAt: new Date().toISOString(),
+  }
+}
+
+function buildConversationMessages(messages: AgentMessage[]): AgentRequestMessage[] {
+  const nonEmptyMessages = messages
     .map((message) => ({
       ...message,
       content: message.content.trim(),
     }))
-    .filter((message) => Boolean(message.content))
+    .filter((message) => Boolean(message.content) && message.role !== 'system')
   const normalized = nonEmptyMessages.map((message) => ({
     role: message.role,
     content: message.content,
@@ -1412,24 +2124,95 @@ function extractPlanBlock(content: string) {
   return match?.[1]?.trim() || ''
 }
 
-function messageRequestsPlanConfirmation(content: string) {
-  return /请确认|一次性确认|确认：|是否同意|是否按此顺序执行|等待用户确认/.test(content)
+function parsePlanSteps(plan: string) {
+  return plan
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => line.replace(/^\d+\s*[\.\)、]\s*/, '').trim())
+    .filter(Boolean)
 }
 
-function buildPendingPlanReplyMessage(plan: string, userReply: string) {
-  const normalizedPlan = plan.trim()
-  const normalizedReply = userReply.trim()
-  if (!normalizedPlan || !normalizedReply) return ''
+function isPartialWriteTask(taskAnalysis: AgentTaskAnalysis | null) {
+  return taskAnalysis?.writeScope === 'partial'
+}
 
-  return [
-    '执行账本提示：当前存在一份待确认的多行动计划，用户刚刚对这份计划作出了回复。',
-    '不要通过前端关键词硬判断；请你基于这份计划和用户最新回复做语义判断，先判定是“确认执行 / 拒绝 / 修改计划 / 仍有歧义”。',
-    '若用户语义上是在确认执行，则必须严格按该计划顺序推进，不得改名、改落点、改顺序，也不要为了后续步骤方便而提前处理后续目标。',
-    '若用户是在修改计划或补充限制，则先更新计划并再次明确确认点；未确认前不要执行。',
-    '待确认计划如下：',
-    normalizedPlan,
-    `用户最新回复：${normalizedReply}`,
-  ].join('\n')
+function stepRequiresDocumentWrite(step: string | null | undefined) {
+  const normalized = typeof step === 'string' ? step.trim() : ''
+  if (!normalized) return false
+  return ['写入', '改写', '重写', '替换', '互换', '追加', '应用正文', '局部替换'].some((keyword) => normalized.includes(keyword))
+}
+
+function appendToolEventsToSession(session: AgentSession, roundToolCalls: AgentExecutionToolCallSummary[]) {
+  if (!roundToolCalls.length) return
+  const nextEvents = roundToolCalls.map((call) => ({
+    id: genId(),
+    tool: call.name,
+    status: call.outcome,
+    summary: call.outcome === 'noop'
+      ? `${call.name} 未产生新的状态变更`
+      : call.outcome === 'error'
+        ? `${call.name} 执行失败`
+        : `${call.name} 已执行`,
+  } satisfies AgentToolEvent))
+  session.toolEvents = [...session.toolEvents, ...nextEvents].slice(-20)
+}
+
+function syncRuntimePlanStatus(
+  session: AgentSession,
+  control: AgentControlBlock | null,
+  executionState: AgentExecutionState,
+) {
+  const runtimePlan = session.runtimePlan
+  if (!runtimePlan) return
+  const planStepIndex = Number.isFinite(control?.planStepIndex) ? Number(control?.planStepIndex) : executionState.planStepIndex
+  const phase = typeof control?.phase === 'string' ? control.phase : executionState.pendingPlan ? 'await_user_confirmation' : null
+  runtimePlan.steps = runtimePlan.steps.map((step, index) => {
+    if (!planStepIndex) {
+      return {
+        ...step,
+        status: phase === 'await_user_confirmation' ? 'pending' : step.status,
+      }
+    }
+    if (index + 1 < planStepIndex) return { ...step, status: 'completed' }
+    if (index + 1 === planStepIndex) {
+      return {
+        ...step,
+        status: phase === 'completed' ? 'completed' : phase === 'blocked' ? 'blocked' : phase === 'failed' ? 'failed' : 'running',
+      }
+    }
+    return { ...step, status: 'pending' }
+  })
+
+  if (phase === 'completed') runtimePlan.status = 'completed'
+  else if (phase === 'blocked') runtimePlan.status = 'blocked'
+  else if (phase === 'failed') runtimePlan.status = 'failed'
+  else if (phase === 'await_user_confirmation') runtimePlan.status = 'pending'
+  else if (phase === 'auto_continue' || phase === 'in_progress' || planStepIndex) runtimePlan.status = 'running'
+  runtimePlan.updatedAt = new Date().toISOString()
+}
+
+function upsertArtifactDraft(
+  session: AgentSession,
+  contentDelta: string,
+  options: { finalize?: boolean; docId?: number | null; docName?: string | null } = {},
+) {
+  const title = options.docName?.trim() ? `${options.docName.trim()} 草稿` : 'Markdown 草稿'
+  const relatedDocId = Number.isFinite(options.docId) ? Number(options.docId) : null
+  let artifact = session.artifacts.find((item) => item.status === 'drafting' && item.relatedDocId === relatedDocId) || null
+  if (!artifact) {
+    artifact = {
+      id: genId(),
+      type: 'markdown_doc',
+      title,
+      status: 'drafting',
+      content: '',
+      relatedDocId,
+    }
+    session.artifacts = [...session.artifacts, artifact].slice(-6)
+  }
+  artifact.content = `${artifact.content}${contentDelta}`
+  artifact.status = options.finalize ? 'ready' : 'drafting'
 }
 
 function buildRequestBody(
@@ -1437,8 +2220,12 @@ function buildRequestBody(
   provider: AgentProvider,
   model: string,
   options: {
+    transportMode?: 'auto' | 'responses' | 'chat'
     previousResponseId?: string | null
     toolOutputs?: AgentToolOutputPayload[] | null
+    agentExecution?: AgentExecutionState | null
+    lastExecutionMemory?: AgentExecutionMemory | null
+    sessionMemory?: AgentSessionMemory | null
   } = {},
 ) {
   return {
@@ -1450,19 +2237,22 @@ function buildRequestBody(
       role: message.role,
       content: message.content,
     })),
-    mode: props.docType === 'doc' ? 'auto' : 'chat',
+    mode: 'auto',
+    transport_mode: options.transportMode || 'auto',
     context: {
       page_scope: props.pageScope,
       page_state: props.pageState || null,
       project_name: props.projectName || null,
       doc_id: props.docId,
       doc_name: props.docName || null,
-      doc_content: currentDocContent(),
       project_catalog: props.projectCatalog || null,
       current_node_catalog: props.currentNodeCatalog || null,
       editor_available: currentEditorAvailable(),
       editor_snapshot_source: currentEditorSnapshotSource(),
       editor_unsaved_changes: currentDocumentHasUnsavedChanges(),
+      agent_execution: options.agentExecution ? buildAgentExecutionContext(options.agentExecution) : null,
+      last_execution: options.lastExecutionMemory ? buildAgentExecutionMemory(options.lastExecutionMemory) : null,
+      session_memory: options.sessionMemory ? buildAgentSessionMemory(options.sessionMemory) : null,
     },
     previous_response_id: options.previousResponseId || null,
     tool_outputs: options.toolOutputs || null,
@@ -1592,104 +2382,162 @@ async function sendMessage() {
   let streamAborted = false
   let previousResponseId: string | null = session.previousResponseId
   const pendingPlan = session.pendingPlan?.trim() || ''
-  const toolExecutionMemories: AgentMessage[] = []
-  const transientToolExecutionMemories: AgentMessage[] = []
-  const saveIntentPattern = /(保存|存档|持久化|提交|应用更改|apply|save)/i
-  const userRequestedSave = saveIntentPattern.test(text)
-  const planRequestedSave = saveIntentPattern.test(pendingPlan)
-  const taskRequestedSave = userRequestedSave || planRequestedSave
-  const compositeWriteThenSaveRequest = props.docType === 'doc' && taskRequestedSave
+  const pendingPlanSteps = pendingPlan ? parsePlanSteps(pendingPlan) : []
+  const compositeWriteThenSaveRequest = props.docType === 'doc' && Boolean(pendingPlan)
+  const executionState: AgentExecutionState = {
+    pendingPlan: pendingPlan || null,
+    pendingPlanUserReply: pendingPlan ? text : null,
+    compositeWriteThenSave: compositeWriteThenSaveRequest,
+    semanticContinuation: false,
+    semanticContinuationRound: 0,
+    previousAssistantSummary: null,
+    taskKind: null,
+    editIntent: null,
+    editStage: null,
+    saveRequested: false,
+    writeCompleted: false,
+    planStepIndex: pendingPlan
+      ? session.lastExecutionMemory?.planStepIndex ?? (pendingPlanSteps.length ? 1 : null)
+      : null,
+    planTotalSteps: pendingPlan
+      ? session.lastExecutionMemory?.planTotalSteps ?? (pendingPlanSteps.length || null)
+      : null,
+    planCurrentStep: pendingPlan
+      ? session.lastExecutionMemory?.planCurrentStep ?? pendingPlanSteps[0] ?? null
+      : null,
+    planCompletedSteps: pendingPlan ? [...(session.lastExecutionMemory?.planCompletedSteps || [])] : [],
+    documentWriteObserved: false,
+    saveAttemptWithoutDocumentChange: false,
+    recentToolCalls: [],
+  }
   let semanticContinuationRounds = 0
   let toolCallRounds = 0
   const toolCallSignatureHits = new Map<string, number>()
+  let nonWritingPlanRounds = 0
   let rawAssistantContent = ''
   let completedAssistantContent = ''
   let wroteDocument = false
+  let roundDocumentWriteObserved = false
+  let roundToolCalls: AgentExecutionToolCallSummary[] = []
   let consumeAssistantText = (_rawChunk: string, _force = false) => {}
   let handleAssistantChunk = (_rawChunk: string) => {}
   let routeChunk = (_rawChunk: string, _force = false) => {}
   let recoverTrailingActionMarker = () => {}
   let buildVisibleAssistantContent = (_source = rawAssistantContent, _streamMode = false) => _source
-  let appendUnsavedDraftNotice = () => {}
+  let appendUnsavedDraftNotice = (_control: AgentControlBlock | null) => {}
   let finalizePendingAssistantOutput = () => {}
+  let finalizeAssistantMessageForDisplay = (_finalContent: string) => {}
+  let syncExecutionPlanProgress = (_control: AgentControlBlock | null) => {}
+  let finalControl: AgentControlBlock | null = null
+  let lastWriterResult: AgentWriterResultDetail | null = null
+  const selectedTransportMode = session.transportMode || 'auto'
+  const handleWriterResult = (event: Event) => {
+    const detail = (event as CustomEvent<AgentWriterResultDetail>).detail
+    if (!detail || detail.docId !== props.docId) return
+    lastWriterResult = detail
+  }
+  window.addEventListener(AGENT_WRITER_RESULT_EVENT, handleWriterResult as EventListener)
 
   try {
     const abortController = new AbortController()
     activeStreamController = abortController
 
-    const pushExecutionLedgerMessage = (content: string) => {
-      const normalized = content.trim()
-      if (!normalized) return
-      const message: AgentMessage = {
-        id: genId(),
-        role: 'system',
-        content: normalized,
-      }
-      transientToolExecutionMemories.push(message)
-      toolExecutionMemories.push(message)
-    }
-
     const resetSemanticContinuationBudget = () => {
       semanticContinuationRounds = 0
+      executionState.semanticContinuation = false
+      executionState.semanticContinuationRound = 0
+      executionState.previousAssistantSummary = null
     }
 
-    const shouldTriggerSemanticContinuation = (finalContent: string) => {
+    const shouldTriggerSemanticContinuation = (finalContent: string, control: AgentControlBlock | null) => {
       if (semanticContinuationRounds >= MAX_SEMANTIC_CONTINUATION_ROUNDS) return false
       const normalized = finalContent.trim()
       if (!normalized) return false
-      const editorStillUnsaved = currentDocumentHasUnsavedChanges()
-      const hasContinuationMarker = /\[\[CONTINUE\]\]/i.test(normalized)
-      const awaitingUserConfirmation =
-        /请确认|是否确认|请回复|确认后再执行|确认后我再执行|确认后我马上执行|请一次性确认|需要一次性确认|确认以上|确认上条|允许我|是否允许|是否接受/.test(normalized)
-      const reportsUnsaved = /保存状态：\s*未保存/.test(normalized) || /尚未保存/.test(normalized)
-      const reportsSaved = /保存状态：\s*已保存/.test(normalized) || /已保存文档|已经保存文档|保存完成/.test(normalized)
-      const reportsPending = /未执行动作|仍待执行|继续执行|尚待处理|正在处理中/.test(normalized)
-      const reportsWillContinue = /我将继续|继续补全|继续处理|随后切到|接着切到|接着处理|下一步处理|下一步将|随后继续|然后继续/.test(normalized)
-      const promisedFollowupSave = /接下来为你保存|然后为你保存|随后保存|继续保存|准备保存文档|正在提交保存|正在保存/.test(normalized)
-      const finalizedComplete = /已完成[:：]|当前无未保存修改|已按要求.*完成保存|并已保存文档/.test(normalized)
-      const saveClaimContradictedByState = taskRequestedSave && reportsSaved && editorStillUnsaved
-      if (awaitingUserConfirmation) {
+      const explicitAutoContinue = controlRequestsAutoContinuation(control)
+      const explicitAwaitConfirmation = control?.phase === 'await_user_confirmation'
+      if (explicitAwaitConfirmation || control?.phase === 'completed') {
         return false
       }
-      if (hasContinuationMarker) {
-        return true
-      }
-      if (saveClaimContradictedByState) {
-        return true
-      }
-      if (finalizedComplete && !editorStillUnsaved && !reportsPending && !reportsWillContinue && !promisedFollowupSave) {
+      if (controlNeedsSave(control) && !explicitAutoContinue) {
         return false
       }
-      const needsSaveFollowup =
-        taskRequestedSave
-        && !reportsSaved
-        && (editorStillUnsaved || wroteDocument || reportsUnsaved || promisedFollowupSave)
-      return needsSaveFollowup || promisedFollowupSave || reportsPending || reportsWillContinue
+      return explicitAutoContinue
     }
 
     const enqueueSemanticContinuation = (finalContent: string) => {
       semanticContinuationRounds += 1
-      pushExecutionLedgerMessage([
-        '执行账本更新：上一段响应已结束，但根据当前账本与助手收尾，仍存在未完成步骤。',
-        '继续推进剩余步骤，不要重复已经完成的正文输出或已完成工具。',
-        taskRequestedSave
-          ? '若正文已完成且用户目标包含保存，请优先判断当前未保存状态是否需要通过 save_current_document 完成提交。'
-          : '若只剩校验、导航或补充说明，请继续完成这些剩余动作。',
-        `当前本地未保存状态：${currentDocumentHasUnsavedChanges() ? '未保存' : '已保存或无改动'}`,
-        `上一段助手收尾摘要：${compactMessageText(finalContent, 320)}`,
-      ].join('\n'))
+      executionState.semanticContinuation = true
+      executionState.semanticContinuationRound = semanticContinuationRounds
+      executionState.previousAssistantSummary = compactMessageText(finalContent, 320) || null
     }
 
-    if (compositeWriteThenSaveRequest) {
-      pushExecutionLedgerMessage([
-        '执行账本提示：当前用户请求包含前置内容产出与后续提交动作的复合语义。',
-        '请先判断后续动作是否依赖新的正文或状态变化已经发生；若依赖尚未满足，先完成正文协议输出，再决定是否需要保存或提交。',
-        '不要把某个被用户提到的后续动作直接当成本轮第一步；若后续动作尚未真正完成，不要只口头承诺“接下来处理”，要继续完成或明确说明受阻原因。',
-      ].join('\n'))
+    syncExecutionPlanProgress = (control: AgentControlBlock | null) => {
+      if (!control) return
+      if (session.taskAnalysis) {
+        if (typeof control.writeScope === 'string' && control.writeScope.trim()) {
+          session.taskAnalysis.writeScope = control.writeScope.trim()
+        }
+        if (typeof control.preferredWriteAction === 'string' && control.preferredWriteAction.trim()) {
+          session.taskAnalysis.preferredWriteAction = control.preferredWriteAction.trim()
+        }
+      }
+      executionState.taskKind = typeof control.taskKind === 'string' && control.taskKind.trim()
+        ? control.taskKind.trim()
+        : executionState.taskKind
+      executionState.editIntent = typeof control.editIntent === 'string' && control.editIntent.trim()
+        ? control.editIntent.trim()
+        : executionState.editIntent
+      executionState.editStage = typeof control.editStage === 'string' && control.editStage.trim()
+        ? control.editStage.trim()
+        : executionState.editStage
+      if (control.saveRequested === true) {
+        executionState.saveRequested = true
+      }
+      if (control.writeCompleted === true) {
+        executionState.writeCompleted = true
+      }
+      executionState.planStepIndex = Number.isFinite(control.planStepIndex) ? Number(control.planStepIndex) : executionState.planStepIndex
+      executionState.planTotalSteps = Number.isFinite(control.planTotalSteps) ? Number(control.planTotalSteps) : executionState.planTotalSteps
+      executionState.planCurrentStep = typeof control.planCurrentStep === 'string' && control.planCurrentStep.trim()
+        ? control.planCurrentStep.trim()
+        : executionState.planCurrentStep
+      if (Array.isArray(control.planCompletedSteps) && control.planCompletedSteps.length) {
+        executionState.planCompletedSteps = [...control.planCompletedSteps]
+      }
     }
 
-    if (pendingPlan) {
-      pushExecutionLedgerMessage(buildPendingPlanReplyMessage(pendingPlan, text))
+    const buildAssistantRoundSummary = (control: AgentControlBlock | null) => {
+      const parts: string[] = []
+      if (Number.isFinite(control?.planStepIndex) && Number.isFinite(control?.planTotalSteps) && control?.planCurrentStep) {
+        parts.push(`当前计划进度：第 ${Number(control.planStepIndex)}/${Number(control.planTotalSteps)} 步，${control.planCurrentStep}。`)
+      } else if (control?.planCurrentStep) {
+        parts.push(`当前步骤：${control.planCurrentStep}。`)
+      }
+      if (roundDocumentWriteObserved) {
+        parts.push(props.docName ? `已写入《${props.docName}》正文。` : '本轮已写入文档内容。')
+      }
+      parts.push(...summarizeRoundActions(roundToolCalls))
+      if (controlNeedsSave(control)) {
+        parts.push('当前文档仍未保存，正在等待保存决策。')
+      } else if (controlRequestsAutoContinuation(control)) {
+        parts.push('系统将继续执行后续步骤。')
+      }
+      return parts.filter(Boolean).join('\n')
+    }
+
+    finalizeAssistantMessageForDisplay = (finalContent: string) => {
+      const visible = liveAssistantContent.value.trim()
+      if (visible) {
+        assistantMessage.content = liveAssistantContent.value
+        assistantMessage.reasoning = liveAssistantReasoning.value
+        return
+      }
+      const fallback = buildAssistantRoundSummary(extractAgentControlBlock(finalContent))
+      if (fallback) {
+        liveAssistantContent.value = fallback
+      }
+      assistantMessage.content = liveAssistantContent.value
+      assistantMessage.reasoning = liveAssistantReasoning.value
     }
 
     const appendAssistantContent = (content: string) => {
@@ -1701,7 +2549,13 @@ async function sendMessage() {
           dispatchAgentWriterStart({ docId: props.docId, mode: writerMode, save: false })
           writerStarted = true
         }
-        wroteDocument = true
+        if (routeAction === 'append' || routeAction === 'replace') {
+          wroteDocument = true
+        }
+        upsertArtifactDraft(session, content, {
+          docId: props.docId,
+          docName: props.docName,
+        })
         dispatchAgentWriterChunk({ docId: props.docId, chunk: content })
         return
       }
@@ -1720,18 +2574,16 @@ async function sendMessage() {
       let visible = source
         .replace(/\[\[PLAN\]\]\s*/gi, '')
         .replace(/\s*\[\[\/PLAN\]\]/gi, '')
-        .replace(/\s*\[\[ACTION:(append|replace|rewrite_section|replace_block)\]\][\s\S]*?\[\[\/ACTION\]\]\s*/gi, '\n')
-        .replace(/\s*\[\[CONTINUE\]\]\s*/gi, '\n')
+        .replace(ACTION_BLOCK_REGEX, '\n')
+        .replace(CONTROL_BLOCK_REGEX, '\n')
 
       if (streamMode) {
         const upperVisible = visible.toUpperCase()
-        const openAppendIndex = upperVisible.lastIndexOf('[[ACTION:APPEND]]')
-        const openReplaceIndex = upperVisible.lastIndexOf('[[ACTION:REPLACE]]')
-        const openRewriteSectionIndex = upperVisible.lastIndexOf('[[ACTION:REWRITE_SECTION]]')
-        const openReplaceBlockIndex = upperVisible.lastIndexOf('[[ACTION:REPLACE_BLOCK]]')
-        const openIndex = Math.max(openAppendIndex, openReplaceIndex, openRewriteSectionIndex, openReplaceBlockIndex)
+        const openIndex = Math.max(
+          ...AGENT_WRITE_ACTION_OPEN_MARKERS.map((item) => upperVisible.lastIndexOf(item.marker.toUpperCase())),
+        )
         if (openIndex !== -1) {
-          const closeIndex = upperVisible.lastIndexOf('[[/ACTION]]')
+          const closeIndex = upperVisible.lastIndexOf(AGENT_ACTION_CLOSE_MARKER)
           if (openIndex > closeIndex) {
             visible = visible.slice(0, openIndex)
           }
@@ -1744,9 +2596,10 @@ async function sendMessage() {
         .trim()
     }
 
-    appendUnsavedDraftNotice = () => {
+    appendUnsavedDraftNotice = (control: AgentControlBlock | null) => {
       if (!wroteDocument || streamAborted || streamFailed) return
-      if (/(保存|save)/i.test(liveAssistantContent.value)) return
+      if (!currentDocumentHasUnsavedChanges()) return
+      if (controlNeedsSave(control)) return
       const prefix = liveAssistantContent.value.trim() ? '\n\n' : ''
       liveAssistantContent.value = `${liveAssistantContent.value}${prefix}内容已写入当前文档草稿，尚未保存。是否现在保存？`
     }
@@ -1781,9 +2634,9 @@ async function sendMessage() {
         return 0
       })()
       const tail = completedContent.slice(overlapLength)
-      const actionCloseMarker = '[[/ACTION]]'
+      const actionCloseMarker = AGENT_ACTION_CLOSE_MARKER
       const existingCloseIndex = rawAssistantContent.toUpperCase().indexOf(actionCloseMarker)
-      const completedHasActionBlock = /\[\[ACTION:(append|replace|rewrite_section|replace_block)\]\]/i.test(completedContent)
+      const completedHasActionBlock = ACTION_OPEN_REGEX.test(completedContent)
       const mergedCompletedContent = (() => {
         if (!completedHasActionBlock) return completedContent
         if (existingCloseIndex === -1) return completedContent
@@ -1803,7 +2656,7 @@ async function sendMessage() {
       if (routeAction && routeAction !== 'chat') return
       if (props.docType !== 'doc' || !props.docId) return
 
-      const wrappedMatch = rawAssistantContent.match(/^\s*\[\[ACTION:(append|replace|rewrite_section|replace_block)\]\]\s*([\s\S]*?)\s*\[\[\/ACTION\]\]\s*$/i)
+      const wrappedMatch = rawAssistantContent.match(ACTION_WRAPPED_REGEX)
       if (wrappedMatch) {
         const mode = wrappedMatch[1].toLowerCase() as AgentWriterMode
         const body = wrappedMatch[2] || ''
@@ -1862,13 +2715,8 @@ async function sendMessage() {
       flushAssistantRenderBuffer(force)
     }
 
-    const actionCloseMarker = '[[/ACTION]]'
-    const actionOpenMarkers: Array<{ marker: string; mode: AgentWriterMode }> = [
-      { marker: '[[ACTION:append]]', mode: 'append' },
-      { marker: '[[ACTION:replace]]', mode: 'replace' },
-      { marker: '[[ACTION:rewrite_section]]', mode: 'rewrite_section' },
-      { marker: '[[ACTION:replace_block]]', mode: 'replace_block' },
-    ]
+    const actionCloseMarker = AGENT_ACTION_CLOSE_MARKER
+    const actionOpenMarkers = AGENT_WRITE_ACTION_OPEN_MARKERS
     const actionMarkerLookbehind = Math.max(
       actionCloseMarker.length,
       ...actionOpenMarkers.map((item) => item.marker.length),
@@ -1877,14 +2725,23 @@ async function sendMessage() {
 
     const completeWriterBlock = () => {
       if (routeAction && routeAction !== 'chat' && props.docId && writerStarted) {
-        wroteDocument = true
-        resetSemanticContinuationBudget()
+        lastWriterResult = null
         dispatchAgentWriterComplete({ docId: props.docId })
+        if (!lastWriterResult?.ok) {
+          throw new Error(lastWriterResult?.reason || '正文协议已输出，但编辑器没有成功应用本次写入。')
+        }
+        wroteDocument = true
+        executionState.documentWriteObserved = true
+        executionState.saveAttemptWithoutDocumentChange = false
+        executionState.writeCompleted = true
+        roundDocumentWriteObserved = true
+        resetSemanticContinuationBudget()
+        upsertArtifactDraft(session, '', {
+          finalize: true,
+          docId: props.docId,
+          docName: props.docName,
+        })
         writerStarted = false
-        pushExecutionLedgerMessage([
-          '执行账本更新：本轮正文写入步骤已完成。',
-          '当前文档应视为存在新的未保存修改；如果用户要求保存，下一步应重新判断并在需要时调用 save_current_document。',
-        ].join('\n'))
       }
       routeAction = 'chat'
     }
@@ -1899,13 +2756,14 @@ async function sendMessage() {
       rawAssistantContent = ''
       completedAssistantContent = ''
       actionProbe = ''
+      roundDocumentWriteObserved = false
+      roundToolCalls = []
       liveAssistantContent.value = ''
       liveAssistantReasoning.value = ''
     }
 
-    const startContinuationAssistantMessage = () => {
-      assistantMessage.content = liveAssistantContent.value
-      assistantMessage.reasoning = liveAssistantReasoning.value
+    const startContinuationAssistantMessage = (finalContent: string) => {
+      finalizeAssistantMessageForDisplay(finalContent)
 
       assistantMessage = {
         id: genId(),
@@ -2049,15 +2907,11 @@ async function sendMessage() {
 
         if (upperMarker.startsWith('[[ACTION:')) {
           prefixProbe = ''
-          routeAction = upperMarker === '[[ACTION:APPEND]]'
-            ? 'append'
-            : upperMarker === '[[ACTION:REPLACE]]'
-              ? 'replace'
-              : upperMarker === '[[ACTION:REWRITE_SECTION]]'
-                ? 'rewrite_section'
-                : upperMarker === '[[ACTION:REPLACE_BLOCK]]'
-                  ? 'replace_block'
-                  : 'chat'
+          routeAction = resolveAgentWriteMode(upperMarker) || 'chat'
+
+          if (routeAction === 'replace' && isPartialWriteTask(session.taskAnalysis)) {
+            throw new Error('当前任务是局部编辑，不能使用 ACTION:replace 整篇覆盖。请改用 ACTION:replace_block、ACTION:rewrite_section 或 ACTION:append。')
+          }
 
           if (routeAction !== 'chat' && props.docType !== 'doc') {
             routeAction = 'chat'
@@ -2112,7 +2966,7 @@ async function sendMessage() {
     while (true) {
       assistantMessage.content = liveAssistantContent.value
       assistantMessage.reasoning = liveAssistantReasoning.value
-      const requestMessages = buildConversationMessages(session.messages, transientToolExecutionMemories)
+      const requestMessages = buildConversationMessages(session.messages)
       const token = localStorage.getItem('token')
       const response = await fetch('/api/agent/chat/stream', {
         method: 'POST',
@@ -2122,8 +2976,12 @@ async function sendMessage() {
         },
         signal: abortController.signal,
         body: JSON.stringify(buildRequestBody(requestMessages, provider, session.model.trim(), {
+          transportMode: selectedTransportMode,
           previousResponseId,
           toolOutputs: pendingToolOutputs,
+          agentExecution: executionState,
+          lastExecutionMemory: session.lastExecutionMemory,
+          sessionMemory: session.sessionMemory,
         })),
       })
 
@@ -2153,6 +3011,34 @@ async function sendMessage() {
           rawAssistantContent += content
           handleAssistantChunk(content)
           liveAssistantContent.value = buildVisibleAssistantContent(rawAssistantContent, true)
+        } else if (parsed.event === 'task_analysis') {
+          const normalized = normalizeTaskAnalysis(parsed.data)
+          if (normalized) {
+            session.taskAnalysis = normalized
+          }
+        } else if (parsed.event === 'plan_event') {
+          const normalized = normalizeRuntimePlan(parsed.data.plan)
+          if (normalized) {
+            session.runtimePlan = normalized
+          }
+        } else if (parsed.event === 'tool_event') {
+          const normalized = normalizeToolEvent(parsed.data)
+          if (normalized) {
+            session.toolEvents = [...session.toolEvents, normalized].slice(-20)
+          }
+        } else if (parsed.event === 'artifact_delta') {
+          if (typeof parsed.data.delta === 'string' && parsed.data.delta) {
+            upsertArtifactDraft(session, parsed.data.delta, {
+              docId: props.docId,
+              docName: props.docName,
+            })
+          }
+        } else if (parsed.event === 'artifact_done') {
+          upsertArtifactDraft(session, '', {
+            finalize: true,
+            docId: props.docId,
+            docName: props.docName,
+          })
         } else if (parsed.event === 'reasoning.delta') {
           const delta = parsed.data.delta || parsed.data.content || ''
           if (delta) {
@@ -2173,7 +3059,11 @@ async function sendMessage() {
           liveAssistantContent.value = buildVisibleAssistantContent(completedAssistantContent || rawAssistantContent)
           streamDone = true
         } else if (parsed.event === 'agent.transport') {
-          const mode = parsed.data.mode === 'chat_fallback' ? 'chat_fallback' : 'responses'
+          const mode = parsed.data.mode === 'chat_fallback'
+            ? 'chat_fallback'
+            : parsed.data.mode === 'chat'
+              ? 'chat'
+              : 'responses'
           agentTransportMode.value = mode
         } else if (parsed.event === 'tool.calls.required') {
           const completedContent = typeof parsed.data.content === 'string' ? parsed.data.content : ''
@@ -2187,6 +3077,9 @@ async function sendMessage() {
             previousResponseId = toolResponseId.trim()
           }
           requiredToolCalls = Array.isArray(parsed.data.calls) ? parsed.data.calls : []
+          if (requiredToolCalls.length) {
+            startContinuationAssistantMessage(completedContent || rawAssistantContent)
+          }
         } else if (parsed.event === 'done') {
           streamDone = true
         } else if (parsed.event === 'error') {
@@ -2221,9 +3114,19 @@ async function sendMessage() {
       if (!requiredToolCalls.length) {
         finalizePendingAssistantOutput()
         const finalContent = completedAssistantContent || rawAssistantContent
-        if (shouldTriggerSemanticContinuation(finalContent)) {
+        const control = extractAgentControlBlock(finalContent)
+        syncExecutionPlanProgress(control)
+        const currentStepRequiresWrite = stepRequiresDocumentWrite(
+          (typeof control?.planCurrentStep === 'string' && control.planCurrentStep.trim())
+            ? control.planCurrentStep
+            : executionState.planCurrentStep,
+        )
+        if (currentStepRequiresWrite && !roundDocumentWriteObserved && !ACTION_OPEN_REGEX.test(finalContent)) {
+          throw new Error('当前步骤要求执行正文修改，但本轮没有输出任何有效的正文协议写入。请先产出 ACTION:replace_block、ACTION:rewrite_section 或 ACTION:append/replace 后再继续。')
+        }
+        if (shouldTriggerSemanticContinuation(finalContent, control)) {
           enqueueSemanticContinuation(finalContent)
-          startContinuationAssistantMessage()
+          startContinuationAssistantMessage(finalContent)
           continue
         }
         break
@@ -2254,16 +3157,27 @@ async function sendMessage() {
       if (pendingToolOutputs.length) {
         resetSemanticContinuationBudget()
       }
-      const toolMemory = buildToolExecutionMemoryMessage(requiredToolCalls, pendingToolOutputs)
-      if (toolMemory) {
-        pushExecutionLedgerMessage(toolMemory)
+      roundToolCalls = summarizeToolCallBatch(requiredToolCalls, pendingToolOutputs)
+      executionState.recentToolCalls = appendRecentToolCalls(
+        executionState.recentToolCalls,
+        roundToolCalls,
+      )
+      appendToolEventsToSession(session, roundToolCalls)
+      const saveNoopDetected = !wroteDocument && extractSaveNoopState(pendingToolOutputs)
+      if (saveNoopDetected) {
+        executionState.saveAttemptWithoutDocumentChange = true
       }
-      if (!wroteDocument && extractSaveNoopState(pendingToolOutputs)) {
-        pushExecutionLedgerMessage([
-          '执行账本纠偏：本轮到目前为止还没有输出任何正文协议 [[ACTION:...]]。',
-          '刚才的保存工具返回“没有产生新的保存动作/already_saved=true”，说明该动作的语义前提尚未满足，当前并没有新的结果可提交。',
-          '下一步不要再次重复同一个保存；应先完成能够产生新状态变化的正文协议，再根据新的结果判断是否还需要提交。',
-        ].join('\n'))
+      if (
+        pendingPlan
+        && !executionState.documentWriteObserved
+        && isReadOrSaveOnlyBatch(roundToolCalls)
+      ) {
+        nonWritingPlanRounds += 1
+      } else {
+        nonWritingPlanRounds = 0
+      }
+      if (saveNoopDetected && nonWritingPlanRounds >= 3) {
+        throw new Error('计划执行停滞：连续多轮只读取或保存当前文档，但没有真正写入正文。请重新规划当前步骤后再继续执行。')
       }
     }
   } catch (error: any) {
@@ -2272,32 +3186,72 @@ async function sendMessage() {
       ElMessage.info('已停止生成')
     } else {
       streamFailed = true
+      logAgentPanelError('send_message', error, {
+        sessionId: session.id,
+        providerId: provider.id,
+        model: session.model,
+        docId: props.docId,
+        docName: props.docName,
+      })
       ElMessage.error(error.message || '智能体请求失败')
     }
   } finally {
+    window.removeEventListener(AGENT_WRITER_RESULT_EVENT, handleWriterResult as EventListener)
     activeStreamController = null
     if (!streamFailed) {
       try {
         finalizePendingAssistantOutput()
-        appendUnsavedDraftNotice()
       } catch (finalizeError) {
         console.error('agent stream finalize failed', finalizeError)
       }
     }
     const finalAssistantContent = completedAssistantContent || rawAssistantContent || assistantMessage.content || liveAssistantContent.value
+    finalControl = extractAgentControlBlock(finalAssistantContent)
+    syncExecutionPlanProgress(finalControl)
+    syncRuntimePlanStatus(session, finalControl, executionState)
+    if (!streamFailed) {
+      appendUnsavedDraftNotice(finalControl)
+    }
     const extractedPlan = extractPlanBlock(finalAssistantContent)
-    if (extractedPlan && messageRequestsPlanConfirmation(finalAssistantContent)) {
+    if (extractedPlan) {
+      session.lastPlan = extractedPlan
+      session.runtimePlan = buildRuntimePlanFromText(extractedPlan, userMessage.content) || session.runtimePlan
+    } else if (pendingPlan && !session.lastPlan) {
+      session.lastPlan = pendingPlan
+    }
+    if (extractedPlan && controlRequestsPlanConfirmation(finalControl)) {
       session.pendingPlan = extractedPlan
     } else if (pendingPlan) {
       session.pendingPlan = null
     }
-    assistantMessage.content = liveAssistantContent.value
-    assistantMessage.reasoning = liveAssistantReasoning.value
+    finalizeAssistantMessageForDisplay(finalAssistantContent)
+    if (!streamFailed && !streamAborted) {
+      const memoryPlan = session.lastPlan || null
+      const memorySummary = compactMessageText(assistantMessage.content || finalAssistantContent, 400) || null
+      const memoryHasSignals = Boolean(memorySummary || executionState.recentToolCalls.length || executionState.documentWriteObserved)
+      if (memoryHasSignals) {
+        session.lastExecutionMemory = {
+          plan: memoryPlan,
+          assistantSummary: memorySummary,
+          controlPhase: typeof finalControl?.phase === 'string' && finalControl.phase.trim() ? finalControl.phase.trim() : null,
+          taskKind: executionState.taskKind,
+          editIntent: executionState.editIntent,
+          editStage: executionState.editStage,
+          saveRequested: executionState.saveRequested,
+          writeCompleted: executionState.writeCompleted,
+          planStepIndex: executionState.planStepIndex,
+          planTotalSteps: executionState.planTotalSteps,
+          planCurrentStep: executionState.planCurrentStep,
+          planCompletedSteps: [...executionState.planCompletedSteps],
+          documentWriteObserved: executionState.documentWriteObserved,
+          saveAttemptWithoutDocumentChange: executionState.saveAttemptWithoutDocumentChange,
+          recentToolCalls: [...executionState.recentToolCalls],
+        }
+      }
+      session.sessionMemory = buildSessionMemory(session)
+    }
     if (!assistantMessage.content.trim() && !assistantMessage.reasoning?.trim()) {
       session.messages = session.messages.filter((message) => message.id !== assistantMessage.id)
-    }
-    if (toolExecutionMemories.length) {
-      session.messages.push(...toolExecutionMemories)
     }
     session.previousResponseId = previousResponseId
     session.lastSyncedMessageCount = 0
@@ -2378,6 +3332,7 @@ onMounted(async () => {
   try {
     await refreshProvidersState()
   } catch (error: any) {
+    logAgentPanelError('refresh_providers_state', error)
     ElMessage.error(error.response?.data?.error || error.message || '加载供应商失败')
   }
   sessions.value = loadSessions(activeProvider.value)
@@ -2601,6 +3556,155 @@ onUnmounted(() => {
   border: 2px solid rgba(246, 248, 239, 0.9);
 }
 
+.agent-plan-card {
+  border: 1px solid rgba(122, 147, 91, 0.2);
+  border-radius: 16px;
+  padding: 12px 14px;
+  background: rgba(250, 252, 244, 0.92);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72);
+}
+
+.agent-plan-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.agent-plan-card-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #405037;
+}
+
+.agent-plan-card-status {
+  border-radius: 999px;
+  padding: 2px 8px;
+  background: rgba(157, 172, 140, 0.18);
+  color: #607057;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.agent-plan-card-status.active {
+  background: rgba(111, 154, 79, 0.16);
+  color: #4d6a34;
+}
+
+.agent-plan-card-content {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #2c3a26;
+}
+
+.agent-runtime-card {
+  border: 1px solid rgba(122, 147, 91, 0.16);
+  border-radius: 16px;
+  padding: 12px 14px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.agent-runtime-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 12px;
+  font-size: 12px;
+  color: #44533b;
+}
+
+.agent-plan-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.agent-plan-step {
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: rgba(246, 248, 239, 0.88);
+  border: 1px solid rgba(122, 147, 91, 0.14);
+}
+
+.agent-plan-step.running {
+  border-color: rgba(111, 154, 79, 0.38);
+  background: rgba(240, 247, 231, 0.95);
+}
+
+.agent-plan-step.completed {
+  opacity: 0.78;
+}
+
+.agent-plan-step-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #24311f;
+}
+
+.agent-plan-step-meta {
+  margin-top: 4px;
+  font-size: 11px;
+  color: #6a7861;
+}
+
+.agent-tool-events {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.agent-tool-event {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  gap: 8px;
+  align-items: start;
+  font-size: 12px;
+  color: #3c4a34;
+}
+
+.agent-tool-event-name {
+  font-weight: 700;
+}
+
+.agent-tool-event-status {
+  color: #6f7e65;
+}
+
+.agent-tool-event-summary {
+  color: #4d5b44;
+}
+
+.agent-artifact-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed rgba(122, 147, 91, 0.18);
+}
+
+.agent-artifact-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.agent-artifact-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #24311f;
+}
+
+.agent-artifact-status {
+  font-size: 11px;
+  color: #607057;
+}
+
 .agent-empty {
   margin: auto 0;
   padding: 18px 20px;
@@ -2753,20 +3857,20 @@ onUnmounted(() => {
   flex: 1;
   min-width: 0;
   display: flex;
-  flex-direction: column;
 }
 
 .agent-inline-selects {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 10px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  width: 100%;
 }
 
 .agent-select-row {
   display: grid;
-  grid-template-columns: 48px minmax(0, 1fr);
+  grid-template-columns: 42px minmax(0, 1fr);
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
 }
 
@@ -2774,6 +3878,7 @@ onUnmounted(() => {
   font-size: 12px;
   color: #607057;
   text-align: right;
+  white-space: nowrap;
 }
 
 .agent-provider-select,

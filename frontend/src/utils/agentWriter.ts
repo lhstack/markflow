@@ -15,9 +15,20 @@ export interface AgentWriterCompleteDetail {
   docId: number
 }
 
+export interface AgentWriterResultDetail {
+  docId: number
+  mode: AgentWriterMode
+  ok: boolean
+  reason?: string
+  payload?: string
+  replacementPreview?: string
+  target?: string | null
+}
+
 export const AGENT_WRITER_START_EVENT = 'markflow:agent-writer-start'
 export const AGENT_WRITER_CHUNK_EVENT = 'markflow:agent-writer-chunk'
 export const AGENT_WRITER_COMPLETE_EVENT = 'markflow:agent-writer-complete'
+export const AGENT_WRITER_RESULT_EVENT = 'markflow:agent-writer-result'
 
 let currentEditorSnapshot: { docId: number; content: string } | null = null
 
@@ -48,4 +59,8 @@ export function dispatchAgentWriterChunk(detail: AgentWriterChunkDetail) {
 
 export function dispatchAgentWriterComplete(detail: AgentWriterCompleteDetail) {
   window.dispatchEvent(new CustomEvent<AgentWriterCompleteDetail>(AGENT_WRITER_COMPLETE_EVENT, { detail }))
+}
+
+export function dispatchAgentWriterResult(detail: AgentWriterResultDetail) {
+  window.dispatchEvent(new CustomEvent<AgentWriterResultDetail>(AGENT_WRITER_RESULT_EVENT, { detail }))
 }

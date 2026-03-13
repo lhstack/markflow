@@ -123,10 +123,12 @@ import {
   AGENT_WRITER_COMPLETE_EVENT,
   AGENT_WRITER_START_EVENT,
   clearAgentEditorSnapshot,
+  dispatchAgentWriterResult,
   setAgentEditorSnapshot,
   type AgentWriterChunkDetail,
   type AgentWriterCompleteDetail,
   type AgentWriterMode,
+  type AgentWriterResultDetail,
   type AgentWriterStartDetail,
 } from '@/utils/agentWriter'
 import {
@@ -370,12 +372,28 @@ function normalizeHeadingText(value: string) {
   return value.replace(/^#{1,6}\s*/, '').trim()
 }
 
-function applyRewriteSection(original: string, payload: string) {
+interface PartialWriterApplyResult {
+  ok: boolean
+  value: string
+  reason?: string
+  target?: string | null
+  replacementPreview?: string
+}
+
+function applyRewriteSection(original: string, payload: string): PartialWriterApplyResult {
   const targetRaw = extractTaggedContent(payload, 'TARGET')
   const contentRaw = extractTaggedContent(payload, 'CONTENT')
   const target = normalizeHeadingText(targetRaw)
   const sectionContent = (contentRaw || payload).trim()
-  if (!target || !sectionContent) return original
+  if (!target || !sectionContent) {
+    return {
+      ok: false,
+      value: original,
+      reason: 'rewrite_section 缺少 [[TARGET]] 或 [[CONTENT]]，无法定位目标章节并应用替换。',
+      target: target || null,
+      replacementPreview: sectionContent || payload.trim(),
+    }
+  }
 
   const lines = original.split(/\r?\n/)
   const headingPattern = /^(#{1,6})\s+(.+)$/
@@ -393,7 +411,15 @@ function applyRewriteSection(original: string, payload: string) {
     }
   }
 
-  if (start === -1) return original
+  if (start === -1) {
+    return {
+      ok: false,
+      value: original,
+      reason: `未找到标题为“${target}”的章节，rewrite_section 未应用。`,
+      target,
+      replacementPreview: sectionContent,
+    }
+  }
 
   let end = lines.length
   for (let index = start + 1; index < lines.length; index += 1) {
@@ -407,28 +433,82 @@ function applyRewriteSection(original: string, payload: string) {
   }
 
   const replacementLines = sectionContent.split(/\r?\n/)
-  return [...lines.slice(0, start), ...replacementLines, ...lines.slice(end)]
-    .join('\n')
-    .replace(/\n{3,}/g, '\n\n')
+  return {
+    ok: true,
+    value: [...lines.slice(0, start), ...replacementLines, ...lines.slice(end)]
+      .join('\n')
+      .replace(/\n{3,}/g, '\n\n'),
+    target,
+    replacementPreview: sectionContent,
+  }
 }
 
-function applyReplaceBlock(original: string, payload: string) {
+function applyReplaceBlock(original: string, payload: string): PartialWriterApplyResult {
   const find = extractTaggedContent(payload, 'FIND')
   const replacement = extractTaggedContent(payload, 'REPLACE')
-  if (!find) return original
+  if (!find) {
+    return {
+      ok: false,
+      value: original,
+      reason: 'replace_block 缺少 [[FIND]]，无法定位要替换的原文片段。',
+      replacementPreview: replacement || payload.trim(),
+    }
+  }
   const index = original.indexOf(find)
-  if (index === -1) return original
-  return `${original.slice(0, index)}${replacement}${original.slice(index + find.length)}`
+  if (index === -1) {
+    return {
+      ok: false,
+      value: original,
+      reason: 'replace_block 未在当前文档中找到完全匹配的 [[FIND]] 片段，局部替换未应用。',
+      target: find,
+      replacementPreview: replacement,
+    }
+  }
+  return {
+    ok: true,
+    value: `${original.slice(0, index)}${replacement}${original.slice(index + find.length)}`,
+    target: find,
+    replacementPreview: replacement,
+  }
 }
 
-function applyPartialWriterAction(mode: AgentWriterMode, original: string, payload: string) {
+function applyPartialWriterAction(mode: AgentWriterMode, original: string, payload: string): PartialWriterApplyResult {
   if (mode === 'rewrite_section') {
     return applyRewriteSection(original, payload)
   }
   if (mode === 'replace_block') {
     return applyReplaceBlock(original, payload)
   }
-  return original
+  return {
+    ok: false,
+    value: original,
+    reason: `不支持的局部写入模式：${mode}`,
+    replacementPreview: payload.trim(),
+  }
+}
+
+function dispatchWriterResult(detail: AgentWriterResultDetail) {
+  dispatchAgentWriterResult(detail)
+}
+
+function failPartialWriter(mode: AgentWriterMode, original: string, payload: string, result: PartialWriterApplyResult) {
+  const detail: AgentWriterResultDetail = {
+    docId: props.node.id,
+    mode,
+    ok: false,
+    reason: result.reason || '局部写入失败',
+    payload,
+    replacementPreview: result.replacementPreview,
+    target: result.target || null,
+  }
+  console.error('agent partial write failed', {
+    ...detail,
+    docName: props.node.name,
+    originalPreview: original.slice(0, 500),
+  })
+  dispatchWriterResult(detail)
+  ElMessage.error(detail.reason || '局部写入失败')
+  throw new Error(detail.reason || '局部写入失败')
 }
 
 function flushWriterRender() {
@@ -503,17 +583,33 @@ function handleAgentWriterComplete(event: Event) {
   let finalValue = writerBuffer
   if (writerMode && isPartialWriterMode(writerMode)) {
     const currentValue = editor?.getValue() || draft.value
-    finalValue = applyPartialWriterAction(writerMode, currentValue, writerBuffer)
+    const result = applyPartialWriterAction(writerMode, currentValue, writerBuffer)
+    if (!result.ok || result.value === currentValue) {
+      const failedMode = writerMode
+      const failedPayload = writerBuffer
+      resetWriterState()
+      failPartialWriter(failedMode, currentValue, failedPayload, result)
+      return
+    }
+    finalValue = result.value
     applyWriterValue(finalValue)
   } else {
     flushWriterRender()
     finalValue = writerBuffer
   }
   const shouldSave = writerShouldSave
+  const completedMode = writerMode
   resetWriterState()
   draft.value = finalValue
   isDirty.value = finalValue !== originalContent
   setAgentEditorSnapshot(props.node.id, finalValue)
+  if (completedMode) {
+    dispatchWriterResult({
+      docId: props.node.id,
+      mode: completedMode,
+      ok: true,
+    })
+  }
   if (shouldSave) {
     void save()
   }
@@ -549,6 +645,12 @@ async function handleEditorUpload(files: File[]) {
       editor.insertValue(markdown)
       syncDraftFromEditor()
     } catch (error: any) {
+      console.error('markdown editor upload failed', {
+        docId: props.node.id,
+        docName: props.node.name,
+        fileName: file.name,
+        error,
+      })
       return error?.response?.data?.error || error?.message || `文件 ${file.name} 上传失败`
     }
   }
@@ -713,7 +815,12 @@ async function save(): Promise<AgentEditorSaveResult> {
         alreadySaved: false,
         contentLength: value.length,
       }
-    } catch {
+    } catch (error) {
+      console.error('markdown editor save failed', {
+        docId: props.node.id,
+        docName: props.node.name,
+        error,
+      })
       ElMessage.error('保存失败')
       throw new Error('保存失败')
     } finally {

@@ -73,12 +73,7 @@ export const useProjectsStore = defineStore('projects', () => {
     projects.value = projects.value.filter((project) => project.id !== id)
 
     if (currentProjectId.value === id) {
-      const fallbackId = data.fallback_project_id as number | undefined
-      if (fallbackId && projects.value.some((project) => project.id === fallbackId)) {
-        currentProjectId.value = fallbackId
-      } else {
-        currentProjectId.value = projects.value[0]?.id || null
-      }
+      currentProjectId.value = projects.value[0]?.id || null
     }
 
     return data

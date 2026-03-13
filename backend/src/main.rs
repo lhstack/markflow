@@ -1,3 +1,4 @@
+mod agent_protocol;
 mod auth;
 mod db;
 mod models;

@@ -190,6 +190,8 @@ import request from '@/utils/request'
 import { useSystemStore } from '@/stores/system'
 import { describeAgentEditorBridge, getAgentEditorBridge } from '@/utils/agentEditorBridge'
 import { registerAgentToolRuntime, unregisterAgentToolRuntime } from '@/utils/agentTools'
+import { getAgentEditorSnapshot } from '@/utils/agentWriter'
+import { AGENT_ROUTE_DEFINITIONS, resolveAgentEditorSnapshotSource, resolveAgentPageScope, resolveAgentPageState, resolveAgentRouteDefinition, type AgentPageScope } from '@/agent/protocol'
 import { getDocDraftContent, hasDocDraft } from '@/utils/docDraftCache'
 
 const router = useRouter()
@@ -256,20 +258,8 @@ const pwForm = ref({ old: '', new: '', confirm: '' })
 const restoringHomeState = ref(true)
 
 const showSidebar = computed(() => !showProjectOverview.value && Boolean(projects.currentProject))
-const agentPageScope = computed<'overview' | 'editor' | 'dir'>(() => {
-  if (showProjectOverview.value) return 'overview'
-  if (docs.currentNode?.node_type === 'doc') return 'editor'
-  return 'dir'
-})
-const agentPageState = computed(() => (
-  showProjectOverview.value
-    ? 'project_overview'
-    : docs.currentNode?.node_type === 'doc'
-      ? 'document_editor'
-      : docs.currentNode?.node_type === 'dir'
-        ? 'directory_detail'
-        : 'project_workspace'
-))
+const agentPageScope = computed<AgentPageScope>(() => resolveAgentPageScope(showProjectOverview.value, docs.currentNode?.node_type))
+const agentPageState = computed(() => resolveAgentPageState(showProjectOverview.value, docs.currentNode?.node_type))
 const agentProjectCatalog = computed(() =>
   projects.projects
     .slice(0, 24)
@@ -293,10 +283,13 @@ const agentNodeCatalog = computed(() => {
 const agentEditorAvailable = computed(() => Boolean(getAgentEditorBridge()))
 const agentEditorSnapshotSource = computed(() => {
   const currentDocId = docs.currentNode?.node_type === 'doc' ? docs.currentNode.id : null
+  const hasAgentSnapshot = currentDocId !== null && getAgentEditorSnapshot(currentDocId) !== null
   const draftCacheContent = currentDocId !== null ? getDocDraftContent(currentDocId) : null
-  if (getAgentEditorBridge()) return 'editor_bridge'
-  if (draftCacheContent !== null) return 'draft_cache'
-  return 'saved_document'
+  return resolveAgentEditorSnapshotSource({
+    hasLiveEditor: Boolean(getAgentEditorBridge()),
+    hasAgentSnapshot,
+    hasDraftCache: draftCacheContent !== null,
+  })
 })
 const agentEditorUnsavedChanges = computed(() => {
   const currentDocId = docs.currentNode?.node_type === 'doc' ? docs.currentNode.id : null
@@ -401,6 +394,105 @@ function serializeNodeEntry(entry: { node: DocNode; path: string; depth: number 
     created_at: entry.node.created_at,
     updated_at: entry.node.updated_at,
   }
+}
+
+type AgentUploadKind = 'avatar' | 'project-background' | 'doc-image' | 'doc-file'
+
+interface AgentUploadUsage {
+  avatar: boolean
+  project_refs: number
+  doc_refs: number
+}
+
+interface AgentUploadItem {
+  id: number
+  kind: AgentUploadKind
+  original_name: string
+  url: string
+  content_type?: string | null
+  size: number
+  created_at: string
+  updated_at: string
+  usage: AgentUploadUsage
+}
+
+function normalizeUploadKind(value: unknown): AgentUploadKind | null {
+  const normalized = normalizeToolString(value)
+  if (
+    normalized === 'avatar'
+    || normalized === 'project-background'
+    || normalized === 'doc-image'
+    || normalized === 'doc-file'
+  ) {
+    return normalized
+  }
+  return null
+}
+
+function normalizeBoolean(value: unknown): boolean | null {
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase()
+    if (normalized === 'true') return true
+    if (normalized === 'false') return false
+  }
+  return null
+}
+
+function isUploadUnused(upload: AgentUploadItem) {
+  return !upload.usage.avatar && upload.usage.project_refs === 0 && upload.usage.doc_refs === 0
+}
+
+function serializeUpload(upload: AgentUploadItem) {
+  return {
+    id: upload.id,
+    kind: upload.kind,
+    original_name: upload.original_name,
+    url: upload.url,
+    absolute_url: `${window.location.origin}${upload.url}`,
+    content_type: upload.content_type || null,
+    size: upload.size,
+    created_at: upload.created_at,
+    updated_at: upload.updated_at,
+    usage: upload.usage,
+    unused: isUploadUnused(upload),
+  }
+}
+
+async function fetchUploadsSnapshot() {
+  const data = (await request.get('/uploads')) as { uploads?: AgentUploadItem[] }
+  return Array.isArray(data.uploads) ? data.uploads : []
+}
+
+function resolveUploadFilterKinds(args: Record<string, any>) {
+  const singleKind = normalizeUploadKind(args.kind)
+  const kinds = Array.isArray(args.kinds)
+    ? args.kinds
+      .map((item: unknown) => normalizeUploadKind(item))
+      .filter((item: AgentUploadKind | null): item is AgentUploadKind => item !== null)
+    : []
+  return Array.from(new Set(singleKind ? [singleKind, ...kinds] : kinds))
+}
+
+function filterUploads(uploads: AgentUploadItem[], rawArgs: Record<string, any>) {
+  const args = expandToolArgs(rawArgs)
+  const filterKinds = resolveUploadFilterKinds(args)
+  const nameQuery = normalizeToolString(args.name_query ?? args.nameQuery ?? args.keyword)
+  const unusedOnly = normalizeBoolean(args.unused_only ?? args.unusedOnly) === true
+  const ids = Array.isArray(args.upload_ids)
+    ? args.upload_ids
+      .map((item: unknown) => normalizeToolInteger(item))
+      .filter((item: number | null): item is number => item !== null)
+    : []
+  const explicitIdSet = new Set(ids)
+
+  return uploads.filter((upload) => {
+    if (explicitIdSet.size && !explicitIdSet.has(upload.id)) return false
+    if (filterKinds.length && !filterKinds.includes(upload.kind)) return false
+    if (unusedOnly && !isUploadUnused(upload)) return false
+    if (nameQuery && !upload.original_name.toLowerCase().includes(nameQuery.toLowerCase())) return false
+    return true
+  })
 }
 
 async function wait(ms: number) {
@@ -531,12 +623,13 @@ async function getCurrentPageState() {
   const editorBridge = describeAgentEditorBridge()
   const liveEditor = getAgentEditorBridge()
   const currentDocId = docs.currentNode?.node_type === 'doc' ? docs.currentNode.id : null
+  const hasAgentSnapshot = currentDocId !== null && getAgentEditorSnapshot(currentDocId) !== null
   const draftCacheContent = currentDocId !== null ? getDocDraftContent(currentDocId) : null
-  const snapshotSource = liveEditor
-    ? 'editor_bridge'
-    : draftCacheContent !== null
-      ? 'draft_cache'
-      : 'saved_document'
+  const snapshotSource = resolveAgentEditorSnapshotSource({
+    hasLiveEditor: Boolean(liveEditor),
+    hasAgentSnapshot,
+    hasDraftCache: draftCacheContent !== null,
+  })
   const content = liveEditor?.getValue() || draftCacheContent || docs.currentNode?.content || ''
 
   return {
@@ -547,13 +640,7 @@ async function getCurrentPageState() {
       query: route.query,
     },
     page_scope: agentPageScope.value,
-    page_state: showProjectOverview.value
-      ? 'project_overview'
-      : docs.currentNode?.node_type === 'doc'
-        ? 'document_editor'
-        : docs.currentNode?.node_type === 'dir'
-          ? 'directory_detail'
-          : 'project_workspace',
+    page_state: resolveAgentPageState(showProjectOverview.value, docs.currentNode?.node_type),
     project: currentProject ? serializeProject(currentProject) : null,
     current_node: currentEntry ? serializeNodeEntry(currentEntry) : null,
     editor: {
@@ -578,6 +665,8 @@ async function getCurrentPageState() {
       can_read_editor_snapshot: docs.currentNode?.node_type === 'doc',
       can_update_project: Boolean(currentProject),
       can_update_tree_node_meta: Boolean(currentProject && docs.currentNode),
+      can_update_profile: Boolean(auth.user),
+      can_manage_uploads: Boolean(auth.user),
       can_execute_javascript: true,
     },
   }
@@ -590,56 +679,12 @@ function listPageRoutes() {
       path: route.path,
       full_path: route.fullPath,
     },
-    routes: [
-      {
-        route: 'home.overview',
-        path: '/',
-        description: '项目概览页，展示当前用户的所有项目卡片。',
-        params: [],
-      },
-      {
-        route: 'home.project',
-        path: '/?project={project_id}',
-        description: '进入指定项目并展示左侧文档树，主区域停留在项目工作区。',
-        params: ['project_id 或 project_name'],
-      },
-      {
-        route: 'home.doc',
-        path: '/?project={project_id}&doc={node_id}',
-        description: '进入指定项目并打开某个 Markdown 文档编辑页。',
-        params: ['project_id 或 project_name', 'node_id 或 node_path 或 node_name'],
-      },
-      {
-        route: 'home.dir',
-        path: '/?project={project_id}&doc={node_id}',
-        description: '进入指定项目并打开某个目录详情页。',
-        params: ['project_id 或 project_name', 'node_id 或 node_path 或 node_name'],
-      },
-      {
-        route: 'login',
-        path: '/login',
-        description: '登录页。',
-        params: [],
-      },
-      {
-        route: 'register',
-        path: '/register',
-        description: '注册页。',
-        params: [],
-      },
-      {
-        route: 'login.2fa',
-        path: '/login/2fa',
-        description: '两步验证页。',
-        params: [],
-      },
-      {
-        route: 'share',
-        path: '/s/{token}',
-        description: '分享文档页。',
-        params: ['share_token'],
-      },
-    ],
+    routes: AGENT_ROUTE_DEFINITIONS.map((item) => ({
+      route: item.route,
+      path: item.path,
+      description: item.description,
+      params: item.params,
+    })),
     usage_notes: [
       '如果目标是打开项目，优先调用 open_project。',
       '如果目标是打开文档或目录，优先调用 open_tree_node。',
@@ -655,55 +700,54 @@ async function navigateToPage(rawArgs: Record<string, any>) {
     throw new Error('navigate_to_page 缺少 route 参数')
   }
 
-  if (routeName === 'home.overview' || routeName === 'home' || routeName === 'overview') {
+  const routeDefinition = resolveAgentRouteDefinition(routeName)
+  if (!routeDefinition) {
+    throw new Error(`不支持的 route: ${routeName}`)
+  }
+
+  if (routeDefinition.route === 'home.overview') {
     backToOverview()
-  } else if (routeName === 'home.project' || routeName === 'project') {
+  } else if (routeDefinition.route === 'home.project') {
     const project = await resolveProjectTarget(args)
     if (!project) throw new Error('未找到目标项目')
     await enterProject(project.id)
-  } else if (routeName === 'home.doc' || routeName === 'doc' || routeName === 'node') {
+  } else if (routeDefinition.route === 'home.doc' || routeDefinition.route === 'home.dir') {
     const target = await resolveNodeTarget(args)
     if (!target) throw new Error('未找到目标节点')
-    if (target.entry.node.node_type !== 'doc') {
-      throw new Error('目标节点不是文档，请改用 home.dir 或 open_tree_node')
+    if (routeDefinition.nodeType && target.entry.node.node_type !== routeDefinition.nodeType) {
+      throw new Error(
+        routeDefinition.nodeType === 'doc'
+          ? '目标节点不是文档，请改用 home.dir 或 open_tree_node'
+          : '目标节点不是目录，请改用 home.doc 或 open_tree_node',
+      )
     }
     if (projects.currentProjectId !== target.project.id || showProjectOverview.value) {
       await enterProject(target.project.id)
     }
     await openDocNode(target.entry.node.id)
-    const bridge = await waitForEditorBridge(target.entry.node.id)
-    if (!bridge) {
-      throw new Error('目标文档编辑器尚未完成初始化')
+    if (routeDefinition.nodeType === 'doc') {
+      const bridge = await waitForEditorBridge(target.entry.node.id)
+      if (!bridge) {
+        throw new Error('目标文档编辑器尚未完成初始化')
+      }
     }
-  } else if (routeName === 'home.dir' || routeName === 'dir') {
-    const target = await resolveNodeTarget(args)
-    if (!target) throw new Error('未找到目标节点')
-    if (target.entry.node.node_type !== 'dir') {
-      throw new Error('目标节点不是目录，请改用 home.doc 或 open_tree_node')
-    }
-    if (projects.currentProjectId !== target.project.id || showProjectOverview.value) {
-      await enterProject(target.project.id)
-    }
-    await openDocNode(target.entry.node.id)
-  } else if (routeName === 'login') {
+  } else if (routeDefinition.route === 'login') {
     await router.push('/login')
-  } else if (routeName === 'register') {
+  } else if (routeDefinition.route === 'register') {
     await router.push('/register')
-  } else if (routeName === 'login.2fa') {
+  } else if (routeDefinition.route === 'login.2fa') {
     await router.push('/login/2fa')
-  } else if (routeName === 'share') {
+  } else if (routeDefinition.route === 'share') {
     const shareToken = normalizeToolString(args.share_token ?? args.token)
     if (!shareToken) {
       throw new Error('share 路由缺少 share_token')
     }
     await router.push(`/s/${shareToken}`)
-  } else {
-    throw new Error(`不支持的 route: ${routeName}`)
   }
 
   return {
     ok: true,
-    route: routeName,
+    route: routeDefinition.route,
     state: await getCurrentPageState(),
   }
 }
@@ -714,6 +758,142 @@ async function listProjectsTool(rawArgs: Record<string, any>) {
     projects: projects.projects.map((project) => serializeProject(project)),
     total: projects.projects.length,
     current_project_id: projects.currentProjectId,
+  }
+}
+
+async function updateProfileTool(rawArgs: Record<string, any>) {
+  const args = expandToolArgs(rawArgs)
+  const clearAvatar = normalizeBoolean(args.clear_avatar ?? args.clearAvatar) === true
+  const uploadId = normalizeToolInteger(args.upload_id ?? args.uploadId)
+  let avatar = normalizeToolString(args.avatar)
+
+  if (clearAvatar && (avatar || uploadId !== null)) {
+    throw new Error('update_profile 不能同时传 clear_avatar 和 avatar/upload_id')
+  }
+
+  if (!clearAvatar && !avatar && uploadId === null) {
+    throw new Error('update_profile 目前支持 avatar、upload_id 或 clear_avatar')
+  }
+
+  if (uploadId !== null) {
+    const uploads = await fetchUploadsSnapshot()
+    const upload = uploads.find((item) => item.id === uploadId) || null
+    if (!upload) {
+      throw new Error('未找到指定 upload_id 对应的附件')
+    }
+    const isImage = upload.content_type?.startsWith('image/')
+      || upload.kind === 'avatar'
+      || upload.kind === 'project-background'
+      || upload.kind === 'doc-image'
+    if (!isImage) {
+      throw new Error('指定附件不是图片，不能设置为头像')
+    }
+    avatar = upload.url
+  }
+
+  const data = (await request.put('/auth/profile', {
+    avatar: clearAvatar ? null : avatar,
+  })) as { user?: Record<string, unknown> }
+
+  if (data.user) {
+    auth.updateUser(data.user as any)
+  } else {
+    await auth.refreshUser()
+  }
+
+  return {
+    updated: true,
+    avatar_cleared: clearAvatar,
+    avatar: clearAvatar ? null : avatar,
+    user: auth.user,
+    state: await getCurrentPageState(),
+  }
+}
+
+async function listUploadsTool(rawArgs: Record<string, any>) {
+  const args = expandToolArgs(rawArgs)
+  const uploads = await fetchUploadsSnapshot()
+  const matched = filterUploads(uploads, args)
+  const limit = normalizeToolInteger(args.limit)
+  const result = limit !== null && limit >= 0 ? matched.slice(0, limit) : matched
+  const filterKinds = resolveUploadFilterKinds(args)
+  const nameQuery = normalizeToolString(args.name_query ?? args.nameQuery ?? args.keyword)
+  const unusedOnly = normalizeBoolean(args.unused_only ?? args.unusedOnly) === true
+
+  return {
+    filters: {
+      upload_ids: Array.isArray(args.upload_ids) ? args.upload_ids : [],
+      kinds: filterKinds,
+      name_query: nameQuery || null,
+      unused_only: unusedOnly,
+      limit: limit !== null && limit >= 0 ? limit : null,
+    },
+    total_upload_count: uploads.length,
+    matched_upload_count: matched.length,
+    returned_upload_count: result.length,
+    uploads: result.map((upload) => serializeUpload(upload)),
+  }
+}
+
+async function deleteUploadsTool(rawArgs: Record<string, any>) {
+  const args = expandToolArgs(rawArgs)
+  const uploads = await fetchUploadsSnapshot()
+  const hasExplicitIds = Array.isArray(args.upload_ids) && args.upload_ids.length > 0
+  const hasKinds = resolveUploadFilterKinds(args).length > 0
+  const hasNameQuery = Boolean(normalizeToolString(args.name_query ?? args.nameQuery ?? args.keyword))
+  const hasUnusedOnly = normalizeBoolean(args.unused_only ?? args.unusedOnly) === true
+  if (!hasExplicitIds && !hasKinds && !hasNameQuery && !hasUnusedOnly) {
+    throw new Error('delete_uploads 至少需要 upload_ids、kind/kinds、name_query 或 unused_only 之一')
+  }
+
+  const targets = filterUploads(uploads, args)
+  if (!targets.length) {
+    return {
+      deleted: [],
+      failed: [],
+      matched_upload_count: 0,
+      remaining_upload_count: uploads.length,
+      note: '没有匹配到可删除的附件。',
+    }
+  }
+
+  const deleted: Array<{ id: number; original_name: string }> = []
+  const failed: Array<{ id: number; original_name: string; error: string }> = []
+
+  for (const upload of targets) {
+    try {
+      await request.delete(`/uploads/${upload.id}`)
+      deleted.push({ id: upload.id, original_name: upload.original_name })
+    } catch (error: any) {
+      failed.push({
+        id: upload.id,
+        original_name: upload.original_name,
+        error: error?.response?.data?.error || error?.message || '删除附件失败',
+      })
+    }
+  }
+
+  if (deleted.length) {
+    try {
+      await auth.refreshUser()
+    } catch {
+      // ignore
+    }
+    try {
+      await projects.fetchProjects()
+    } catch {
+      // ignore
+    }
+  }
+
+  const remainingUploads = await fetchUploadsSnapshot()
+  return {
+    deleted,
+    failed,
+    matched_upload_count: targets.length,
+    deleted_count: deleted.length,
+    failed_count: failed.length,
+    remaining_upload_count: remainingUploads.length,
   }
 }
 
@@ -1157,15 +1337,16 @@ async function readEditorSnapshotTool(rawArgs: Record<string, any>) {
   const savedData = await request.get(`/docs/${target.entry.node.id}`) as { node?: DocNode }
   const savedContent = savedData.node?.content || ''
   const editorContent = bridge?.getValue() ?? cachedDraft ?? savedContent
+  const source = bridge
+    ? 'editor_bridge'
+    : cachedDraft !== null
+      ? 'draft_cache'
+      : 'saved_document'
   const truncated = maxChars !== null && editorContent.length > maxChars
   const outputContent = truncated ? editorContent.slice(0, maxChars) : editorContent
 
   return {
-    source: bridge
-      ? 'editor_bridge'
-      : cachedDraft !== null
-        ? 'draft_cache'
-        : 'saved_document',
+    source,
     document: serializeNodeEntry(target.entry),
     content: outputContent,
     content_length: editorContent.length,
@@ -1173,11 +1354,18 @@ async function readEditorSnapshotTool(rawArgs: Record<string, any>) {
     saved_content_preview: savedContent.slice(0, 300),
     saved_content_length: savedContent.length,
     unsaved_changes: editorContent !== savedContent,
+    editor_ready: Boolean(bridge),
+    bridge_wait_timed_out: !bridge,
+    freshness: source === 'editor_bridge'
+      ? 'live_editor'
+      : source === 'draft_cache'
+        ? 'draft_cache'
+        : 'saved_fallback',
     truncated,
     max_chars: maxChars,
     usage_hint: bridge || cachedDraft !== null
-      ? '当前返回的是实时编辑快照，可用于判断未保存修改。'
-      : '当前没有可用的未保存快照，返回的是已保存正文。',
+      ? '当前返回的是实时编辑快照，可用于判断未保存修改。若 unsaved_changes=false，只表示当前编辑器内容与已保存版本一致，不表示改写任务已经完成。'
+      : '当前没有拿到实时编辑器桥接或本地草稿，已回退为已保存正文。它不保证包含最新未保存修改；若任务依赖实时改动，应先确认编辑器是否就绪，再决定是否继续。',
     state: await getCurrentPageState(),
   }
 }
@@ -1233,10 +1421,14 @@ async function saveCurrentDocumentTool(rawArgs: Record<string, any>) {
   const beforeSaveNode = beforeSaveData.node
   const editorValue = bridge.getValue()
   const savedValue = beforeSaveNode?.content || ''
+  const unsavedChangesBeforeSave = editorValue !== savedValue || hasDocDraft(target.entry.node.id)
   if (!editorValue.trim() && !savedValue.trim()) {
     return {
       saved: false,
       already_saved: true,
+      save_action: 'noop',
+      document_status_before_save: 'saved',
+      unsaved_changes_before_save: false,
       save_in_flight_joined: false,
       target: serializeNodeEntry(target.entry),
       content_length: savedValue.length,
@@ -1255,6 +1447,9 @@ async function saveCurrentDocumentTool(rawArgs: Record<string, any>) {
   return {
     saved: saveResult.saved,
     already_saved: saveResult.alreadySaved === true,
+    save_action: saveResult.saved ? 'saved' : 'noop',
+    document_status_before_save: unsavedChangesBeforeSave ? 'unsaved' : 'saved',
+    unsaved_changes_before_save: unsavedChangesBeforeSave,
     save_in_flight_joined: saveResult.inFlight === true,
     target: serializeNodeEntry(target.entry),
     content_length: (node?.content || '').length,
@@ -1263,7 +1458,7 @@ async function saveCurrentDocumentTool(rawArgs: Record<string, any>) {
     save_note: saveResult.saved
       ? '本次保存只提交调用 save_current_document 时刻之前已经写入编辑器的内容；若之后又有新的正文输出，需要重新判断是否再次保存。'
       : saveResult.alreadySaved
-        ? '当前文档在这次调用时没有新的未保存修改，因此没有产生新的保存动作。'
+        ? '当前文档在这次调用时没有新的未保存修改，因此没有产生新的保存动作。这不代表改写计划已经完成；如果计划要求修改正文，下一步应先完成正文写入。'
         : '这次调用没有产生新的保存动作，请结合当前未保存状态继续判断是否还需要保存。',
     state: await getCurrentPageState(),
   }
@@ -1444,10 +1639,12 @@ function getMarkdownEditorRuntimeTool() {
     usage_notes: [
       '如果只是读取当前文档内容，优先使用 read_document。',
       '如果需要读取未保存的编辑器实时内容，优先调用 read_editor_snapshot。',
-      'save_current_document 用于提交已经完成的正文修改；如果用户语义是“先补充/改写再保存”，不要提前保存。',
+      'save_current_document 用于提交已经完成的正文修改；调用前先确认当前文档确实存在新的未保存修改，如果当前本来就是已保存状态，就不要重复保存。',
       '如果先保存后又继续输出新的正文，应把当前状态视为未保存，必要时再次调用 save_current_document。',
       '如果用户明确要求修改项目名称/描述/背景图，优先调用 update_project。',
       '如果用户明确要求重命名文档或目录，优先调用 update_tree_node_meta。',
+      '如果用户明确要求修改头像，优先调用 update_profile；它目前支持 avatar、upload_id 或 clear_avatar。',
+      '如果用户要管理附件，优先先调用 list_uploads，再根据筛选结果调用 delete_uploads 批量删除。',
       'For document writes, use tools only as needed for locate/read/open, then emit one of: [[ACTION:append]], [[ACTION:replace]], [[ACTION:rewrite_section]], [[ACTION:replace_block]].',
       'rewrite_section payload format: [[TARGET]]Section Title[[/TARGET]][[CONTENT]]New Section Markdown[[/CONTENT]].',
       'replace_block payload format: [[FIND]]old snippet[[/FIND]][[REPLACE]]new snippet[[/REPLACE]].',
@@ -1525,6 +1722,9 @@ function installAgentToolRuntime() {
     getCurrentPageState,
     listPageRoutes,
     navigateToPage,
+    updateProfile: updateProfileTool,
+    listUploads: listUploadsTool,
+    deleteUploads: deleteUploadsTool,
     listProjects: listProjectsTool,
     openProject: openProjectTool,
     createProject: createProjectTool,

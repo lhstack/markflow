@@ -316,11 +316,6 @@ pub async fn delete_project(
         return (StatusCode::NOT_FOUND, Json(json!({"error": "项目不存在"}))).into_response();
     }
 
-    let project_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM projects WHERE user_id = ?")
-        .bind(user.id)
-        .fetch_one(&db.pool)
-        .await
-        .unwrap_or(0);
 
     let mut tx = match db.pool.begin().await {
         Ok(tx) => tx,
@@ -334,43 +329,13 @@ pub async fn delete_project(
         }
     };
 
-    let fallback_project_id: Option<i64> = if project_count > 1 {
-        match sqlx::query_scalar(
-            "SELECT id FROM projects
-             WHERE user_id = ? AND id != ?
-             ORDER BY sort_order ASC, created_at ASC
-             LIMIT 1",
-        )
+    if let Err(e) = sqlx::query("DELETE FROM doc_nodes WHERE user_id = ? AND project_id = ?")
         .bind(user.id)
         .bind(id)
-        .fetch_one(&mut *tx)
+        .execute(&mut *tx)
         .await
-        {
-            Ok(v) => Some(v),
-            Err(e) => {
-                tracing::error!("delete_project fallback query failed: {}", e);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": "删除项目失败"})),
-                )
-                    .into_response();
-            }
-        }
-    } else {
-        None
-    };
-
-    if let Err(e) = sqlx::query(
-        "UPDATE doc_nodes SET project_id = ?, updated_at = datetime('now')
-         WHERE user_id = ? AND project_id = ?",
-    )
-    .bind(fallback_project_id)
-    .bind(user.id)
-    .bind(id)
-    .execute(&mut *tx)
-    .await
     {
-        tracing::error!("delete_project move docs failed: {}", e);
+        tracing::error!("delete_project delete docs failed: {}", e);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": "删除项目失败"})),
@@ -401,9 +366,5 @@ pub async fn delete_project(
             .into_response();
     }
 
-    Json(json!({
-        "message": "删除成功",
-        "fallback_project_id": fallback_project_id
-    }))
-    .into_response()
+    Json(json!({ "message": "删除成功" })).into_response()
 }
