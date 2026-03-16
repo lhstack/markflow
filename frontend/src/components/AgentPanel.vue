@@ -6397,7 +6397,7 @@ async function sendMessage() {
       session.pendingPlanToolOutputs = []
     }
     finalizeAssistantMessageForDisplay(finalAssistantContent, { includeStructuredMessage: false })
-    const finalLoopResultContent = latestStructuredResponse?.message?.trim()
+    const finalLoopResultContent = structuredResponse?.message?.trim()
       || stripProtocolContent(finalAssistantContent).trim()
     appendFinalLoopResultMessage(finalLoopResultContent)
     if ((!streamFailed || Boolean(interceptedFailure)) && !streamAborted) {

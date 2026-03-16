@@ -2193,8 +2193,6 @@ function installAgentToolRuntime() {
     openTreeNode: openTreeNodeTool,
     readDocument: readDocumentTool,
     readEditorSnapshot: readEditorSnapshotTool,
-    replaceCurrentDocumentContent: replaceCurrentDocumentContentTool,
-    appendCurrentDocumentContent: appendCurrentDocumentContentTool,
     rewriteDocumentSection: rewriteDocumentSectionTool,
     replaceDocumentBlock: replaceDocumentBlockTool,
     replaceDocumentBlocks: replaceDocumentBlocksTool,
