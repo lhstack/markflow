@@ -193,6 +193,7 @@ import { registerAgentToolRuntime, unregisterAgentToolRuntime } from '@/utils/ag
 import { getAgentEditorSnapshot } from '@/utils/agentWriter'
 import { AGENT_ROUTE_DEFINITIONS, resolveAgentEditorSnapshotSource, resolveAgentPageScope, resolveAgentPageState, resolveAgentRouteDefinition, type AgentPageScope } from '@/agent/protocol'
 import { getDocDraftContent, hasDocDraft } from '@/utils/docDraftCache'
+import { applyBlockReplacePayload, applySectionRewritePayload, applySectionSwap } from '@/utils/markdownPartialEdit'
 
 const router = useRouter()
 const route = useRoute()
@@ -1464,6 +1465,461 @@ async function saveCurrentDocumentTool(rawArgs: Record<string, any>) {
   }
 }
 
+async function rewriteDocumentSectionTool(rawArgs: Record<string, any>) {
+  const args = expandToolArgs(rawArgs)
+  const targetHeading = normalizeToolString(
+    args.target_heading ?? args.targetHeading ?? args.section_heading ?? args.sectionHeading,
+  )
+  const replacementContent = normalizeToolString(
+    args.content ?? args.section_content ?? args.sectionContent ?? args.replacement,
+  )
+  if (!targetHeading || !replacementContent) {
+    throw new Error('rewrite_document_section 需要 target_heading 和 content 参数')
+  }
+
+  let target = null
+  if (
+    args.doc_id !== undefined
+    || args.doc_path !== undefined
+    || args.doc_name !== undefined
+    || args.node_id !== undefined
+    || args.node_path !== undefined
+    || args.node_name !== undefined
+    || args.project_id !== undefined
+    || args.project_name !== undefined
+  ) {
+    target = await resolveNodeTarget({
+      ...args,
+      node_id: args.doc_id ?? args.node_id ?? args.docId ?? args.nodeId,
+      node_path: args.doc_path ?? args.node_path ?? args.docPath ?? args.nodePath,
+      node_name: args.doc_name ?? args.node_name ?? args.docName ?? args.nodeName,
+    })
+  } else if (docs.currentNode?.node_type === 'doc' && projects.currentProject) {
+    const rows = flattenDocTree(docs.tree)
+    const entry = rows.find((item) => item.node.id === docs.currentNode?.id) || null
+    if (entry) {
+      target = { project: projects.currentProject, tree: docs.tree, entry }
+    }
+  }
+
+  if (!target) {
+    throw new Error('未找到要改写章节的文档')
+  }
+  if (target.entry.node.node_type !== 'doc') {
+    throw new Error('rewrite_document_section 只能修改文档，不能修改目录')
+  }
+
+  if (projects.currentProjectId !== target.project.id || docs.currentNode?.id !== target.entry.node.id || showProjectOverview.value) {
+    if (projects.currentProjectId !== target.project.id || showProjectOverview.value) {
+      await enterProject(target.project.id)
+    }
+    await openDocNode(target.entry.node.id)
+  }
+
+  const bridge = await waitForEditorBridge(target.entry.node.id)
+  if (!bridge) {
+    throw new Error('目标文档编辑器尚未完成初始化')
+  }
+
+  const before = bridge.getValue()
+  const payload = `[[TARGET]]${targetHeading}[[/TARGET]]\n[[CONTENT]]${replacementContent}[[/CONTENT]]`
+  const result = applySectionRewritePayload(before, payload)
+  if (!result.ok || result.value === before) {
+    throw new Error(result.reason || 'rewrite_document_section 未产生有效修改')
+  }
+
+  bridge.setValue(result.value)
+
+  return {
+    applied: true,
+    mode: 'rewrite_document_section',
+    target_heading: targetHeading,
+    target: result.target || targetHeading,
+    content_length_before: before.length,
+    content_length_after: result.value.length,
+    unsaved_changes: true,
+    target_document: serializeNodeEntry(target.entry),
+    state: await getCurrentPageState(),
+  }
+}
+
+async function replaceCurrentDocumentContentTool(rawArgs: Record<string, any>) {
+  const args = expandToolArgs(rawArgs)
+  const content = normalizeToolString(args.content ?? args.markdown ?? args.value)
+  if (!content) {
+    throw new Error('replace_current_document_content 需要 content 参数')
+  }
+
+  let target = null
+  if (
+    args.doc_id !== undefined
+    || args.doc_path !== undefined
+    || args.doc_name !== undefined
+    || args.node_id !== undefined
+    || args.node_path !== undefined
+    || args.node_name !== undefined
+    || args.project_id !== undefined
+    || args.project_name !== undefined
+  ) {
+    target = await resolveNodeTarget({
+      ...args,
+      node_id: args.doc_id ?? args.node_id ?? args.docId ?? args.nodeId,
+      node_path: args.doc_path ?? args.node_path ?? args.docPath ?? args.nodePath,
+      node_name: args.doc_name ?? args.node_name ?? args.docName ?? args.nodeName,
+    })
+  } else if (docs.currentNode?.node_type === 'doc' && projects.currentProject) {
+    const rows = flattenDocTree(docs.tree)
+    const entry = rows.find((item) => item.node.id === docs.currentNode?.id) || null
+    if (entry) {
+      target = { project: projects.currentProject, tree: docs.tree, entry }
+    }
+  }
+
+  if (!target) {
+    throw new Error('未找到要整体替换的文档')
+  }
+  if (target.entry.node.node_type !== 'doc') {
+    throw new Error('replace_current_document_content 只能修改文档，不能修改目录')
+  }
+
+  if (projects.currentProjectId !== target.project.id || docs.currentNode?.id !== target.entry.node.id || showProjectOverview.value) {
+    if (projects.currentProjectId !== target.project.id || showProjectOverview.value) {
+      await enterProject(target.project.id)
+    }
+    await openDocNode(target.entry.node.id)
+  }
+
+  const bridge = await waitForEditorBridge(target.entry.node.id)
+  if (!bridge) {
+    throw new Error('目标文档编辑器尚未完成初始化')
+  }
+
+  const before = bridge.getValue()
+  bridge.replaceValue(content)
+
+  return {
+    applied: true,
+    mode: 'replace_current_document_content',
+    content_length_before: before.length,
+    content_length_after: content.length,
+    unsaved_changes: true,
+    target_document: serializeNodeEntry(target.entry),
+    state: await getCurrentPageState(),
+  }
+}
+
+async function appendCurrentDocumentContentTool(rawArgs: Record<string, any>) {
+  const args = expandToolArgs(rawArgs)
+  const content = normalizeToolString(args.content ?? args.markdown ?? args.value)
+  if (!content) {
+    throw new Error('append_current_document_content 需要 content 参数')
+  }
+
+  let target = null
+  if (
+    args.doc_id !== undefined
+    || args.doc_path !== undefined
+    || args.doc_name !== undefined
+    || args.node_id !== undefined
+    || args.node_path !== undefined
+    || args.node_name !== undefined
+    || args.project_id !== undefined
+    || args.project_name !== undefined
+  ) {
+    target = await resolveNodeTarget({
+      ...args,
+      node_id: args.doc_id ?? args.node_id ?? args.docId ?? args.nodeId,
+      node_path: args.doc_path ?? args.node_path ?? args.docPath ?? args.nodePath,
+      node_name: args.doc_name ?? args.node_name ?? args.docName ?? args.nodeName,
+    })
+  } else if (docs.currentNode?.node_type === 'doc' && projects.currentProject) {
+    const rows = flattenDocTree(docs.tree)
+    const entry = rows.find((item) => item.node.id === docs.currentNode?.id) || null
+    if (entry) {
+      target = { project: projects.currentProject, tree: docs.tree, entry }
+    }
+  }
+
+  if (!target) {
+    throw new Error('未找到要追加正文的文档')
+  }
+  if (target.entry.node.node_type !== 'doc') {
+    throw new Error('append_current_document_content 只能修改文档，不能修改目录')
+  }
+
+  if (projects.currentProjectId !== target.project.id || docs.currentNode?.id !== target.entry.node.id || showProjectOverview.value) {
+    if (projects.currentProjectId !== target.project.id || showProjectOverview.value) {
+      await enterProject(target.project.id)
+    }
+    await openDocNode(target.entry.node.id)
+  }
+
+  const bridge = await waitForEditorBridge(target.entry.node.id)
+  if (!bridge) {
+    throw new Error('目标文档编辑器尚未完成初始化')
+  }
+
+  const before = bridge.getValue()
+  bridge.appendValue(content)
+
+  return {
+    applied: true,
+    mode: 'append_current_document_content',
+    appended_length: content.length,
+    content_length_before: before.length,
+    content_length_after: before.length + content.length,
+    unsaved_changes: true,
+    target_document: serializeNodeEntry(target.entry),
+    state: await getCurrentPageState(),
+  }
+}
+
+async function replaceDocumentBlockTool(rawArgs: Record<string, any>) {
+  const args = expandToolArgs(rawArgs)
+  const find = normalizeToolString(args.find ?? args.target ?? args.old_text ?? args.oldText)
+  const replacementProvided = Object.prototype.hasOwnProperty.call(args, 'replace')
+    || Object.prototype.hasOwnProperty.call(args, 'replacement')
+    || Object.prototype.hasOwnProperty.call(args, 'new_text')
+    || Object.prototype.hasOwnProperty.call(args, 'newText')
+  const replacement = normalizeToolString(args.replace ?? args.replacement ?? args.new_text ?? args.newText)
+  if (!find || !replacementProvided) {
+    throw new Error('replace_document_block 需要 find 和 replace 参数')
+  }
+
+  let target = null
+  if (
+    args.doc_id !== undefined
+    || args.doc_path !== undefined
+    || args.doc_name !== undefined
+    || args.node_id !== undefined
+    || args.node_path !== undefined
+    || args.node_name !== undefined
+    || args.project_id !== undefined
+    || args.project_name !== undefined
+  ) {
+    target = await resolveNodeTarget({
+      ...args,
+      node_id: args.doc_id ?? args.node_id ?? args.docId ?? args.nodeId,
+      node_path: args.doc_path ?? args.node_path ?? args.docPath ?? args.nodePath,
+      node_name: args.doc_name ?? args.node_name ?? args.docName ?? args.nodeName,
+    })
+  } else if (docs.currentNode?.node_type === 'doc' && projects.currentProject) {
+    const rows = flattenDocTree(docs.tree)
+    const entry = rows.find((item) => item.node.id === docs.currentNode?.id) || null
+    if (entry) {
+      target = { project: projects.currentProject, tree: docs.tree, entry }
+    }
+  }
+
+  if (!target) {
+    throw new Error('未找到要局部替换的文档')
+  }
+  if (target.entry.node.node_type !== 'doc') {
+    throw new Error('replace_document_block 只能修改文档，不能修改目录')
+  }
+
+  if (projects.currentProjectId !== target.project.id || docs.currentNode?.id !== target.entry.node.id || showProjectOverview.value) {
+    if (projects.currentProjectId !== target.project.id || showProjectOverview.value) {
+      await enterProject(target.project.id)
+    }
+    await openDocNode(target.entry.node.id)
+  }
+
+  const bridge = await waitForEditorBridge(target.entry.node.id)
+  if (!bridge) {
+    throw new Error('目标文档编辑器尚未完成初始化')
+  }
+
+  const before = bridge.getValue()
+  const payload = `[[FIND]]${find}[[/FIND]]\n[[REPLACE]]${replacement}[[/REPLACE]]`
+  const result = applyBlockReplacePayload(before, payload)
+  if (!result.ok || result.value === before) {
+    throw new Error(result.reason || 'replace_document_block 未产生有效修改')
+  }
+
+  bridge.setValue(result.value)
+
+  return {
+    applied: true,
+    mode: 'replace_document_block',
+    target: result.target || find,
+    content_length_before: before.length,
+    content_length_after: result.value.length,
+    unsaved_changes: true,
+    target_document: serializeNodeEntry(target.entry),
+    state: await getCurrentPageState(),
+  }
+}
+
+async function replaceDocumentBlocksTool(rawArgs: Record<string, any>) {
+  const args = expandToolArgs(rawArgs)
+  const replacements = Array.isArray(args.replacements) ? args.replacements : []
+  if (!replacements.length) {
+    throw new Error('replace_document_blocks 需要 replacements 参数')
+  }
+
+  let target = null
+  if (
+    args.doc_id !== undefined
+    || args.doc_path !== undefined
+    || args.doc_name !== undefined
+    || args.node_id !== undefined
+    || args.node_path !== undefined
+    || args.node_name !== undefined
+    || args.project_id !== undefined
+    || args.project_name !== undefined
+  ) {
+    target = await resolveNodeTarget({
+      ...args,
+      node_id: args.doc_id ?? args.node_id ?? args.docId ?? args.nodeId,
+      node_path: args.doc_path ?? args.node_path ?? args.docPath ?? args.nodePath,
+      node_name: args.doc_name ?? args.node_name ?? args.docName ?? args.nodeName,
+    })
+  } else if (docs.currentNode?.node_type === 'doc' && projects.currentProject) {
+    const rows = flattenDocTree(docs.tree)
+    const entry = rows.find((item) => item.node.id === docs.currentNode?.id) || null
+    if (entry) {
+      target = { project: projects.currentProject, tree: docs.tree, entry }
+    }
+  }
+
+  if (!target) {
+    throw new Error('未找到要批量替换的文档')
+  }
+  if (target.entry.node.node_type !== 'doc') {
+    throw new Error('replace_document_blocks 只能修改文档，不能修改目录')
+  }
+
+  if (projects.currentProjectId !== target.project.id || docs.currentNode?.id !== target.entry.node.id || showProjectOverview.value) {
+    if (projects.currentProjectId !== target.project.id || showProjectOverview.value) {
+      await enterProject(target.project.id)
+    }
+    await openDocNode(target.entry.node.id)
+  }
+
+  const bridge = await waitForEditorBridge(target.entry.node.id)
+  if (!bridge) {
+    throw new Error('目标文档编辑器尚未完成初始化')
+  }
+
+  const before = bridge.getValue()
+  let working = before
+  let appliedCount = 0
+  for (const item of replacements) {
+    const find = normalizeToolString(item?.find ?? item?.target ?? item?.old_text ?? item?.oldText)
+    const replacementProvided = Object.prototype.hasOwnProperty.call(item || {}, 'replace')
+      || Object.prototype.hasOwnProperty.call(item || {}, 'replacement')
+      || Object.prototype.hasOwnProperty.call(item || {}, 'new_text')
+      || Object.prototype.hasOwnProperty.call(item || {}, 'newText')
+    const replacement = normalizeToolString(item?.replace ?? item?.replacement ?? item?.new_text ?? item?.newText)
+    if (!find || !replacementProvided) {
+      throw new Error('replace_document_blocks 中的每一项都需要 find 和 replace 参数')
+    }
+    const payload = `[[FIND]]${find}[[/FIND]]\n[[REPLACE]]${replacement}[[/REPLACE]]`
+    const result = applyBlockReplacePayload(working, payload)
+    if (!result.ok) {
+      throw new Error(result.reason || `replace_document_blocks 在第 ${appliedCount + 1} 项未产生有效修改`)
+    }
+    working = result.value
+    appliedCount += 1
+  }
+
+  if (working === before) {
+    throw new Error('replace_document_blocks 未产生有效修改')
+  }
+
+  bridge.setValue(working)
+
+  return {
+    applied: true,
+    mode: 'replace_document_blocks',
+    applied_count: appliedCount,
+    content_length_before: before.length,
+    content_length_after: working.length,
+    unsaved_changes: true,
+    target_document: serializeNodeEntry(target.entry),
+    state: await getCurrentPageState(),
+  }
+}
+
+async function swapDocumentSectionsTool(rawArgs: Record<string, any>) {
+  const args = expandToolArgs(rawArgs)
+  const firstHeading = normalizeToolString(
+    args.first_heading ?? args.firstHeading ?? args.heading_a ?? args.headingA ?? args.from_heading ?? args.fromHeading,
+  )
+  const secondHeading = normalizeToolString(
+    args.second_heading ?? args.secondHeading ?? args.heading_b ?? args.headingB ?? args.to_heading ?? args.toHeading,
+  )
+  if (!firstHeading || !secondHeading) {
+    throw new Error('swap_document_sections 需要 first_heading 和 second_heading 参数')
+  }
+
+  let target = null
+  if (
+    args.doc_id !== undefined
+    || args.doc_path !== undefined
+    || args.doc_name !== undefined
+    || args.node_id !== undefined
+    || args.node_path !== undefined
+    || args.node_name !== undefined
+    || args.project_id !== undefined
+    || args.project_name !== undefined
+  ) {
+    target = await resolveNodeTarget({
+      ...args,
+      node_id: args.doc_id ?? args.node_id ?? args.docId ?? args.nodeId,
+      node_path: args.doc_path ?? args.node_path ?? args.docPath ?? args.nodePath,
+      node_name: args.doc_name ?? args.node_name ?? args.docName ?? args.nodeName,
+    })
+  } else if (docs.currentNode?.node_type === 'doc' && projects.currentProject) {
+    const rows = flattenDocTree(docs.tree)
+    const entry = rows.find((item) => item.node.id === docs.currentNode?.id) || null
+    if (entry) {
+      target = { project: projects.currentProject, tree: docs.tree, entry }
+    }
+  }
+
+  if (!target) {
+    throw new Error('未找到要互换章节的文档')
+  }
+  if (target.entry.node.node_type !== 'doc') {
+    throw new Error('swap_document_sections 只能修改文档，不能修改目录')
+  }
+
+  if (projects.currentProjectId !== target.project.id || docs.currentNode?.id !== target.entry.node.id || showProjectOverview.value) {
+    if (projects.currentProjectId !== target.project.id || showProjectOverview.value) {
+      await enterProject(target.project.id)
+    }
+    await openDocNode(target.entry.node.id)
+  }
+
+  const bridge = await waitForEditorBridge(target.entry.node.id)
+  if (!bridge) {
+    throw new Error('目标文档编辑器尚未完成初始化')
+  }
+
+  const before = bridge.getValue()
+  const result = applySectionSwap(before, firstHeading, secondHeading)
+  if (!result.ok || result.value === before) {
+    throw new Error(result.reason || 'swap_document_sections 未产生有效修改')
+  }
+
+  bridge.setValue(result.value)
+
+  return {
+    applied: true,
+    mode: 'swap_document_sections',
+    first_heading: firstHeading,
+    second_heading: secondHeading,
+    target: result.target || `${firstHeading} <-> ${secondHeading}`,
+    content_length_before: before.length,
+    content_length_after: result.value.length,
+    unsaved_changes: true,
+    target_document: serializeNodeEntry(target.entry),
+    state: await getCurrentPageState(),
+  }
+}
+
 async function updateTreeNodeMetaTool(rawArgs: Record<string, any>) {
   const args = expandToolArgs(rawArgs)
   const nextName = normalizeToolString(args.new_name ?? args.newName ?? args.name)
@@ -1645,9 +2101,10 @@ function getMarkdownEditorRuntimeTool() {
       '如果用户明确要求重命名文档或目录，优先调用 update_tree_node_meta。',
       '如果用户明确要求修改头像，优先调用 update_profile；它目前支持 avatar、upload_id 或 clear_avatar。',
       '如果用户要管理附件，优先先调用 list_uploads，再根据筛选结果调用 delete_uploads 批量删除。',
-      'For document writes, use tools only as needed for locate/read/open, then emit one of: [[ACTION:append]], [[ACTION:replace]], [[ACTION:rewrite_section]], [[ACTION:replace_block]].',
-      'rewrite_section payload format: [[TARGET]]Section Title[[/TARGET]][[CONTENT]]New Section Markdown[[/CONTENT]].',
-      'replace_block payload format: [[FIND]]old snippet[[/FIND]][[REPLACE]]new snippet[[/REPLACE]].',
+      'For streamed document writes, use [[ACTION:append]] for empty documents and end-of-document continuation writes, including the first draft into an empty document.',
+      'Use [[ACTION:replace]] only when you truly need to replace the full document body with a new complete version.',
+      'For partial edits, prefer rewrite_document_section, replace_document_block, replace_document_blocks, or swap_document_sections instead of ACTION markers.',
+      'swap_document_sections can swap whole sections even when the two headings are at different markdown levels.',
       '只有在需要细粒度 DOM/编辑器动作时再使用 execute_browser_javascript。',
     ],
   }
@@ -1736,6 +2193,12 @@ function installAgentToolRuntime() {
     openTreeNode: openTreeNodeTool,
     readDocument: readDocumentTool,
     readEditorSnapshot: readEditorSnapshotTool,
+    replaceCurrentDocumentContent: replaceCurrentDocumentContentTool,
+    appendCurrentDocumentContent: appendCurrentDocumentContentTool,
+    rewriteDocumentSection: rewriteDocumentSectionTool,
+    replaceDocumentBlock: replaceDocumentBlockTool,
+    replaceDocumentBlocks: replaceDocumentBlocksTool,
+    swapDocumentSections: swapDocumentSectionsTool,
     saveCurrentDocument: saveCurrentDocumentTool,
     updateTreeNodeMeta: updateTreeNodeMetaTool,
     deleteTreeNodes: deleteTreeNodesTool,

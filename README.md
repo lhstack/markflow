@@ -9,9 +9,27 @@ MarkFlow 是一个基于 `Rust + Vue 3` 的轻量文档系统，核心结构为�
 
 ## 当前版本
 
-当前版本：`v1.0.6`
+当前工作区目标版本：`v1.0.7`
 
 以下版本说明基于 git 实际提交与当前工作区待发布改动整理。
+
+### v1.0.7
+
+基于 `v1.0.6..当前工作区` 的改动，`v1.0.7` 重点收敛智能体执行链路、模型接入配置和对话写作体验：
+
+- 智能体主循环改为后端主导的 rig 风格 loop，后端统一维护多轮消息历史、工具结果回灌、continuation 与终止条件，不再依赖前端自行推进执行状态
+- 新增前端工具回调桥，支持后端通过 `tool.request -> /api/agent/tool-callback` 请求前端执行工具，并将结果作为标准 tool result 回灌模型上下文
+- 将 `[[ACTION:append]] / [[ACTION:replace]]` 文档动作协议纳入 loop 语义：ACTION 写入完成后会被视为一次 synthetic tool result，和普通工具调用一样参与后续续轮
+- 补齐 ACTION 续写场景：当模型输出的 ACTION 块未完整闭合时，系统会自动发起 continuation 补齐剩余正文与 `[[/ACTION]]`，减少长文写作中途中断
+- 修正多文档连续写入链路：同一轮中即使 ACTION 与保存/打开下一篇文档混合出现，也会正确记录写入完成结果并继续下一篇
+- 收紧文档写作提示词：空文档首稿与文末续写统一优先 `[[ACTION:append]]...[[/ACTION]]`，整篇整体替换时使用 `[[ACTION:replace]]...[[/ACTION]]`
+- 优化聊天面板消息展示：协议标记不再直接显示到聊天记录中；每轮只保留最新执行结果摘要；loop 完成时再单独输出最终总结块，避免覆盖过程消息
+- 调整聊天窗口布局，去掉运行状态/工具状态侧栏，收紧为单栏聊天窗口，并补齐消息自动滚动到最新内容
+- 新增 `AgentWorkbench`，支持按 provider kind 管理模型接入，区分 `openai / anthropic / gemini`，并为单模型配置 `modalities / thinking / tools / reasoning effort / additional params`
+- 强化 OpenAI 兼容网关接入配置，补充 `provider_kind`、`model_configs`、模态与工具开关的持久化存储与数据库迁移
+- 扩展聊天附件能力：除图片外，支持更多文本型附件，未知后缀但可解析为 UTF-8 文本的文件也可作为聊天文档附件提交给模型
+- 强化附件与资料工具：支持按类型、名称、是否未引用筛选/批量删除附件，也支持通过已有图片附件设置头像
+- 优化编辑器写入与局部改写链路，补充 Markdown 局部编辑辅助逻辑与更清晰的前端写入反馈
 
 ### v1.0.6
 
@@ -142,6 +160,15 @@ MarkFlow 是一个基于 `Rust + Vue 3` 的轻量文档系统，核心结构为�
 - 统一上传链路（按钮/拖拽/粘贴）
 - 粘贴上传去重，避免重复创建附件
 - 附件管理（替换、删除、引用检查）
+
+- 智能体与 AI 协作
+- 页面内对话助手与独立 Agent Workbench
+- provider kind / model config / modalities 管理
+- 前端工具调用桥接与后端主导多轮 loop
+- `[[ACTION:append]] / [[ACTION:replace]]` 流式写文协议
+- ACTION 未闭合时自动 continuation 补写
+- 多文档连续写入与最终执行总结
+- 聊天附件（图片 + 文本文档）与当前页面上下文感知
 
 ## 技术栈
 

@@ -1,9 +1,12 @@
 import { describeAgentEditorBridge, getAgentEditorBridge } from '@/utils/agentEditorBridge'
+import type { AgentToolCapability, AgentToolStagePolicy } from '@/agent/protocol'
 
 export interface AgentToolCall {
   call_id: string
   name: string
   arguments: string
+  stage_policy?: AgentToolStagePolicy | string
+  capabilities?: AgentToolCapability[] | string[]
 }
 
 export interface AgentToolOutputPayload {
@@ -31,6 +34,10 @@ export interface AgentToolRuntime {
   openTreeNode: (args: Record<string, any>) => Promise<unknown>
   readDocument: (args: Record<string, any>) => Promise<unknown>
   readEditorSnapshot: (args: Record<string, any>) => Promise<unknown>
+  rewriteDocumentSection: (args: Record<string, any>) => Promise<unknown>
+  replaceDocumentBlock: (args: Record<string, any>) => Promise<unknown>
+  replaceDocumentBlocks: (args: Record<string, any>) => Promise<unknown>
+  swapDocumentSections: (args: Record<string, any>) => Promise<unknown>
   saveCurrentDocument: (args: Record<string, any>) => Promise<unknown>
   updateTreeNodeMeta: (args: Record<string, any>) => Promise<unknown>
   deleteTreeNodes: (args: Record<string, any>) => Promise<unknown>
@@ -186,6 +193,10 @@ function createMarkflowJsHelper(toolRuntime: AgentToolRuntime) {
     openTreeNode: (args: Record<string, any>) => toolRuntime.openTreeNode(args),
     readDocument: (args: Record<string, any>) => toolRuntime.readDocument(args),
     readEditorSnapshot: (args: Record<string, any> = {}) => toolRuntime.readEditorSnapshot(args),
+    rewriteDocumentSection: (args: Record<string, any>) => toolRuntime.rewriteDocumentSection(args),
+    replaceDocumentBlock: (args: Record<string, any>) => toolRuntime.replaceDocumentBlock(args),
+    replaceDocumentBlocks: (args: Record<string, any>) => toolRuntime.replaceDocumentBlocks(args),
+    swapDocumentSections: (args: Record<string, any>) => toolRuntime.swapDocumentSections(args),
     saveCurrentDocument: (args: Record<string, any> = {}) => toolRuntime.saveCurrentDocument(args),
     updateTreeNodeMeta: (args: Record<string, any>) => toolRuntime.updateTreeNodeMeta(args),
     deleteTreeNodes: (args: Record<string, any>) => toolRuntime.deleteTreeNodes(args),
@@ -301,6 +312,18 @@ export async function executeAgentToolCalls(calls: AgentToolCall[]): Promise<Age
           break
         case 'read_editor_snapshot':
           output = await toolRuntime.readEditorSnapshot(args)
+          break
+        case 'rewrite_document_section':
+          output = await toolRuntime.rewriteDocumentSection(args)
+          break
+        case 'replace_document_block':
+          output = await toolRuntime.replaceDocumentBlock(args)
+          break
+        case 'replace_document_blocks':
+          output = await toolRuntime.replaceDocumentBlocks(args)
+          break
+        case 'swap_document_sections':
+          output = await toolRuntime.swapDocumentSections(args)
           break
         case 'save_current_document':
           output = await toolRuntime.saveCurrentDocument(args)

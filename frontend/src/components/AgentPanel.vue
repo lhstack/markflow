@@ -76,123 +76,111 @@
       </header>
 
       <section class="agent-main">
-        <div ref="messagesRef" class="agent-messages">
-          <section v-if="currentSessionTaskAnalysis" class="agent-runtime-card">
-            <div class="agent-plan-card-header">
-              <span class="agent-plan-card-title">任务分析</span>
-              <span class="agent-plan-card-status" :class="{ active: currentSessionTaskAnalysis.mode === 'plan' }">
-                {{ currentSessionTaskAnalysis.mode === 'plan' ? 'Plan Mode' : 'Chat Mode' }}
-              </span>
-            </div>
-            <div class="agent-runtime-grid">
-              <span>意图：{{ currentSessionTaskAnalysis.intent || 'unknown' }}</span>
-              <span>复杂度：{{ currentSessionTaskAnalysis.complexity || 'unknown' }}</span>
-              <span>需要工具：{{ currentSessionTaskAnalysis.requiresTools ? '是' : '否' }}</span>
-              <span>需要确认：{{ currentSessionTaskAnalysis.requiresUserConfirmation ? '是' : '否' }}</span>
-            </div>
-            <pre v-if="currentSessionTaskAnalysis.deliverable" class="agent-plan-card-content">{{ currentSessionTaskAnalysis.deliverable }}</pre>
-          </section>
-
-          <section v-if="currentSessionRuntimePlan" class="agent-plan-card">
-            <div class="agent-plan-card-header">
-              <span class="agent-plan-card-title">结构化计划</span>
-              <span class="agent-plan-card-status" :class="{ active: currentSessionRuntimePlan.status === 'running' }">
-                {{ currentSessionRuntimePlan.status }}
-              </span>
-            </div>
-            <pre class="agent-plan-card-content">{{ currentSessionRuntimePlan.goal }}</pre>
-            <div class="agent-plan-steps">
-              <div
-                v-for="step in currentSessionRuntimePlan.steps"
-                :key="step.id"
-                class="agent-plan-step"
-                :class="step.status"
+        <div class="agent-workspace">
+          <div ref="messagesRef" class="agent-messages">
+            <template v-if="visibleMessages.length">
+              <article
+                v-for="message in visibleMessages"
+                :key="message.id"
+                class="agent-message"
+                :class="message.role"
               >
-                <div class="agent-plan-step-title">{{ step.title }}</div>
-                <div class="agent-plan-step-meta">{{ step.kind }} · {{ step.status }}</div>
-              </div>
+                <div class="message-role">{{ message.role === 'user' ? '用户' : '助手' }}</div>
+
+                <details
+                  v-if="message.role === 'assistant' && displayedMessageReasoning(message)"
+                  class="message-reasoning"
+                >
+                  <summary>推理</summary>
+                  <pre class="message-reasoning-content">{{ displayedMessageReasoning(message) }}</pre>
+                </details>
+
+                <div v-if="message.attachments?.length" class="message-attachments">
+                  <div
+                    v-for="attachment in message.attachments"
+                    :key="`${message.id}-${attachment.uploadId}`"
+                    class="message-attachment-chip"
+                    @click="openAttachment(attachment)"
+                  >
+                    <span class="message-attachment-name">{{ attachment.name }}</span>
+                    <span class="message-attachment-meta">{{ attachment.kind === 'image' ? '图片' : '文件' }}</span>
+                  </div>
+                </div>
+
+                <pre
+                  v-if="displayedMessageContent(message) || (streaming && message.role === 'assistant')"
+                  class="message-content"
+                >{{ displayedMessageContent(message) || '...' }}</pre>
+              </article>
+            </template>
+
+            <div v-else class="agent-empty">
+              <div class="agent-empty-title">可以直接开始对话或写文档</div>
+              <div class="agent-empty-desc">直接描述你的目标即可，模型会判断是答复、续写、改写，或在兼容接口上继续流式返回结果。</div>
             </div>
-          </section>
-
-          <section v-if="currentSessionLastPlan" class="agent-plan-card">
-            <div class="agent-plan-card-header">
-              <span class="agent-plan-card-title">{{ currentSession?.pendingPlan ? '待确认计划' : '最近执行计划' }}</span>
-              <span class="agent-plan-card-status" :class="{ active: Boolean(currentSession?.pendingPlan) }">
-                {{ currentSession?.pendingPlan ? '进行中' : '已保留' }}
-              </span>
-            </div>
-            <pre class="agent-plan-card-content">{{ currentSessionLastPlan }}</pre>
-          </section>
-
-          <section v-if="currentSessionToolEvents.length" class="agent-runtime-card">
-            <div class="agent-plan-card-header">
-              <span class="agent-plan-card-title">工具状态</span>
-              <span class="agent-plan-card-status">{{ currentSessionToolEvents.length }}</span>
-            </div>
-            <div class="agent-tool-events">
-              <div v-for="event in currentSessionToolEvents.slice(-8)" :key="event.id" class="agent-tool-event">
-                <span class="agent-tool-event-name">{{ event.tool }}</span>
-                <span class="agent-tool-event-status">{{ event.status }}</span>
-                <span class="agent-tool-event-summary">{{ event.summary }}</span>
-              </div>
-            </div>
-          </section>
-
-          <section v-if="currentSessionArtifacts.length" class="agent-runtime-card">
-            <div class="agent-plan-card-header">
-              <span class="agent-plan-card-title">Artifacts</span>
-              <span class="agent-plan-card-status" :class="{ active: currentSessionArtifacts.some((artifact) => artifact.status === 'drafting') }">
-                {{ currentSessionArtifacts.length }}
-              </span>
-            </div>
-            <article v-for="artifact in currentSessionArtifacts.slice(-2)" :key="artifact.id" class="agent-artifact-card">
-              <div class="agent-artifact-header">
-                <span class="agent-artifact-title">{{ artifact.title }}</span>
-                <span class="agent-artifact-status">{{ artifact.status }}</span>
-              </div>
-              <pre class="agent-plan-card-content">{{ artifact.content }}</pre>
-            </article>
-          </section>
-
-          <template v-if="visibleMessages.length">
-            <article
-              v-for="message in visibleMessages"
-              :key="message.id"
-              class="agent-message"
-              :class="message.role"
-            >
-              <div class="message-role">{{ message.role === 'user' ? '用户' : '助手' }}</div>
-
-              <details
-                v-if="message.role === 'assistant' && displayedMessageReasoning(message)"
-                class="message-reasoning"
-              >
-                <summary>推理</summary>
-                <pre class="message-reasoning-content">{{ displayedMessageReasoning(message) }}</pre>
-              </details>
-
-              <pre class="message-content">{{ displayedMessageContent(message) || (streaming && message.role === 'assistant' ? '...' : '') }}</pre>
-            </article>
-          </template>
-
-          <div v-else class="agent-empty">
-            <div class="agent-empty-title">可以直接开始对话或写文档</div>
-            <div class="agent-empty-desc">直接描述你的目标即可，模型会判断是答复、续写、改写，或在兼容接口上继续流式返回结果。</div>
           </div>
-        </div>
 
-        <div class="agent-composer">
-          <div class="agent-mode-tip">{{ modeTip }}</div>
-          <textarea
-            v-model="prompt"
-            class="agent-textarea"
-            :placeholder="textareaPlaceholder"
-            :disabled="streaming"
-            @keydown="handleComposerKeydown"
+          <div class="agent-composer">
+            <div class="agent-mode-tip">{{ modeTip }}</div>
+            <textarea
+              v-model="prompt"
+              class="agent-textarea"
+              :placeholder="textareaPlaceholder"
+              :disabled="streaming"
+              @keydown="handleComposerKeydown"
+              @paste="handleComposerPaste"
+            />
+
+          <input
+            ref="attachmentInputRef"
+            class="agent-hidden-input"
+            type="file"
+            :accept="composerAttachmentAccept"
+            multiple
+            :disabled="streaming || attachmentUploading"
+            @change="handleAttachmentInputChange"
           />
 
-          <div class="agent-composer-footer">
-            <div class="agent-shortcut-tip">Ctrl+Enter / Cmd+Enter 发送，Enter 换行</div>
+          <div v-if="composerAttachmentEnabled || composerAttachments.length" class="agent-attachment-panel">
+            <div class="agent-attachment-head">
+              <div v-if="composerAttachments.length" class="agent-attachment-list">
+                <div
+                  v-for="attachment in composerAttachments"
+                  :key="attachment.localId"
+                  class="agent-attachment-item"
+                  @click="openAttachment(attachment)"
+                >
+                  <div class="agent-attachment-item-main">
+                    <span class="agent-attachment-item-name">{{ attachment.name }}</span>
+                  </div>
+                  <span class="agent-attachment-item-meta">
+                    {{ attachment.kind === 'image' ? '图片' : '文件' }} · {{ formatAttachmentSize(attachment.size) }}
+                  </span>
+                  <button
+                    class="agent-attachment-remove"
+                    :disabled="streaming || attachmentUploading"
+                    @click.stop="removeComposerAttachment(attachment.localId)"
+                  >
+                    移除
+                  </button>
+                </div>
+              </div>
+
+              <button
+                v-if="composerAttachmentEnabled"
+                class="agent-attachment-trigger"
+                :disabled="streaming || attachmentUploading"
+                @click="openAttachmentPicker"
+              >
+                {{ attachmentUploading ? '上传中...' : '选择附件' }}
+              </button>
+            </div>
+          </div>
+
+            <div class="agent-composer-footer">
+            <div class="agent-shortcut-tip">
+              Ctrl+Enter / Cmd+Enter 发送，Enter 换行<span v-if="composerAttachmentEnabled">，支持粘贴并上传{{ composerSupportsImage && composerSupportsDocument ? '图片和文件' : composerSupportsImage ? '图片' : '文件' }}</span>
+            </div>
 
             <div class="agent-bottom-bar">
               <div class="agent-controls">
@@ -267,6 +255,7 @@
                 </button>
               </div>
             </div>
+            </div>
           </div>
         </div>
       </section>
@@ -282,21 +271,34 @@
               class="provider-item"
               :class="{ active: provider.id === providerDraft.id }"
               @click="editProvider(provider.id)"
+              @dblclick="activateProvider(provider.id)"
             >
               <span class="provider-item-name">
                 {{ provider.name }}
                 <span v-if="provider.id === activeProviderId" class="provider-item-tag">已激活</span>
               </span>
-              <span class="provider-item-meta">{{ normalizedProviderBaseUrl(provider.baseUrl) }}</span>
+              <span class="provider-item-meta">{{ providerKindLabel(provider.providerKind) }} · {{ normalizedProviderBaseUrl(provider.baseUrl) }}</span>
             </button>
           </div>
         </aside>
 
         <section class="provider-editor">
           <el-input v-model="providerDraft.name" placeholder="供应商名称，例如 OpenAI 官方" />
+          <el-select v-model="providerDraft.providerKind" placeholder="供应商类型">
+            <el-option label="OpenAI / Compatible" value="openai" />
+            <el-option label="Anthropic / Claude" value="anthropic" />
+            <el-option label="Gemini" value="gemini" />
+          </el-select>
           <el-input v-model="providerDraft.baseUrl" placeholder="Base URL，例如 https://api.openai.com/v1" />
           <el-input v-model="providerDraft.apiKey" type="password" show-password placeholder="API Key" />
-          <div class="provider-hint">供应商配置仅保存在当前浏览器。保存后请到“模型管理”里配置可选模型。</div>
+          <div class="provider-hint">
+            <div>{{ providerDraftPreset.summary }}</div>
+            <div>默认 Base URL：{{ providerDraftPreset.baseUrl }}</div>
+            <div>认证方式：{{ providerDraftPreset.auth }}</div>
+            <div>拉取模型：{{ providerDraftPreset.modelsApi }}</div>
+            <div>常见模型：{{ providerDraftPreset.models.join('、') }}</div>
+            <div>供应商配置仅保存在当前浏览器。保存后请到“模型管理”里配置可选模型。</div>
+          </div>
         </section>
       </div>
       <template #footer>
@@ -318,7 +320,7 @@
           <el-button :loading="modelLoading" @click="fetchProviderModels">同步远端模型</el-button>
         </div>
 
-        <div class="provider-hint">左侧是当前可用模型，右侧是 SDK 返回模型。勾选右侧模型后，当前会话选择框就能直接使用。</div>
+        <div class="provider-hint">左侧是当前可用模型，右侧是 SDK 返回模型。勾选右侧模型后，当前会话选择框就能直接使用；左侧每个模型上的“参数”按钮可打开完整模型参数配置。</div>
 
         <div class="model-grid">
           <section class="model-pane">
@@ -337,8 +339,14 @@
                     <span class="current-model-name">{{ entry.id }}</span>
                     <span v-if="entry.isCustom" class="model-source-badge is-custom">自定义</span>
                     <span v-else-if="entry.isRemote" class="model-source-badge">SDK</span>
+                    <el-tooltip v-if="entry.isConfigured" content="已配置模型参数" placement="top">
+                      <span class="model-configured-dot" aria-label="已配置模型参数" />
+                    </el-tooltip>
                   </div>
                   <div class="current-model-actions">
+                    <el-button class="model-action-button" text @click="openModelConfigDialog(entry.id)">
+                      参数
+                    </el-button>
                     <el-button
                       link
                       type="danger"
@@ -402,13 +410,236 @@
         <el-button type="primary" :disabled="!activeProvider" @click="saveModelDraft">保存</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog
+      v-model="showModelConfigDialog"
+      class="agent-dialog model-config-dialog"
+      :title="editingModelConfigName ? `模型参数 · ${editingModelConfigName}` : '模型参数'"
+      width="760px"
+      align-center
+      append-to-body
+      destroy-on-close
+    >
+      <div class="model-config-dialog-body">
+        <div class="model-config-toolbar">
+          <div class="model-config-reference">
+            <div class="model-config-reference-title">参考参数</div>
+            <div class="model-config-reference-text">不填写的字段会继续使用 SDK / Provider / 模型默认值，不会强行覆盖。</div>
+            <div class="model-config-reference-text">“填充推荐参数”会写入一套适合作为起点的建议值，你之后仍然可以逐项调整。</div>
+            <div class="model-config-reference-text">这里保存的是当前编辑状态；关闭子弹窗后，还需要回到“模型管理”点击一次“保存”才会正式持久化。</div>
+          </div>
+          <div class="model-config-toolbar-actions">
+            <el-button @click="resetModelConfigDraftToCurrent">恢复当前配置</el-button>
+            <el-button @click="applyRecommendedModelConfig">填充推荐参数</el-button>
+            <el-button type="danger" plain @click="removeCurrentModelConfig">清除配置</el-button>
+          </div>
+        </div>
+
+        <div class="model-config-scroll">
+          <div class="model-config-grid">
+            <label class="model-config-field model-config-field-full">
+              <span class="model-config-label">
+                支持模态
+                <el-tooltip :content="modelParameterHelp.modalities" placement="top">
+                  <el-icon class="param-help-icon"><QuestionFilled /></el-icon>
+                </el-tooltip>
+              </span>
+              <div class="model-modality-row">
+                <label v-for="modality in modalityOptions" :key="modality.value" class="model-modality-item">
+                  <input
+                    type="checkbox"
+                    :checked="modelConfigDraft.modalities.includes(modality.value)"
+                    @change="($event.target as HTMLInputElement).checked
+                      ? modelConfigDraft.modalities = uniqueStrings([...modelConfigDraft.modalities, modality.value])
+                      : modelConfigDraft.modalities = modelConfigDraft.modalities.filter((item) => item !== modality.value)"
+                  />
+                  <span>{{ modality.label }}</span>
+                </label>
+              </div>
+            </label>
+
+            <label class="model-config-field">
+              <span class="model-config-label">
+                工具调用
+                <el-tooltip :content="modelParameterHelp.tools_enabled" placement="top">
+                  <el-icon class="param-help-icon"><QuestionFilled /></el-icon>
+                </el-tooltip>
+              </span>
+              <el-select v-model="modelConfigDraft.tools_enabled">
+                <el-option v-for="option in booleanOptions" :key="`tools-${option.value}`" :label="option.label" :value="option.value" />
+              </el-select>
+            </label>
+
+            <label class="model-config-field">
+              <span class="model-config-label">
+                Thinking
+                <el-tooltip :content="modelParameterHelp.thinking" placement="top">
+                  <el-icon class="param-help-icon"><QuestionFilled /></el-icon>
+                </el-tooltip>
+              </span>
+              <el-select v-model="modelConfigDraft.thinking">
+                <el-option v-for="option in booleanOptions" :key="`thinking-${option.value}`" :label="option.label" :value="option.value" />
+              </el-select>
+            </label>
+
+            <label class="model-config-field">
+              <span class="model-config-label">
+                Temperature
+                <el-tooltip :content="modelParameterHelp.temperature" placement="top">
+                  <el-icon class="param-help-icon"><QuestionFilled /></el-icon>
+                </el-tooltip>
+              </span>
+              <el-input v-model="modelConfigDraft.temperatureText" placeholder="留空表示默认，例如 0.7" />
+            </label>
+
+            <label class="model-config-field">
+              <span class="model-config-label">
+                Max Output Tokens
+                <el-tooltip :content="modelParameterHelp.max_output_tokens" placement="top">
+                  <el-icon class="param-help-icon"><QuestionFilled /></el-icon>
+                </el-tooltip>
+              </span>
+              <el-input v-model="modelConfigDraft.maxTokensText" placeholder="留空表示默认，例如 4096" />
+            </label>
+
+            <label class="model-config-field">
+              <span class="model-config-label">
+                Top P
+                <el-tooltip :content="modelParameterHelp.top_p" placement="top">
+                  <el-icon class="param-help-icon"><QuestionFilled /></el-icon>
+                </el-tooltip>
+              </span>
+              <el-input v-model="modelConfigDraft.topPText" placeholder="留空表示默认" />
+            </label>
+
+            <label class="model-config-field">
+              <span class="model-config-label">
+                Top K
+                <el-tooltip :content="modelParameterHelp.top_k" placement="top">
+                  <el-icon class="param-help-icon"><QuestionFilled /></el-icon>
+                </el-tooltip>
+              </span>
+              <el-input v-model="modelConfigDraft.topKText" placeholder="留空表示默认" />
+            </label>
+
+            <label class="model-config-field">
+              <span class="model-config-label">
+                Presence Penalty
+                <el-tooltip :content="modelParameterHelp.presence_penalty" placement="top">
+                  <el-icon class="param-help-icon"><QuestionFilled /></el-icon>
+                </el-tooltip>
+              </span>
+              <el-input v-model="modelConfigDraft.presencePenaltyText" placeholder="留空表示默认" />
+            </label>
+
+            <label class="model-config-field">
+              <span class="model-config-label">
+                Frequency Penalty
+                <el-tooltip :content="modelParameterHelp.frequency_penalty" placement="top">
+                  <el-icon class="param-help-icon"><QuestionFilled /></el-icon>
+                </el-tooltip>
+              </span>
+              <el-input v-model="modelConfigDraft.frequencyPenaltyText" placeholder="留空表示默认" />
+            </label>
+
+            <label class="model-config-field">
+              <span class="model-config-label">
+                并行工具调用
+                <el-tooltip :content="modelParameterHelp.parallel_tool_calls" placement="top">
+                  <el-icon class="param-help-icon"><QuestionFilled /></el-icon>
+                </el-tooltip>
+              </span>
+              <el-select v-model="modelConfigDraft.parallelToolCalls">
+                <el-option v-for="option in booleanOptions" :key="`parallel-${option.value}`" :label="option.label" :value="option.value" />
+              </el-select>
+            </label>
+
+            <label class="model-config-field">
+              <span class="model-config-label">
+                Reasoning Effort
+                <el-tooltip :content="modelParameterHelp.reasoning_effort" placement="top">
+                  <el-icon class="param-help-icon"><QuestionFilled /></el-icon>
+                </el-tooltip>
+              </span>
+              <el-select v-model="modelConfigDraft.reasoningEffort">
+                <el-option v-for="option in reasoningEffortOptions" :key="option.value || 'unset'" :label="option.label" :value="option.value" />
+              </el-select>
+            </label>
+
+            <label class="model-config-field model-config-field-full">
+              <span class="model-config-label">
+                Stop Sequences
+                <el-tooltip :content="modelParameterHelp.stop_sequences" placement="top">
+                  <el-icon class="param-help-icon"><QuestionFilled /></el-icon>
+                </el-tooltip>
+              </span>
+              <el-input
+                v-model="modelConfigDraft.stopSequencesText"
+                type="textarea"
+                :rows="4"
+                placeholder="每行一个停止词，留空表示不设置"
+              />
+            </label>
+
+            <label class="model-config-field model-config-field-full">
+              <span class="model-config-label">
+                Response MIME Type
+                <el-tooltip :content="modelParameterHelp.response_mime_type" placement="top">
+                  <el-icon class="param-help-icon"><QuestionFilled /></el-icon>
+                </el-tooltip>
+              </span>
+              <el-input v-model="modelConfigDraft.responseMimeType" placeholder="例如 application/json" />
+            </label>
+
+            <label class="model-config-field model-config-field-full">
+              <span class="model-config-label">
+                高级附加参数
+                <el-tooltip :content="modelParameterHelp.additional_params" placement="top">
+                  <el-icon class="param-help-icon"><QuestionFilled /></el-icon>
+                </el-tooltip>
+              </span>
+              <el-input
+                v-model="modelConfigDraft.additionalParamsText"
+                type="textarea"
+                :rows="8"
+                placeholder='请输入 JSON 对象，例如 { "top_logprobs": 3 }'
+              />
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <template #footer>
+        <div class="model-config-footer">
+          <div class="model-config-footer-tip">应用后会回写到当前模型草稿，最后仍需在“模型管理”点一次“保存”。</div>
+          <div class="model-config-footer-actions">
+            <el-button @click="showModelConfigDialog = false">取消</el-button>
+            <el-button type="primary" @click="saveCurrentModelConfig">应用到当前模型</el-button>
+          </div>
+        </div>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="showAttachmentPreview"
+      class="agent-dialog attachment-preview-dialog"
+      title="图片预览"
+      width="min(920px, calc(100vw - 36px))"
+      append-to-body
+      destroy-on-close
+      align-center
+    >
+      <div class="attachment-preview-body">
+        <img v-if="previewAttachmentUrl" :src="previewAttachmentUrl" alt="附件预览" class="attachment-preview-image" />
+      </div>
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, triggerRef, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Plus, Setting } from '@element-plus/icons-vue'
+import { Plus, QuestionFilled, Setting } from '@element-plus/icons-vue'
 
 import request from '@/utils/request'
 import {
@@ -436,16 +667,13 @@ import {
   AGENT_WRITE_ACTION_MODES,
   AGENT_WRITE_ACTION_OPEN_MARKERS,
   DEFAULT_AGENT_BASE_URL,
-  controlNeedsSave,
-  controlRequestsAutoContinuation,
-  controlRequestsPlanConfirmation,
-  extractAgentControlBlock,
-  getAgentControlBlockRegex,
   resolveAgentEditorSnapshotSource,
+  toolHasOnlyCapabilities,
   resolveAgentWriteMode,
   type AgentControlBlock,
   type AgentPageScope,
 } from '@/agent/protocol'
+import { useSystemStore } from '@/stores/system'
 
 type PageScope = AgentPageScope
 type DocType = 'doc' | 'dir' | null
@@ -453,6 +681,7 @@ type SessionRole = 'user' | 'assistant' | 'system'
 type RequestRole = SessionRole
 type StreamAction = 'chat' | AgentWriterMode
 type RouteKind = 'overview' | 'project' | 'doc'
+type ProviderKind = 'openai' | 'anthropic' | 'gemini'
 
 interface AgentRouteTarget {
   kind: RouteKind
@@ -464,11 +693,24 @@ interface AgentMessage {
   role: SessionRole
   content: string
   reasoning?: string
+  attachments?: AgentAttachment[]
+  internalStatus?: boolean
 }
 
 interface AgentRequestMessage {
   role: RequestRole
   content: string
+  attachments?: AgentAttachment[]
+}
+
+interface AgentAttachment {
+  localId: string
+  uploadId: number
+  kind: 'image' | 'document'
+  name: string
+  url: string
+  contentType: string | null
+  size: number
 }
 
 interface AgentRuntimePlanStep {
@@ -479,6 +721,8 @@ interface AgentRuntimePlanStep {
   status: 'pending' | 'running' | 'completed' | 'failed' | 'blocked' | string
   toolHints: string[]
   requiresConfirmation: boolean
+  requiresDocumentWrite: boolean
+  requiresDocumentSave: boolean
 }
 
 interface AgentRuntimePlan {
@@ -532,11 +776,21 @@ interface AgentExecutionToolCallSummary {
   output: string | null
   ok: boolean | null
   outcome: 'success' | 'noop' | 'error' | 'unknown'
+  stagePolicy?: string | null
+  capabilities?: string[]
 }
 
 interface AgentExecutionState {
+  currentMode: 'normal' | 'plan' | string
+  awaiting: string | null
+  currentActionKind: string | null
+  currentActionStatus: string | null
+  currentActionMode: string | null
+  currentActionTarget: string | null
+  confirmationRequired: boolean
   pendingPlan: string | null
   pendingPlanUserReply: string | null
+  planConfirmationDecision: 'approved' | 'rejected' | null
   compositeWriteThenSave: boolean
   semanticContinuation: boolean
   semanticContinuationRound: number
@@ -552,10 +806,20 @@ interface AgentExecutionState {
   planCompletedSteps: string[]
   documentWriteObserved: boolean
   saveAttemptWithoutDocumentChange: boolean
+  lastInterceptCode: string | null
+  lastInterceptMessage: string | null
+  lastInterceptGuidance: string | null
   recentToolCalls: AgentExecutionToolCallSummary[]
 }
 
 interface AgentExecutionMemory {
+  currentMode: 'normal' | 'plan' | string
+  awaiting: string | null
+  currentActionKind: string | null
+  currentActionStatus: string | null
+  currentActionMode: string | null
+  currentActionTarget: string | null
+  confirmationRequired: boolean
   plan: string | null
   assistantSummary: string | null
   controlPhase: string | null
@@ -570,7 +834,16 @@ interface AgentExecutionMemory {
   planCompletedSteps: string[]
   documentWriteObserved: boolean
   saveAttemptWithoutDocumentChange: boolean
+  lastInterceptCode: string | null
+  lastInterceptMessage: string | null
+  lastInterceptGuidance: string | null
   recentToolCalls: AgentExecutionToolCallSummary[]
+}
+
+interface AgentStructuredResponse {
+  message: string
+  state: AgentControlBlock | null
+  plan: AgentRuntimePlan | null
 }
 
 interface AgentSession {
@@ -586,6 +859,7 @@ interface AgentSession {
   transportMode: 'auto' | 'responses' | 'chat'
   previousResponseId: string | null
   pendingPlan: string | null
+  pendingPlanToolOutputs: AgentToolOutputPayload[]
   lastPlan: string | null
   lastExecutionMemory: AgentExecutionMemory | null
   sessionMemory: AgentSessionMemory | null
@@ -597,11 +871,13 @@ interface AgentSession {
 interface AgentProvider {
   id: string
   name: string
+  providerKind: ProviderKind
   baseUrl: string
   hasApiKey: boolean
   remoteModels: string[]
   enabledModels: string[]
   customModels: string[]
+  modelConfigs: Record<string, ProviderModelConfig>
   createdAt: number
   updatedAt: number
 }
@@ -609,14 +885,49 @@ interface AgentProvider {
 interface ProviderDraft {
   id: string | null
   name: string
+  providerKind: ProviderKind
   baseUrl: string
   apiKey: string
+}
+
+interface ProviderModelConfig {
+  modalities: string[]
+  thinking: boolean | null
+  tools_enabled: boolean | null
+  temperature: number | null
+  max_output_tokens: number | null
+  top_p: number | null
+  top_k: number | null
+  presence_penalty: number | null
+  frequency_penalty: number | null
+  parallel_tool_calls: boolean | null
+  reasoning_effort: string | null
+  stop_sequences: string[]
+  response_mime_type: string | null
+  additional_params: Record<string, unknown> | null
 }
 
 interface ModelDraft {
   remoteModels: string[]
   enabledModels: string[]
   customModels: string[]
+}
+
+interface ModelConfigDraft {
+  modalities: string[]
+  thinking: '' | 'true' | 'false'
+  tools_enabled: '' | 'true' | 'false'
+  temperatureText: string
+  maxTokensText: string
+  topPText: string
+  topKText: string
+  presencePenaltyText: string
+  frequencyPenaltyText: string
+  parallelToolCalls: '' | 'true' | 'false'
+  reasoningEffort: string
+  stopSequencesText: string
+  responseMimeType: string
+  additionalParamsText: string
 }
 
 interface ModelApiItem {
@@ -628,10 +939,12 @@ interface ModelApiItem {
 interface ProviderApiItem {
   id: number | string
   name: string
+  provider_kind?: string
   base_url?: string
   remote_models?: string[]
   enabled_models?: string[]
   custom_models?: string[]
+  model_configs?: Record<string, ProviderModelConfig>
   is_active?: boolean
   has_api_key?: boolean
   created_at?: string
@@ -646,11 +959,13 @@ interface ProviderListResponse {
 interface ProviderDetailResponse {
   id: number | string
   name: string
+  provider_kind?: string
   base_url?: string
   api_key?: string
   remote_models?: string[]
   enabled_models?: string[]
   custom_models?: string[]
+  model_configs?: Record<string, ProviderModelConfig>
   is_active?: boolean
 }
 
@@ -658,14 +973,14 @@ const REQUEST_RECENT_MESSAGE_COUNT = 8
 const REQUEST_SUMMARY_TRIGGER_CHARS = 6000
 const REQUEST_SUMMARY_MAX_ITEMS = 6
 const REQUEST_SUMMARY_ITEM_CHARS = 240
-const MAX_SEMANTIC_CONTINUATION_ROUNDS = 24
+const MAX_SEMANTIC_CONTINUATION_ROUNDS = 128
+const AGENT_DEBUG_STORAGE_KEY = 'markflow:agent-debug'
 const ACTION_MODE_PATTERN = AGENT_WRITE_ACTION_MODES.join('|')
 const ACTION_BLOCK_REGEX = new RegExp(String.raw`\s*\[\[ACTION:(${ACTION_MODE_PATTERN})\]\][\s\S]*?\[\[/ACTION\]\]\s*`, 'gi')
 const ACTION_OPEN_REGEX = new RegExp(String.raw`\[\[ACTION:(${ACTION_MODE_PATTERN})\]\]`, 'i')
 const ACTION_WRAPPED_REGEX = new RegExp(String.raw`^\s*\[\[ACTION:(${ACTION_MODE_PATTERN})\]\]\s*([\s\S]*?)\s*\[\[/ACTION\]\]\s*$`, 'i')
-const CONTROL_BLOCK_REGEX = getAgentControlBlockRegex('gi')
-
-
+const ROUTE_MARKER_REGEX = /\s*\[\[ROUTE:(overview|project|doc)(?::[\s\S]*?)?\]\]\s*/gi
+const PLAN_BLOCK_REGEX = /\s*\[\[PLAN\]\][\s\S]*?\[\[\/PLAN\]\]\s*/gi
 const props = defineProps<{
   pageScope: PageScope
   pageState: string
@@ -687,6 +1002,74 @@ const emit = defineEmits<{
 }>()
 
 const DEFAULT_BASE_URL = DEFAULT_AGENT_BASE_URL
+const providerKindDefaults: Record<ProviderKind, {
+  label: string
+  baseUrl: string
+  auth: string
+  modelsApi: string
+  models: string[]
+  summary: string
+}> = {
+  openai: {
+    label: 'OpenAI / Compatible',
+    baseUrl: 'https://api.openai.com/v1',
+    auth: 'Bearer API Key',
+    modelsApi: 'GET /models',
+    models: ['gpt-4.1', 'gpt-4.1-mini', 'gpt-4o', 'gpt-4o-mini'],
+    summary: '适用于 OpenAI 兼容协议，以及大多数第三方兼容网关。',
+  },
+  anthropic: {
+    label: 'Anthropic / Claude',
+    baseUrl: 'https://api.anthropic.com/v1',
+    auth: 'x-api-key + anthropic-version',
+    modelsApi: 'GET /v1/models',
+    models: ['claude-sonnet-4-0', 'claude-3-7-sonnet-latest', 'claude-3-5-haiku-latest'],
+    summary: '适用于 Claude 原生协议，Base URL 通常以 /v1 结尾。',
+  },
+  gemini: {
+    label: 'Gemini',
+    baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
+    auth: 'URL query key=API_KEY',
+    modelsApi: 'GET /v1beta/models?key=...',
+    models: ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash'],
+    summary: '适用于 Gemini 原生协议，模型列表接口通常走 Google Generative Language。',
+  },
+}
+const modalityOptions = [
+  { value: 'text', label: '文本' },
+  { value: 'image', label: '图片' },
+  { value: 'audio', label: '音频' },
+  { value: 'video', label: '视频' },
+  { value: 'document', label: '文件' },
+]
+const reasoningEffortOptions = [
+  { value: '', label: '未设置（默认）' },
+  { value: 'minimal', label: 'minimal' },
+  { value: 'low', label: 'low' },
+  { value: 'medium', label: 'medium' },
+  { value: 'high', label: 'high' },
+]
+const booleanOptions = [
+  { value: '', label: '未设置（默认）' },
+  { value: 'true', label: '开启' },
+  { value: 'false', label: '关闭' },
+]
+const modelParameterHelp: Record<string, string> = {
+  modalities: '声明这个模型在你项目中的可用输入模态。它主要用于前端能力提示和后续多模态开关判断；留空表示按模型实际能力与 SDK 默认处理。',
+  tools_enabled: '是否允许这个模型在 Agent 过程中发起工具调用。留空表示按系统默认策略；关闭后会禁止工具调用，只保留纯文本对话生成。',
+  thinking: '是否显式开启推理/思考模式。留空表示不额外指定，由 provider 或模型自行决定；开启后会尽量向上游传递 reasoning / thinking 配置。',
+  temperature: '采样温度，数值越低越稳定，越高越发散。常见范围是 0 到 2；留空表示沿用 provider / SDK 默认值。',
+  max_output_tokens: '单次响应允许生成的最大 token 数。留空表示使用模型默认上限或 SDK 默认值。',
+  top_p: '核采样阈值。设置后会限制累计概率最高的一部分 token 参与采样；通常与 temperature 二选一微调即可。',
+  top_k: '仅对支持的模型生效，限制每一步只在前 K 个候选 token 中采样。Gemini 等模型更常见。',
+  presence_penalty: '出现惩罚。鼓励模型引入新词、新主题，减少重复已出现过的内容。',
+  frequency_penalty: '频率惩罚。对已经高频出现的 token 提高惩罚，抑制重复表达。',
+  parallel_tool_calls: '是否允许模型并行发起多个工具调用。只对支持该能力的 provider 生效；留空表示使用默认行为。',
+  reasoning_effort: '推理强度。当前主要用于支持 reasoning effort 的模型；数值越高，通常思考更深但成本和时延也更高。',
+  stop_sequences: '命中这些停止词后立刻结束生成。每行一个，留空表示不设置。',
+  response_mime_type: '期望的响应 MIME 类型，主要用于 Gemini 等支持结构化 MIME 的模型，例如 application/json。',
+  additional_params: '高级附加参数，会原样透传给对应 provider。用于补充当前表单未覆盖的协议字段，必须填写合法 JSON 对象。',
+}
 const PANEL_STATE_KEY = 'markflow.agent.panel.state'
 const SESSIONS_KEY = 'markflow.agent.sessions'
 const VIEWPORT_MARGIN = 24
@@ -694,16 +1077,23 @@ const FAB_WIDTH = 96
 const FAB_HEIGHT = 48
 const PANEL_WIDTH = 520
 const PANEL_HEIGHT = 720
-const MAX_TOOL_CALL_ROUNDS = 32
+const MAX_TOOL_CALL_ROUNDS = 128
 const MAX_REPEAT_TOOL_SIGNATURE_HITS = 4
 
 const mounted = ref(false)
 const collapsed = ref(false)
 const showProviderDialog = ref(false)
 const showModelDialog = ref(false)
+const showModelConfigDialog = ref(false)
+const showAttachmentPreview = ref(false)
+const showRuntimeDock = ref(true)
 const streaming = ref(false)
 const modelLoading = ref(false)
 const prompt = ref('')
+const attachmentInputRef = ref<HTMLInputElement | null>(null)
+const composerAttachments = ref<AgentAttachment[]>([])
+const attachmentUploadingCount = ref(0)
+const previewAttachmentUrl = ref('')
 const panelX = ref(0)
 const panelY = ref(88)
 const expandedPanelX = ref(0)
@@ -721,10 +1111,12 @@ const agentTransportMode = ref<'responses' | 'chat_fallback' | 'chat' | ''>('')
 const messagesRef = ref<HTMLElement | null>(null)
 const customModelInput = ref('')
 const modelSearchQuery = ref('')
+const editingModelConfigName = ref('')
 const providerDraft = ref<ProviderDraft>({
   id: null,
   name: '',
-  baseUrl: DEFAULT_BASE_URL,
+  providerKind: 'openai',
+  baseUrl: providerKindDefaults.openai.baseUrl,
   apiKey: '',
 })
 const modelDraft = ref<ModelDraft>({
@@ -732,12 +1124,36 @@ const modelDraft = ref<ModelDraft>({
   enabledModels: [],
   customModels: [],
 })
+const modelConfigDraft = ref<ModelConfigDraft>({
+  modalities: [],
+  thinking: '',
+  tools_enabled: '',
+  temperatureText: '',
+  maxTokensText: '',
+  topPText: '',
+  topKText: '',
+  presencePenaltyText: '',
+  frequencyPenaltyText: '',
+  parallelToolCalls: '',
+  reasoningEffort: '',
+  stopSequencesText: '',
+  responseMimeType: '',
+  additionalParamsText: '',
+})
+const providerDraftPreset = computed(() => providerKindDefaults[normalizeProviderKind(providerDraft.value.providerKind)])
+const editingModelConfig = computed(() => {
+  const provider = activeProvider.value
+  const model = editingModelConfigName.value.trim()
+  if (!provider || !model) return null
+  return provider.modelConfigs[model] || null
+})
 
 let dragOffsetX = 0
 let dragOffsetY = 0
 let dragging = false
 let didDrag = false
 let activeStreamController: AbortController | null = null
+const systemStore = useSystemStore()
 
 const panelStyle = computed(() => ({
   transform: `translate(${panelX.value}px, ${panelY.value}px)`,
@@ -745,13 +1161,35 @@ const panelStyle = computed(() => ({
 
 const currentSession = computed(() => sessions.value.find((session) => session.id === currentSessionId.value) || null)
 const visibleMessages = computed(() =>
-  (currentSession.value?.messages || []).filter((message) => message.role === 'user' || message.role === 'assistant'),
+  (currentSession.value?.messages || []).filter((message) =>
+    message.role === 'user' || message.role === 'assistant',
+  ),
 )
 const currentSessionLastPlan = computed(() => currentSession.value?.lastPlan?.trim() || '')
 const currentSessionTaskAnalysis = computed(() => currentSession.value?.taskAnalysis || null)
 const currentSessionRuntimePlan = computed(() => currentSession.value?.runtimePlan || null)
 const currentSessionArtifacts = computed(() => currentSession.value?.artifacts || [])
 const currentSessionToolEvents = computed(() => currentSession.value?.toolEvents || [])
+const currentRuntimeStep = computed(() => {
+  const runtimePlan = currentSessionRuntimePlan.value
+  if (!runtimePlan?.steps?.length) return null
+  return runtimePlan.steps.find((step) => step.status === 'running')
+    || runtimePlan.steps.find((step) => step.status === 'pending')
+    || runtimePlan.steps[runtimePlan.steps.length - 1]
+    || null
+})
+const runtimeDockSummary = computed(() => {
+  if (currentPlanNeedsConfirmation.value) {
+    return '待确认计划'
+  }
+  if (streaming.value) {
+    return currentRuntimeStep.value?.title || '正在执行'
+  }
+  if (currentSessionRuntimePlan.value?.status === 'completed') {
+    return '执行完成'
+  }
+  return currentRuntimeStep.value?.title || '暂无运行状态'
+})
 const activeProvider = computed(() => providers.value.find((provider) => provider.id === activeProviderId.value) || null)
 const selectedProviderId = computed({
   get: () => activeProviderId.value,
@@ -798,13 +1236,46 @@ const filteredRemoteModels = computed(() => {
   if (!keyword) return modelDraft.value.remoteModels
   return modelDraft.value.remoteModels.filter((model) => model.toLowerCase().includes(keyword))
 })
+const activeModelConfig = computed(() => {
+  const provider = activeProvider.value
+  const model = currentSessionModel.value.trim()
+  if (!provider || !model) return null
+  return provider.modelConfigs[model] || null
+})
+const activeModelModalities = computed(() => uniqueStrings(activeModelConfig.value?.modalities || []))
+const composerSupportsImage = computed(() => activeModelModalities.value.includes('image'))
+const composerSupportsDocument = computed(() => activeModelModalities.value.includes('document'))
+const composerAttachmentEnabled = computed(() => composerSupportsImage.value || composerSupportsDocument.value)
+const composerAttachmentAccept = computed(() => {
+  const parts: string[] = []
+  if (composerSupportsImage.value) {
+    parts.push('image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/heic', 'image/heif', 'image/svg+xml')
+  }
+  if (composerSupportsDocument.value) {
+    parts.push('text/*', ...SUPPORTED_DOCUMENT_EXTENSIONS.map((ext) => `.${ext}`))
+  }
+  return parts.join(',')
+})
+const attachmentUploading = computed(() => attachmentUploadingCount.value > 0)
 const currentManagedModels = computed(() =>
   uniqueStrings([...modelDraft.value.enabledModels]).map((model) => ({
     id: model,
     isCustom: modelDraft.value.customModels.includes(model),
     isRemote: modelDraft.value.remoteModels.includes(model),
+    isConfigured: modelConfigIsConfigured(activeProvider.value?.modelConfigs?.[model]),
   })),
 )
+const currentConfirmationPlan = computed(() => {
+  const session = currentSession.value
+  if (!session) return ''
+  const awaitingPlanConfirmation = session.lastExecutionMemory?.currentMode === 'plan'
+    && session.lastExecutionMemory?.awaiting === 'user_input'
+  if (!awaitingPlanConfirmation && session.runtimePlan?.status !== 'pending') {
+    return ''
+  }
+  return runtimePlanToPlanText(session.runtimePlan).trim() || session.pendingPlan?.trim() || ''
+})
+const currentPlanNeedsConfirmation = computed(() => Boolean(currentConfirmationPlan.value))
 
 const modeTip = computed(() => {
   if (props.docType === 'doc') return '直接说你的目标即可，模型会自己决定是答复、续写还是重写当前文档。'
@@ -839,10 +1310,378 @@ function uniqueStrings(values: unknown[]): string[] {
   return Array.from(new Set(normalized))
 }
 
+function normalizeAttachment(raw: any): AgentAttachment | null {
+  if (!raw || typeof raw !== 'object') return null
+  const uploadId = Number(raw.uploadId ?? raw.upload_id)
+  if (!Number.isFinite(uploadId) || uploadId <= 0) return null
+  const kind = raw.kind === 'image' ? 'image' : raw.kind === 'document' ? 'document' : null
+  if (!kind) return null
+  const name = typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim() : `附件-${uploadId}`
+  const url = typeof raw.url === 'string' ? raw.url : ''
+  const contentType = typeof raw.contentType === 'string'
+    ? raw.contentType
+    : typeof raw.content_type === 'string'
+      ? raw.content_type
+      : null
+  const size = Number(raw.size)
+
+  return {
+    localId: typeof raw.localId === 'string' && raw.localId.trim() ? raw.localId.trim() : `upload-${uploadId}`,
+    uploadId,
+    kind,
+    name,
+    url,
+    contentType,
+    size: Number.isFinite(size) && size > 0 ? size : 0,
+  }
+}
+
+function fileExtension(name: string) {
+  const normalized = name.trim().toLowerCase()
+  const index = normalized.lastIndexOf('.')
+  return index >= 0 ? normalized.slice(index + 1) : ''
+}
+
+const SUPPORTED_DOCUMENT_MIME_TYPES = [
+  'application/pdf',
+  'text/plain',
+  'text/markdown',
+  'text/md',
+  'text/rtf',
+  'text/html',
+  'text/css',
+  'text/csv',
+  'text/xml',
+  'application/x-javascript',
+  'text/x-javascript',
+  'application/javascript',
+  'text/javascript',
+  'application/x-python',
+  'text/x-python',
+] as const
+
+const SUPPORTED_DOCUMENT_EXTENSIONS = [
+  'pdf',
+  'txt',
+  'md',
+  'markdown',
+  'rtf',
+  'html',
+  'htm',
+  'css',
+  'csv',
+  'xml',
+  'js',
+  'mjs',
+  'cjs',
+  'py',
+  'json',
+  'toml',
+  'yaml',
+  'yml',
+  'ini',
+  'cfg',
+  'conf',
+  'env',
+  'properties',
+  'gradle',
+  'gitignore',
+  'gitattributes',
+  'npmrc',
+  'yarnrc',
+  'editorconfig',
+  'vmoptions',
+  'log',
+  'sh',
+  'bash',
+  'zsh',
+  'fish',
+  'sql',
+  'ts',
+  'tsx',
+  'jsx',
+  'java',
+  'kt',
+  'kts',
+  'go',
+  'rs',
+  'c',
+  'cc',
+  'cpp',
+  'cxx',
+  'h',
+  'hpp',
+  'cs',
+  'php',
+  'rb',
+  'swift',
+] as const
+
+function isSupportedImageFile(file: File) {
+  const type = file.type.toLowerCase()
+  const ext = fileExtension(file.name)
+  return [
+    'image/png',
+    'image/jpeg',
+    'image/gif',
+    'image/webp',
+    'image/heic',
+    'image/heif',
+    'image/svg+xml',
+  ].includes(type) || ['png', 'jpg', 'jpeg', 'gif', 'webp', 'heic', 'heif', 'svg'].includes(ext)
+}
+
+function isSupportedDocumentFile(file: File) {
+  const type = file.type.toLowerCase()
+  const ext = fileExtension(file.name)
+  return SUPPORTED_DOCUMENT_MIME_TYPES.includes(type as typeof SUPPORTED_DOCUMENT_MIME_TYPES[number])
+    || type.startsWith('text/')
+    || SUPPORTED_DOCUMENT_EXTENSIONS.includes(ext as typeof SUPPORTED_DOCUMENT_EXTENSIONS[number])
+}
+
+async function isProbablyUtf8TextFile(file: File) {
+  const sampleSize = Math.min(file.size, 8192)
+  if (sampleSize <= 0) return true
+
+  const bytes = new Uint8Array(await file.slice(0, sampleSize).arrayBuffer())
+  if (!bytes.length) return true
+  if (bytes.includes(0)) return false
+
+  try {
+    new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+  } catch {
+    return false
+  }
+
+  let controlCharCount = 0
+  for (const byte of bytes) {
+    if (byte < 0x09 || (byte > 0x0d && byte < 0x20)) {
+      controlCharCount += 1
+    }
+  }
+
+  return controlCharCount / bytes.length < 0.02
+}
+
+function formatAttachmentSize(size: number) {
+  if (!Number.isFinite(size) || size <= 0) return '未知大小'
+  if (size < 1024) return `${size}B`
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(size >= 10 * 1024 ? 0 : 1)}KB`
+  return `${(size / 1024 / 1024).toFixed(size >= 10 * 1024 * 1024 ? 0 : 1)}MB`
+}
+
+function absoluteAttachmentUrl(attachment: AgentAttachment) {
+  if (!attachment.url) return ''
+  if (/^https?:\/\//i.test(attachment.url)) return attachment.url
+  return `${window.location.origin}${attachment.url}`
+}
+
+function isImageAttachment(attachment: AgentAttachment) {
+  return attachment.kind === 'image' || attachment.contentType?.startsWith('image/') === true
+}
+
+function isPdfAttachment(attachment: AgentAttachment) {
+  return attachment.contentType === 'application/pdf' || fileExtension(attachment.name) === 'pdf'
+}
+
+function triggerAttachmentDownload(attachment: AgentAttachment) {
+  const url = absoluteAttachmentUrl(attachment)
+  if (!url) return
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = attachment.name || ''
+  anchor.rel = 'noopener noreferrer'
+  document.body.appendChild(anchor)
+  anchor.click()
+  document.body.removeChild(anchor)
+}
+
+function openAttachment(attachment: AgentAttachment) {
+  const url = absoluteAttachmentUrl(attachment)
+  if (!url) {
+    ElMessage.warning('附件链接不可用')
+    return
+  }
+
+  if (isImageAttachment(attachment)) {
+    previewAttachmentUrl.value = url
+    showAttachmentPreview.value = true
+    return
+  }
+
+  if (isPdfAttachment(attachment)) {
+    window.open(url, '_blank', 'noopener,noreferrer')
+    return
+  }
+
+  triggerAttachmentDownload(attachment)
+}
+
+function clearComposerAttachments() {
+  composerAttachments.value = []
+  if (attachmentInputRef.value) {
+    attachmentInputRef.value.value = ''
+  }
+}
+
+function removeComposerAttachment(localId: string) {
+  composerAttachments.value = composerAttachments.value.filter((attachment) => attachment.localId !== localId)
+  if (attachmentInputRef.value) {
+    attachmentInputRef.value.value = ''
+  }
+}
+
+function parseNumberText(value: string): number | null {
+  const trimmed = value.trim()
+  if (!trimmed) return null
+  const parsed = Number(trimmed)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function parseIntegerText(value: string): number | null {
+  const parsed = parseNumberText(value)
+  return parsed === null ? null : Math.trunc(parsed)
+}
+
+function parseBooleanChoice(value: '' | 'true' | 'false'): boolean | null {
+  if (value === 'true') return true
+  if (value === 'false') return false
+  return null
+}
+
+function normalizeModelConfig(input?: Partial<ProviderModelConfig> | null): ProviderModelConfig {
+  return {
+    modalities: Array.isArray(input?.modalities) ? uniqueStrings(input.modalities) : [],
+    thinking: typeof input?.thinking === 'boolean' ? input.thinking : null,
+    tools_enabled: typeof input?.tools_enabled === 'boolean' ? input.tools_enabled : null,
+    temperature: typeof input?.temperature === 'number' ? input.temperature : null,
+    max_output_tokens: typeof input?.max_output_tokens === 'number' ? input.max_output_tokens : null,
+    top_p: typeof input?.top_p === 'number' ? input.top_p : null,
+    top_k: typeof input?.top_k === 'number' ? input.top_k : null,
+    presence_penalty: typeof input?.presence_penalty === 'number' ? input.presence_penalty : null,
+    frequency_penalty: typeof input?.frequency_penalty === 'number' ? input.frequency_penalty : null,
+    parallel_tool_calls: typeof input?.parallel_tool_calls === 'boolean' ? input.parallel_tool_calls : null,
+    reasoning_effort: typeof input?.reasoning_effort === 'string' && input.reasoning_effort.trim()
+      ? input.reasoning_effort.trim()
+      : null,
+    stop_sequences: Array.isArray(input?.stop_sequences) ? uniqueStrings(input.stop_sequences) : [],
+    response_mime_type: typeof input?.response_mime_type === 'string' && input.response_mime_type.trim()
+      ? input.response_mime_type.trim()
+      : null,
+    additional_params: input?.additional_params && typeof input.additional_params === 'object'
+      ? { ...input.additional_params }
+      : null,
+  }
+}
+
+function createModelConfigDraft(config?: Partial<ProviderModelConfig> | null): ModelConfigDraft {
+  const normalized = normalizeModelConfig(config)
+  return {
+    modalities: [...normalized.modalities],
+    thinking: normalized.thinking === null ? '' : normalized.thinking ? 'true' : 'false',
+    tools_enabled: normalized.tools_enabled === null ? '' : normalized.tools_enabled ? 'true' : 'false',
+    temperatureText: normalized.temperature === null ? '' : String(normalized.temperature),
+    maxTokensText: normalized.max_output_tokens === null ? '' : String(normalized.max_output_tokens),
+    topPText: normalized.top_p === null ? '' : String(normalized.top_p),
+    topKText: normalized.top_k === null ? '' : String(normalized.top_k),
+    presencePenaltyText: normalized.presence_penalty === null ? '' : String(normalized.presence_penalty),
+    frequencyPenaltyText: normalized.frequency_penalty === null ? '' : String(normalized.frequency_penalty),
+    parallelToolCalls: normalized.parallel_tool_calls === null ? '' : normalized.parallel_tool_calls ? 'true' : 'false',
+    reasoningEffort: normalized.reasoning_effort || '',
+    stopSequencesText: normalized.stop_sequences.join('\n'),
+    responseMimeType: normalized.response_mime_type || '',
+    additionalParamsText: normalized.additional_params ? JSON.stringify(normalized.additional_params, null, 2) : '',
+  }
+}
+
+function recommendedModelConfig(kind: ProviderKind): ProviderModelConfig {
+  const base: ProviderModelConfig = {
+    modalities: ['text'],
+    thinking: false,
+    tools_enabled: true,
+    temperature: 0.7,
+    max_output_tokens: 4096,
+    top_p: null,
+    top_k: null,
+    presence_penalty: null,
+    frequency_penalty: null,
+    parallel_tool_calls: true,
+    reasoning_effort: null,
+    stop_sequences: [],
+    response_mime_type: null,
+    additional_params: null,
+  }
+
+  if (kind === 'gemini') {
+    return {
+      ...base,
+      top_p: 0.95,
+      parallel_tool_calls: null,
+    }
+  }
+
+  return base
+}
+
+function modelConfigIsConfigured(config?: Partial<ProviderModelConfig> | null) {
+  const normalized = normalizeModelConfig(config)
+  return Boolean(
+    normalized.modalities.length
+    || normalized.thinking !== null
+    || normalized.tools_enabled !== null
+    || normalized.temperature !== null
+    || normalized.max_output_tokens !== null
+    || normalized.top_p !== null
+    || normalized.top_k !== null
+    || normalized.presence_penalty !== null
+    || normalized.frequency_penalty !== null
+    || normalized.parallel_tool_calls !== null
+    || normalized.reasoning_effort
+    || normalized.stop_sequences.length
+    || normalized.response_mime_type
+    || normalized.additional_params,
+  )
+}
+
 function normalizedProviderBaseUrl(value?: string | null) {
   const trimmed = typeof value === 'string' ? value.trim() : ''
   return (trimmed || DEFAULT_BASE_URL).replace(/\/+$/, '')
 }
+
+function normalizeProviderKind(value?: string | null): ProviderKind {
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : ''
+  if (normalized === 'anthropic' || normalized === 'claude') return 'anthropic'
+  if (normalized === 'gemini' || normalized === 'google') return 'gemini'
+  return 'openai'
+}
+
+function providerKindLabel(kind: string) {
+  return providerKindDefaults[normalizeProviderKind(kind)].label
+}
+
+function applyProviderKindDefaults(kind: string, options: { force?: boolean } = {}) {
+  const preset = providerKindDefaults[normalizeProviderKind(kind)]
+  if (options.force || !providerDraft.value.baseUrl.trim()) {
+    providerDraft.value.baseUrl = preset.baseUrl
+  }
+}
+
+watch(
+  () => providerDraft.value.providerKind,
+  (next, previous) => {
+    const previousPreset = previous ? providerKindDefaults[normalizeProviderKind(previous)] : null
+    const normalizedBaseUrl = normalizedProviderBaseUrl(providerDraft.value.baseUrl)
+
+    if (!providerDraft.value.baseUrl.trim()) {
+      applyProviderKindDefaults(next, { force: true })
+      return
+    }
+
+    if (previousPreset && normalizedBaseUrl === normalizedProviderBaseUrl(previousPreset.baseUrl)) {
+      applyProviderKindDefaults(next, { force: true })
+    }
+  },
+)
 
 function enabledModelsForProvider(provider: AgentProvider | null) {
   return provider ? uniqueStrings(provider.enabledModels) : []
@@ -882,11 +1721,13 @@ async function saveProviderConfig(provider: AgentProvider) {
   const data = await request.post('/agent/providers', {
     id: Number(provider.id),
     name: provider.name,
+    provider_kind: provider.providerKind,
     base_url: provider.baseUrl,
     api_key: '',
     remote_models: provider.remoteModels,
     enabled_models: provider.enabledModels,
     custom_models: provider.customModels,
+    model_configs: provider.modelConfigs,
   }) as ProviderListResponse
 
   const normalizedProviders = (data.providers || [])
@@ -990,7 +1831,8 @@ function createProviderDraft(seed = ''): ProviderDraft {
   return {
     id: null,
     name: seed || `供应商 ${providers.value.length + 1}`,
-    baseUrl: DEFAULT_BASE_URL,
+    providerKind: 'openai',
+    baseUrl: providerKindDefaults.openai.baseUrl,
     apiKey: '',
   }
 }
@@ -1007,11 +1849,17 @@ function normalizeProvider(raw: any): AgentProvider | null {
   return {
     id,
     name,
+    providerKind: normalizeProviderKind(raw.provider_kind ?? raw.providerKind),
     baseUrl: normalizedProviderBaseUrl(raw.base_url ?? raw.baseUrl),
     hasApiKey: Boolean(raw.has_api_key ?? raw.hasApiKey),
     remoteModels,
     enabledModels,
     customModels,
+    modelConfigs: Object.fromEntries(
+      Object.entries(raw.model_configs ?? raw.modelConfigs ?? {})
+        .map(([model, config]) => [model, normalizeModelConfig(config as Partial<ProviderModelConfig>)])
+        .filter(([model]) => typeof model === 'string' && Boolean(model.trim())),
+    ),
     createdAt: raw.created_at ? new Date(raw.created_at).getTime() : Number.isFinite(raw.createdAt) ? raw.createdAt : Date.now(),
     updatedAt: raw.updated_at ? new Date(raw.updated_at).getTime() : Number.isFinite(raw.updatedAt) ? raw.updatedAt : Date.now(),
   }
@@ -1045,6 +1893,12 @@ function normalizeMessage(raw: any): AgentMessage | null {
     role,
     content: typeof raw.content === 'string' ? raw.content : '',
     reasoning: typeof raw.reasoning === 'string' ? raw.reasoning : '',
+    internalStatus: raw.internalStatus === true || raw.internal_status === true,
+    attachments: Array.isArray(raw.attachments)
+      ? raw.attachments
+        .map((attachment: any) => normalizeAttachment(attachment))
+        .filter((attachment: AgentAttachment | null): attachment is AgentAttachment => Boolean(attachment))
+      : [],
   }
 }
 
@@ -1121,6 +1975,8 @@ function normalizeRuntimePlanStep(raw: any, fallbackIndex = 0): AgentRuntimePlan
         .map((item: string) => item.trim())
       : [],
     requiresConfirmation: raw.requiresConfirmation === true || raw.requires_confirmation === true,
+    requiresDocumentWrite: raw.requiresDocumentWrite === true || raw.requires_document_write === true,
+    requiresDocumentSave: raw.requiresDocumentSave === true || raw.requires_document_save === true,
   }
 }
 
@@ -1141,6 +1997,21 @@ function normalizeRuntimePlan(raw: any): AgentRuntimePlan | null {
     steps,
     createdAt: typeof raw.createdAt === 'string' ? raw.createdAt : typeof raw.created_at === 'string' ? raw.created_at : null,
     updatedAt: typeof raw.updatedAt === 'string' ? raw.updatedAt : typeof raw.updated_at === 'string' ? raw.updated_at : null,
+  }
+}
+
+function normalizeStructuredResponse(raw: any): AgentStructuredResponse | null {
+  if (!raw || typeof raw !== 'object') return null
+  const message = typeof raw.message === 'string' ? raw.message : ''
+  const state = raw.state && typeof raw.state === 'object'
+    ? normalizeControlPayload(raw.state)
+    : null
+  const plan = normalizeRuntimePlan(raw.plan)
+  if (!message.trim() && !state && !plan) return null
+  return {
+    message,
+    state,
+    plan,
   }
 }
 
@@ -1171,28 +2042,88 @@ function normalizeToolEvent(raw: any): AgentToolEvent | null {
   }
 }
 
-function buildRuntimePlanFromText(planText: string, goal: string) {
-  const steps = parsePlanSteps(planText).map((title, index) => ({
-    id: `step_${index + 1}`,
-    title,
-    kind: 'edit',
-    description: title,
-    status: 'pending',
-    toolHints: [],
-    requiresConfirmation: false,
-  }))
+function normalizePlanStepTitle(value: string) {
+  return value.trim()
+}
+
+function resolvePlanStepIndicesByTitles(
+  steps: AgentRuntimePlanStep[],
+  titles: string[],
+  options: { skipIndices?: Set<number> } = {},
+) {
+  const skipIndices = options.skipIndices || new Set<number>()
+  const usedIndices = new Set<number>()
+  const resolved: number[] = []
+
+  for (const title of titles.map(normalizePlanStepTitle).filter(Boolean)) {
+    const index = steps.findIndex((step, stepIndex) => (
+      !skipIndices.has(stepIndex)
+      && !usedIndices.has(stepIndex)
+      && normalizePlanStepTitle(step.title) === title
+    ))
+    if (index === -1) continue
+    usedIndices.add(index)
+    resolved.push(index)
+  }
+
+  return resolved
+}
+
+function resolveCurrentPlanStepIndexByTitle(
+  steps: AgentRuntimePlanStep[],
+  title: string,
+  completedIndices: Set<number>,
+) {
+  const normalized = normalizePlanStepTitle(title)
+  if (!normalized) return -1
+  const nextIncompleteMatch = steps.findIndex((step, index) => (
+    !completedIndices.has(index) && normalizePlanStepTitle(step.title) === normalized
+  ))
+  if (nextIncompleteMatch >= 0) return nextIncompleteMatch
+  return steps.findIndex((step) => normalizePlanStepTitle(step.title) === normalized)
+}
+
+function buildRuntimePlanFromText(planText: string, goal: string, templatePlan: AgentRuntimePlan | null = null) {
+  const parsedTitles = parsePlanSteps(planText)
+  const reusesTemplateShape = Boolean(
+    templatePlan?.steps?.length === parsedTitles.length
+    && parsedTitles.every((title, index) => normalizePlanStepTitle(templatePlan?.steps?.[index]?.title || '') === normalizePlanStepTitle(title)),
+  )
+  const steps = parsedTitles.map((title, index) => {
+    const templateStep = templatePlan?.steps?.[index] || null
+    const isSameStep = normalizePlanStepTitle(templateStep?.title || '') === normalizePlanStepTitle(title)
+    return {
+      id: isSameStep ? (templateStep?.id || `step_${index + 1}`) : `step_${index + 1}`,
+      title,
+      kind: isSameStep ? (templateStep?.kind || 'edit') : 'edit',
+      description: title,
+      status: isSameStep ? (templateStep?.status || 'pending') : 'pending',
+      toolHints: isSameStep ? (templateStep?.toolHints || []) : [],
+      requiresConfirmation: isSameStep && templateStep?.requiresConfirmation === true,
+      requiresDocumentWrite: isSameStep && templateStep?.requiresDocumentWrite === true,
+      requiresDocumentSave: isSameStep && templateStep?.requiresDocumentSave === true,
+    }
+  })
 
   if (!steps.length) return null
   const now = new Date().toISOString()
   return {
-    id: genId(),
+    id: reusesTemplateShape ? (templatePlan?.id || genId()) : genId(),
     goal: goal.trim() || '执行计划',
     summary: '由模型输出的正式执行计划',
-    status: 'pending',
+    status: reusesTemplateShape ? (templatePlan?.status || 'pending') : 'pending',
     steps,
-    createdAt: now,
+    createdAt: reusesTemplateShape ? (templatePlan?.createdAt || now) : now,
     updatedAt: now,
   } satisfies AgentRuntimePlan
+}
+
+function runtimePlanToPlanText(runtimePlan: AgentRuntimePlan | null) {
+  if (!runtimePlan?.steps?.length) return ''
+  return runtimePlan.steps
+    .map((step, index) => `${index + 1}. ${step.title.trim()}`)
+    .join('\n')
+    .trim()
 }
 
 function normalizeSession(raw: any, provider: AgentProvider | null): AgentSession | null {
@@ -1227,9 +2158,48 @@ function normalizeSession(raw: any, provider: AgentProvider | null): AgentSessio
     transportMode: raw.transportMode === 'responses' || raw.transportMode === 'chat' ? raw.transportMode : 'auto',
     previousResponseId: typeof raw.previousResponseId === 'string' && raw.previousResponseId.trim() ? raw.previousResponseId.trim() : null,
     pendingPlan: typeof raw.pendingPlan === 'string' && raw.pendingPlan.trim() ? raw.pendingPlan.trim() : null,
+    pendingPlanToolOutputs: Array.isArray(raw.pendingPlanToolOutputs)
+      ? raw.pendingPlanToolOutputs
+        .map((output: any) => ({
+          call_id: typeof output?.call_id === 'string' && output.call_id.trim() ? output.call_id.trim() : genId(),
+          name: typeof output?.name === 'string' && output.name.trim() ? output.name.trim() : undefined,
+          arguments: typeof output?.arguments === 'string' && output.arguments.trim() ? output.arguments.trim() : undefined,
+          output: output?.output ?? null,
+        }))
+        .filter((output: AgentToolOutputPayload) => Boolean(output.call_id))
+      : [],
     lastPlan: typeof raw.lastPlan === 'string' && raw.lastPlan.trim() ? raw.lastPlan.trim() : null,
     lastExecutionMemory: raw.lastExecutionMemory && typeof raw.lastExecutionMemory === 'object'
         ? {
+            currentMode: typeof raw.lastExecutionMemory.currentMode === 'string' && raw.lastExecutionMemory.currentMode.trim()
+              ? raw.lastExecutionMemory.currentMode.trim()
+              : typeof raw.lastExecutionMemory.current_mode === 'string' && raw.lastExecutionMemory.current_mode.trim()
+                ? raw.lastExecutionMemory.current_mode.trim()
+                : 'normal',
+            awaiting: typeof raw.lastExecutionMemory.awaiting === 'string' && raw.lastExecutionMemory.awaiting.trim()
+              ? raw.lastExecutionMemory.awaiting.trim()
+              : null,
+            currentActionKind: typeof raw.lastExecutionMemory.currentActionKind === 'string' && raw.lastExecutionMemory.currentActionKind.trim()
+              ? raw.lastExecutionMemory.currentActionKind.trim()
+              : typeof raw.lastExecutionMemory.current_action_kind === 'string' && raw.lastExecutionMemory.current_action_kind.trim()
+                ? raw.lastExecutionMemory.current_action_kind.trim()
+                : null,
+            currentActionStatus: typeof raw.lastExecutionMemory.currentActionStatus === 'string' && raw.lastExecutionMemory.currentActionStatus.trim()
+              ? raw.lastExecutionMemory.currentActionStatus.trim()
+              : typeof raw.lastExecutionMemory.current_action_status === 'string' && raw.lastExecutionMemory.current_action_status.trim()
+                ? raw.lastExecutionMemory.current_action_status.trim()
+                : null,
+            currentActionMode: typeof raw.lastExecutionMemory.currentActionMode === 'string' && raw.lastExecutionMemory.currentActionMode.trim()
+              ? raw.lastExecutionMemory.currentActionMode.trim()
+              : typeof raw.lastExecutionMemory.current_action_mode === 'string' && raw.lastExecutionMemory.current_action_mode.trim()
+                ? raw.lastExecutionMemory.current_action_mode.trim()
+                : null,
+            currentActionTarget: typeof raw.lastExecutionMemory.currentActionTarget === 'string' && raw.lastExecutionMemory.currentActionTarget.trim()
+              ? raw.lastExecutionMemory.currentActionTarget.trim()
+              : typeof raw.lastExecutionMemory.current_action_target === 'string' && raw.lastExecutionMemory.current_action_target.trim()
+                ? raw.lastExecutionMemory.current_action_target.trim()
+                : null,
+            confirmationRequired: raw.lastExecutionMemory.confirmationRequired === true || raw.lastExecutionMemory.confirmation_required === true,
             plan: typeof raw.lastExecutionMemory.plan === 'string' && raw.lastExecutionMemory.plan.trim() ? raw.lastExecutionMemory.plan.trim() : null,
             assistantSummary: typeof raw.lastExecutionMemory.assistantSummary === 'string' && raw.lastExecutionMemory.assistantSummary.trim() ? raw.lastExecutionMemory.assistantSummary.trim() : null,
             controlPhase: typeof raw.lastExecutionMemory.controlPhase === 'string' && raw.lastExecutionMemory.controlPhase.trim() ? raw.lastExecutionMemory.controlPhase.trim() : null,
@@ -1248,6 +2218,15 @@ function normalizeSession(raw: any, provider: AgentProvider | null): AgentSessio
               : [],
             documentWriteObserved: raw.lastExecutionMemory.documentWriteObserved === true,
             saveAttemptWithoutDocumentChange: raw.lastExecutionMemory.saveAttemptWithoutDocumentChange === true,
+            lastInterceptCode: typeof raw.lastExecutionMemory.lastInterceptCode === 'string' && raw.lastExecutionMemory.lastInterceptCode.trim()
+              ? raw.lastExecutionMemory.lastInterceptCode.trim()
+              : null,
+            lastInterceptMessage: typeof raw.lastExecutionMemory.lastInterceptMessage === 'string' && raw.lastExecutionMemory.lastInterceptMessage.trim()
+              ? raw.lastExecutionMemory.lastInterceptMessage.trim()
+              : null,
+            lastInterceptGuidance: typeof raw.lastExecutionMemory.lastInterceptGuidance === 'string' && raw.lastExecutionMemory.lastInterceptGuidance.trim()
+              ? raw.lastExecutionMemory.lastInterceptGuidance.trim()
+              : null,
             recentToolCalls: Array.isArray(raw.lastExecutionMemory.recentToolCalls)
             ? raw.lastExecutionMemory.recentToolCalls
               .map((call: any) => ({
@@ -1320,6 +2299,7 @@ function ensureSession(): AgentSession {
     transportMode: 'auto',
     previousResponseId: null,
     pendingPlan: null,
+    pendingPlanToolOutputs: [],
     lastPlan: null,
     lastExecutionMemory: null,
     sessionMemory: null,
@@ -1348,6 +2328,7 @@ function createSession() {
     transportMode: 'auto',
     previousResponseId: null,
     pendingPlan: null,
+    pendingPlanToolOutputs: [],
     lastPlan: null,
     lastExecutionMemory: null,
     sessionMemory: null,
@@ -1391,6 +2372,7 @@ function clearCurrentSession() {
   session.toolEvents = []
   session.previousResponseId = null
   session.pendingPlan = null
+  session.pendingPlanToolOutputs = []
   session.lastPlan = null
   session.lastExecutionMemory = null
   session.sessionMemory = null
@@ -1431,11 +2413,22 @@ function isStreamingAssistantMessage(message: AgentMessage) {
 }
 
 function displayedMessageContent(message: AgentMessage) {
-  return isStreamingAssistantMessage(message) ? liveAssistantContent.value : message.content
+  const content = isStreamingAssistantMessage(message) ? liveAssistantContent.value : message.content
+  return stripProtocolContent(content)
 }
 
 function displayedMessageReasoning(message: AgentMessage) {
   return isStreamingAssistantMessage(message) ? liveAssistantReasoning.value : (message.reasoning || '')
+}
+
+function stripProtocolContent(content: string) {
+  if (!content) return ''
+  return content
+    .replace(ACTION_BLOCK_REGEX, '\n')
+    .replace(ROUTE_MARKER_REGEX, '\n')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
 }
 
 function syncSessionWithActiveProvider(session: AgentSession | null) {
@@ -1450,6 +2443,7 @@ function syncSessionWithActiveProvider(session: AgentSession | null) {
     session.providerId = providerId
     session.previousResponseId = null
     session.pendingPlan = null
+    session.pendingPlanToolOutputs = []
     session.lastPlan = null
     session.lastExecutionMemory = null
     session.lastSyncedMessageCount = 0
@@ -1486,6 +2480,296 @@ function logAgentPanelError(scope: string, error: unknown, extra?: Record<string
     error,
     ...extra,
   })
+}
+
+function agentDebugEnabled() {
+  try {
+    return localStorage.getItem(AGENT_DEBUG_STORAGE_KEY) !== '0'
+  } catch {
+    return true
+  }
+}
+
+function logAgentDebugGroup(title: string, payload: Record<string, unknown>) {
+  if (!agentDebugEnabled()) return
+  console.groupCollapsed(`[agent-debug] ${title}`)
+  for (const [key, value] of Object.entries(payload)) {
+    console.debug(key, value)
+  }
+  console.groupEnd()
+}
+
+function logAgentModelIo(title: string, payload: Record<string, unknown>) {
+  if (!agentDebugEnabled()) return
+  console.group(`[agent-debug] ${title}`)
+  const preferredOrder = [
+    'provider',
+    'model',
+    'transport_mode',
+    'response_id',
+    'error',
+    'system_prompt',
+    'preamble',
+    'history',
+    'prompt',
+    'tools',
+    'additional_params',
+    'text',
+    'partial_text',
+    'tool_calls',
+  ]
+  const seen = new Set<string>()
+  for (const key of preferredOrder) {
+    if (key in payload) {
+      console.log(key, payload[key])
+      seen.add(key)
+    }
+  }
+  for (const [key, value] of Object.entries(payload)) {
+    if (seen.has(key)) continue
+    console.log(key, value)
+  }
+  console.groupEnd()
+}
+
+function buildDebugRuntimePlanSnapshot(runtimePlan: AgentRuntimePlan | null) {
+  if (!runtimePlan) return null
+  return {
+    id: runtimePlan.id,
+    status: runtimePlan.status,
+    goal: runtimePlan.goal,
+    steps: runtimePlan.steps.map((step, index) => ({
+      index: index + 1,
+      id: step.id,
+      title: step.title,
+      status: step.status,
+      requiresConfirmation: step.requiresConfirmation,
+      requiresDocumentWrite: step.requiresDocumentWrite,
+      requiresDocumentSave: step.requiresDocumentSave,
+      toolHints: step.toolHints,
+    })),
+  }
+}
+
+function buildDebugExecutionSnapshot(
+  session: AgentSession,
+  executionState: AgentExecutionState,
+  control: AgentControlBlock | null = null,
+) {
+  return {
+    confirmationRequired: executionState.confirmationRequired,
+    pendingPlan: session.pendingPlan,
+    pendingPlanToolOutputs: session.pendingPlanToolOutputs.map((output) => ({
+      call_id: output.call_id,
+      name: output.name || null,
+      arguments: output.arguments || null,
+      output: output.output,
+    })),
+    lastPlan: session.lastPlan,
+    currentPlanNeedsConfirmation: Boolean(session.pendingPlan?.trim()),
+    semanticContinuation: executionState.semanticContinuation,
+    semanticContinuationRound: executionState.semanticContinuationRound,
+    planStepIndex: executionState.planStepIndex,
+    planTotalSteps: executionState.planTotalSteps,
+    planCurrentStep: executionState.planCurrentStep,
+    planCompletedSteps: [...executionState.planCompletedSteps],
+    writeCompleted: executionState.writeCompleted,
+    saveRequested: executionState.saveRequested,
+    documentWriteObserved: executionState.documentWriteObserved,
+    saveAttemptWithoutDocumentChange: executionState.saveAttemptWithoutDocumentChange,
+    lastInterceptCode: executionState.lastInterceptCode,
+    lastInterceptMessage: executionState.lastInterceptMessage,
+    control: control ? {
+      phase: control.phase || null,
+      pendingPlan: control.pendingPlan === true,
+      autoContinue: control.autoContinue === true,
+      needsSave: control.needsSave === true,
+      writeScope: control.writeScope || null,
+      preferredWriteAction: control.preferredWriteAction || null,
+      taskKind: control.taskKind || null,
+      editIntent: control.editIntent || null,
+      editStage: control.editStage || null,
+      saveRequested: control.saveRequested === true,
+      writeCompleted: control.writeCompleted === true,
+      planStepIndex: control.planStepIndex ?? null,
+      planTotalSteps: control.planTotalSteps ?? null,
+      planCurrentStep: control.planCurrentStep || null,
+      planCompletedSteps: control.planCompletedSteps || [],
+    } : null,
+    runtimePlan: buildDebugRuntimePlanSnapshot(session.runtimePlan),
+    lastExecutionMemory: session.lastExecutionMemory ? {
+      confirmationRequired: session.lastExecutionMemory.confirmationRequired,
+      plan: session.lastExecutionMemory.plan,
+      assistantSummary: session.lastExecutionMemory.assistantSummary,
+      controlPhase: session.lastExecutionMemory.controlPhase,
+      planStepIndex: session.lastExecutionMemory.planStepIndex,
+      planTotalSteps: session.lastExecutionMemory.planTotalSteps,
+      planCurrentStep: session.lastExecutionMemory.planCurrentStep,
+      planCompletedSteps: [...session.lastExecutionMemory.planCompletedSteps],
+      writeCompleted: session.lastExecutionMemory.writeCompleted,
+      saveRequested: session.lastExecutionMemory.saveRequested,
+      documentWriteObserved: session.lastExecutionMemory.documentWriteObserved,
+      saveAttemptWithoutDocumentChange: session.lastExecutionMemory.saveAttemptWithoutDocumentChange,
+      lastInterceptCode: session.lastExecutionMemory.lastInterceptCode,
+    } : null,
+  }
+}
+
+function summarizeAgentEventForDebug(event: string, data: any) {
+  if (event === 'agent.debug.model_request') {
+    return {
+      event,
+      model: data?.model || null,
+      transportMode: data?.transport_mode || null,
+      protocol: data?.provider?.protocol || null,
+      historyCount: Array.isArray(data?.history) ? data.history.length : 0,
+      toolCount: Array.isArray(data?.tools) ? data.tools.length : 0,
+      preamblePreview: compactMessageText(typeof data?.preamble === 'string' ? data.preamble : '', 220) || '',
+      promptPreview: compactMessageText(JSON.stringify(data?.prompt || {}), 220) || '',
+    }
+  }
+
+  if (event === 'agent.debug.model_response') {
+    return {
+      event,
+      model: data?.model || null,
+      transportMode: data?.transport_mode || null,
+      protocol: data?.protocol || null,
+      responseId: data?.response_id || null,
+      toolCallCount: Array.isArray(data?.tool_calls) ? data.tool_calls.length : 0,
+      textPreview: compactMessageText(typeof data?.text === 'string' ? data.text : '', 220) || '',
+    }
+  }
+
+  if (event === 'agent.debug.model_error') {
+    return {
+      event,
+      model: data?.model || null,
+      transportMode: data?.transport_mode || null,
+      protocol: data?.protocol || null,
+      error: data?.error || null,
+      partialTextPreview: compactMessageText(typeof data?.partial_text === 'string' ? data.partial_text : '', 220) || '',
+      toolCallCount: Array.isArray(data?.tool_calls) ? data.tool_calls.length : 0,
+    }
+  }
+
+  if (event === 'message.delta') {
+    const content = typeof data?.content === 'string' ? data.content : ''
+    return {
+      event,
+      contentLength: content.length,
+      contentPreview: compactMessageText(content, 120) || '',
+    }
+  }
+
+  if (event === 'reasoning.delta') {
+    const delta = typeof data?.delta === 'string'
+      ? data.delta
+      : typeof data?.content === 'string'
+        ? data.content
+        : ''
+    return {
+      event,
+      contentLength: delta.length,
+      contentPreview: compactMessageText(delta, 120) || '',
+    }
+  }
+
+  if (event === 'tool.calls.required') {
+    return {
+      event,
+      responseId: data?.response_id || null,
+      calls: Array.isArray(data?.calls)
+        ? data.calls.map((call: any) => ({
+          callId: call?.call_id || null,
+          name: call?.name || null,
+          arguments: call?.arguments || null,
+        }))
+        : [],
+      contentPreview: compactMessageText(typeof data?.content === 'string' ? data.content : '', 220) || '',
+    }
+  }
+
+  if (event === 'message.completed') {
+    return {
+      event,
+      responseId: data?.response_id || null,
+      contentPreview: compactMessageText(typeof data?.content === 'string' ? data.content : '', 220) || '',
+    }
+  }
+
+  return {
+    event,
+    data,
+  }
+}
+
+function isAgentInternalInterceptError(message: string) {
+  const normalized = message.trim()
+  if (!normalized) return false
+  return [
+    '当前步骤要求执行正文修改，但本轮没有输出任何有效的正文协议写入。',
+    '模型在正文动作未完整闭合时请求了后续工具',
+    '计划执行停滞：连续多轮只读取或保存当前文档，但没有真正写入正文。',
+    '计划执行空转：连续多轮没有新的工具结果、正文写入或步骤推进。',
+    '检测到重复工具调用循环，已停止本次生成，请调整指令后重试',
+    '工具调用轮次过多，已停止本次生成，请补充更明确的目标或范围',
+  ].some((prefix) => normalized.startsWith(prefix))
+}
+
+function resolveAgentInterceptDetails(message: string) {
+  const normalized = message.trim()
+  if (!normalized) return null
+
+  if (normalized.startsWith('当前步骤要求执行正文修改，但本轮没有输出任何有效的正文协议写入。')) {
+    return {
+      code: 'document_write_protocol_missing',
+      userMessage: '本轮执行已被拦截：当前步骤要求真正写正文，但模型既没有调用局部编辑工具，也没有输出有效的 ACTION 正文协议。下一轮它需要先完成正文修改，再继续后续动作。',
+      modelGuidance: 'The current step requires a document write. Use partial-edit tools for scoped edits. For streamed writes, use ACTION:append for empty-document drafting and end-of-document continuation, and use ACTION:replace only for true full-document replacement.',
+    }
+  }
+
+  if (normalized.startsWith('模型在正文动作未完整闭合时请求了后续工具')) {
+    return {
+      code: 'action_block_not_closed',
+      userMessage: '本轮执行已被拦截：模型在正文写入动作还没完整闭合时就请求了后续工具。下一轮需要先把 ACTION 写完整，再继续。',
+      modelGuidance: 'Finish and close the current ACTION write block before requesting any follow-up tools or claiming completion.',
+    }
+  }
+
+  if (normalized.startsWith('计划执行停滞：连续多轮只读取或保存当前文档，但没有真正写入正文。')) {
+    return {
+      code: 'plan_stalled_without_write',
+      userMessage: '本轮执行已被拦截：模型连续多轮只做读取或保存，没有真正写入正文。下一轮需要重新规划当前步骤，并明确产出正文修改。',
+      modelGuidance: 'The current execution is stalled. Re-plan the current step and produce an actual document write instead of repeating read-only or save-only rounds.',
+    }
+  }
+
+  if (normalized.startsWith('计划执行空转：连续多轮没有新的工具结果、正文写入或步骤推进。')) {
+    return {
+      code: 'plan_idle_without_progress',
+      userMessage: '本轮执行已被拦截：模型连续多轮没有新的工具结果、正文写入或步骤推进，已经进入空转。下一轮需要重规划当前步骤，基于已有结果直接推进，不要继续重复无进展回复。',
+      modelGuidance: 'The execution entered an idle loop with no new tool results, document writes, or step advancement. Re-plan the current step from existing state and move execution forward instead of repeating empty continuation rounds.',
+    }
+  }
+
+  if (normalized.startsWith('检测到重复工具调用循环，已停止本次生成，请调整指令后重试')) {
+    return {
+      code: 'tool_loop_detected',
+      userMessage: '本轮执行已被拦截：模型进入了重复工具调用循环。下一轮需要改变策略，不要再重复同一批工具调用。',
+      modelGuidance: 'A repeated tool loop was detected. Change strategy, use prior tool results, and do not repeat the same tool batch unchanged.',
+    }
+  }
+
+  if (normalized.startsWith('工具调用轮次过多，已停止本次生成，请补充更明确的目标或范围')) {
+    return {
+      code: 'tool_round_limit_reached',
+      userMessage: '本轮执行已被拦截：工具调用轮次过多。下一轮需要收缩目标范围，基于已有结果直接推进，不要继续无界扩张步骤。',
+      modelGuidance: 'The tool-call round limit was reached. Narrow the scope, reuse existing results, and continue with fewer steps instead of expanding the plan.',
+    }
+  }
+
+  return null
 }
 
 function startDrag(event: MouseEvent) {
@@ -1537,6 +2821,7 @@ async function editProvider(providerId: string) {
     providerDraft.value = {
       id: `${detail.id}`,
       name: detail.name || provider.name,
+      providerKind: normalizeProviderKind(detail.provider_kind || provider.providerKind),
       baseUrl: normalizedProviderBaseUrl(detail.base_url || provider.baseUrl),
       apiKey: detail.api_key || '',
     }
@@ -1545,6 +2830,7 @@ async function editProvider(providerId: string) {
     providerDraft.value = {
       id: provider.id,
       name: provider.name,
+      providerKind: provider.providerKind,
       baseUrl: provider.baseUrl,
       apiKey: '',
     }
@@ -1576,11 +2862,13 @@ async function saveProviderDraft() {
     const data = await request.post('/agent/providers', {
       id: providerDraft.value.id ? Number(providerDraft.value.id) : null,
       name,
+      provider_kind: providerDraft.value.providerKind,
       base_url: normalizedProviderBaseUrl(providerDraft.value.baseUrl),
       api_key: apiKey,
       remote_models: editingProvider?.remoteModels || [],
       enabled_models: editingProvider?.enabledModels || [],
       custom_models: editingProvider?.customModels || [],
+      model_configs: editingProvider?.modelConfigs || {},
     }) as ProviderListResponse
 
     providers.value = (data.providers || [])
@@ -1714,9 +3002,192 @@ async function saveModelDraft() {
   }
 }
 
+function openModelConfigDialog(model: string) {
+  const provider = activeProvider.value
+  if (!provider) return
+  editingModelConfigName.value = model
+  modelConfigDraft.value = createModelConfigDraft(provider.modelConfigs[model] || null)
+  showModelConfigDialog.value = true
+}
+
+function applyRecommendedModelConfig() {
+  const provider = activeProvider.value
+  if (!provider) return
+  modelConfigDraft.value = createModelConfigDraft(recommendedModelConfig(provider.providerKind))
+}
+
+function resetModelConfigDraftToCurrent() {
+  const provider = activeProvider.value
+  const model = editingModelConfigName.value.trim()
+  if (!provider || !model) return
+  modelConfigDraft.value = createModelConfigDraft(provider.modelConfigs[model] || null)
+}
+
+function removeCurrentModelConfig() {
+  const provider = activeProvider.value
+  const model = editingModelConfigName.value.trim()
+  if (!provider || !model) return
+  const nextConfigs = { ...provider.modelConfigs }
+  delete nextConfigs[model]
+  provider.modelConfigs = nextConfigs
+  providers.value = [...providers.value]
+  modelConfigDraft.value = createModelConfigDraft()
+  ElMessage.success(`已清除模型 ${model} 的参数配置，请回到“模型管理”点击“保存”完成持久化`)
+}
+
+function saveCurrentModelConfig() {
+  const provider = activeProvider.value
+  const model = editingModelConfigName.value.trim()
+  if (!provider || !model) return
+
+  let additionalParams: Record<string, unknown> | null = null
+  const additionalParamsText = modelConfigDraft.value.additionalParamsText.trim()
+  if (additionalParamsText) {
+    try {
+      const parsed = JSON.parse(additionalParamsText)
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        ElMessage.warning('高级附加参数必须是 JSON 对象')
+        return
+      }
+      additionalParams = parsed as Record<string, unknown>
+    } catch {
+      ElMessage.warning('高级附加参数不是合法 JSON')
+      return
+    }
+  }
+
+  const config = normalizeModelConfig({
+    modalities: modelConfigDraft.value.modalities,
+    thinking: parseBooleanChoice(modelConfigDraft.value.thinking),
+    tools_enabled: parseBooleanChoice(modelConfigDraft.value.tools_enabled),
+    temperature: parseNumberText(modelConfigDraft.value.temperatureText),
+    max_output_tokens: parseIntegerText(modelConfigDraft.value.maxTokensText),
+    top_p: parseNumberText(modelConfigDraft.value.topPText),
+    top_k: parseIntegerText(modelConfigDraft.value.topKText),
+    presence_penalty: parseNumberText(modelConfigDraft.value.presencePenaltyText),
+    frequency_penalty: parseNumberText(modelConfigDraft.value.frequencyPenaltyText),
+    parallel_tool_calls: parseBooleanChoice(modelConfigDraft.value.parallelToolCalls),
+    reasoning_effort: modelConfigDraft.value.reasoningEffort.trim() || null,
+    stop_sequences: modelConfigDraft.value.stopSequencesText.split('\n'),
+    response_mime_type: modelConfigDraft.value.responseMimeType.trim() || null,
+    additional_params: additionalParams,
+  })
+
+  const nextConfigs = { ...provider.modelConfigs }
+  if (modelConfigIsConfigured(config)) {
+    nextConfigs[model] = config
+  } else {
+    delete nextConfigs[model]
+  }
+  provider.modelConfigs = nextConfigs
+  providers.value = [...providers.value]
+  showModelConfigDialog.value = false
+  ElMessage.success(`已更新模型 ${model} 的参数配置，请回到“模型管理”点击“保存”完成持久化`)
+}
+
 function openProviderManagerFromModelDialog() {
   showModelDialog.value = false
   showProviderDialog.value = true
+}
+
+function openAttachmentPicker() {
+  if (!composerAttachmentEnabled.value || streaming.value || attachmentUploading.value) return
+  attachmentInputRef.value?.click()
+}
+
+async function uploadComposerAttachment(file: File) {
+  if (file.size > systemStore.uploadMaxBytes) {
+    ElMessage.warning(`文件 ${file.name} 超过 ${systemStore.uploadLimitLabel} 限制`)
+    return
+  }
+
+  const allowImage = composerSupportsImage.value
+  const allowDocument = composerSupportsDocument.value
+  const isImage = isSupportedImageFile(file)
+  const knownDocument = isSupportedDocumentFile(file)
+  const inferredTextDocument = !isImage && !knownDocument && allowDocument
+    ? await isProbablyUtf8TextFile(file)
+    : false
+  const isDocument = knownDocument || inferredTextDocument
+
+  if (isImage && !allowImage) {
+    ElMessage.warning(`当前模型没有开启图片输入，无法添加 ${file.name}`)
+    return
+  }
+  if (!isImage && !isDocument) {
+    ElMessage.warning(`文件 ${file.name} 暂不支持作为聊天附件`)
+    return
+  }
+  if (!isImage && isDocument && !allowDocument) {
+    ElMessage.warning(`当前模型没有开启文件输入，无法添加 ${file.name}`)
+    return
+  }
+
+  const kind = isImage ? 'doc-image' : 'doc-file'
+  const attachmentKind = isImage ? 'image' : 'document'
+  const formData = new FormData()
+  formData.append('kind', kind)
+  formData.append('file', file)
+
+  attachmentUploadingCount.value += 1
+  try {
+    const data = (await request.post('/uploads', formData)) as {
+      upload?: {
+        id: number
+        url: string
+        original_name: string
+        content_type?: string | null
+        size?: number
+      }
+    }
+    const upload = data?.upload
+    if (!upload?.id) {
+      throw new Error('上传结果缺少附件 ID')
+    }
+    composerAttachments.value = [
+      ...composerAttachments.value,
+      {
+        localId: genId(),
+        uploadId: Number(upload.id),
+        kind: attachmentKind,
+        name: upload.original_name || file.name,
+        url: upload.url || '',
+        contentType: upload.content_type || file.type || null,
+        size: Number(upload.size) || file.size || 0,
+      },
+    ]
+  } finally {
+    attachmentUploadingCount.value = Math.max(0, attachmentUploadingCount.value - 1)
+    if (attachmentInputRef.value) {
+      attachmentInputRef.value.value = ''
+    }
+  }
+}
+
+async function addComposerFiles(fileList: FileList | File[]) {
+  const files = Array.from(fileList || [])
+  if (!files.length) return
+
+  for (const file of files) {
+    try {
+      await uploadComposerAttachment(file)
+    } catch (error: any) {
+      ElMessage.error(error.response?.data?.error || error.message || `上传 ${file.name} 失败`)
+    }
+  }
+}
+
+async function handleAttachmentInputChange(event: Event) {
+  const target = event.target as HTMLInputElement | null
+  if (!target?.files?.length) return
+  await addComposerFiles(target.files)
+}
+
+async function handleComposerPaste(event: ClipboardEvent) {
+  if (!composerAttachmentEnabled.value || streaming.value) return
+  const files = Array.from(event.clipboardData?.files || [])
+  if (!files.length) return
+  await addComposerFiles(files)
 }
 
 function currentDocumentHasUnsavedChanges() {
@@ -1752,6 +3223,27 @@ function compactMessageText(content: string, maxChars = REQUEST_SUMMARY_ITEM_CHA
   if (!compact) return ''
   if (compact.length <= maxChars) return compact
   return `${compact.slice(0, maxChars)}...`
+}
+
+function summarizeMessageAttachments(attachments: AgentAttachment[]) {
+  if (!attachments.length) return ''
+  const imageCount = attachments.filter((attachment) => attachment.kind === 'image').length
+  const documentCount = attachments.length - imageCount
+  const parts: string[] = []
+  if (imageCount) parts.push(`${imageCount} 张图片`)
+  if (documentCount) parts.push(`${documentCount} 个文件`)
+  return parts.join('、')
+}
+
+function compactMessageSummary(message: AgentMessage, maxChars = REQUEST_SUMMARY_ITEM_CHARS) {
+  const compact = compactMessageText(message.content, maxChars)
+  const attachmentSummary = summarizeMessageAttachments(message.attachments || [])
+  if (compact && attachmentSummary) {
+    return compactMessageText(`${compact}（附件：${attachmentSummary}）`, maxChars)
+  }
+  if (compact) return compact
+  if (attachmentSummary) return `附件：${attachmentSummary}`
+  return ''
 }
 
 function compactJsonLike(value: unknown, maxChars = REQUEST_SUMMARY_ITEM_CHARS) {
@@ -1806,8 +3298,58 @@ function summarizeToolCallBatch(calls: AgentToolCall[], outputs: AgentToolOutput
       output: output ? compactJsonLike(output.output, 360) || null : null,
       ok,
       outcome,
+      stagePolicy: typeof call.stage_policy === 'string' ? call.stage_policy : null,
+      capabilities: Array.isArray(call.capabilities)
+        ? call.capabilities.filter((item): item is string => typeof item === 'string' && Boolean(item.trim()))
+        : [],
     }
   })
+}
+
+function buildRoundToolCallSummaryFromToolEvent(raw: any): AgentExecutionToolCallSummary | null {
+  if (!raw || typeof raw !== 'object') return null
+  const status = typeof raw.status === 'string' && raw.status.trim() ? raw.status.trim() : ''
+  if (!['completed', 'failed', 'noop'].includes(status)) return null
+  const toolName = typeof raw.tool === 'string' && raw.tool.trim() ? raw.tool.trim() : ''
+  if (!toolName) return null
+
+  const payload = raw.output && typeof raw.output === 'object'
+    ? raw.output as Record<string, any>
+    : null
+  const ok = typeof payload?.ok === 'boolean' ? payload.ok : null
+  const result = payload?.result && typeof payload.result === 'object'
+    ? payload.result as Record<string, any>
+    : null
+  const rawArguments = typeof raw.arguments === 'string'
+    ? raw.arguments
+    : raw.arguments && typeof raw.arguments === 'object'
+      ? JSON.stringify(raw.arguments)
+      : ''
+
+  let outcome: AgentExecutionToolCallSummary['outcome'] = ok === false ? 'error' : 'unknown'
+  if (toolName === 'save_current_document') {
+    const savePerformed = result?.saved === true
+    const saveNoop =
+      result?.save_action === 'noop'
+      || result?.already_saved === true
+      || result?.alreadySaved === true
+      || result?.unsaved_changes_before_save === false
+    if (savePerformed) outcome = 'success'
+    else if (saveNoop) outcome = 'noop'
+    else if (ok === false) outcome = 'error'
+  } else if (ok === true) {
+    outcome = 'success'
+  }
+
+  return {
+    name: toolName,
+    arguments: compactMessageText(rawArguments || '', 320) || null,
+    output: compactJsonLike(payload, 360) || null,
+    ok,
+    outcome,
+    stagePolicy: 'mutation',
+    capabilities: ['update'],
+  }
 }
 
 function parseToolArguments(argumentsText: string | null) {
@@ -1822,22 +3364,207 @@ function parseToolArguments(argumentsText: string | null) {
   }
 }
 
+function coerceBooleanLike(value: unknown): boolean | null {
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase()
+    if (normalized === 'true') return true
+    if (normalized === 'false') return false
+  }
+  return null
+}
+
+function coerceNumberLike(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value.trim())
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return null
+}
+
+function parseJsonLikeValue(value: unknown) {
+  if (typeof value !== 'string') return value
+  const trimmed = value.trim()
+  if (!trimmed) return value
+  if (
+    (trimmed.startsWith('{') && trimmed.endsWith('}'))
+    || (trimmed.startsWith('[') && trimmed.endsWith(']'))
+  ) {
+    try {
+      return JSON.parse(trimmed)
+    } catch {
+      return value
+    }
+  }
+  return value
+}
+
+function coerceStringListLike(value: unknown): string[] {
+  const normalized = parseJsonLikeValue(value)
+  if (Array.isArray(normalized)) {
+    return normalized
+      .filter((item): item is string => typeof item === 'string' && Boolean(item.trim()))
+      .map((item) => item.trim())
+  }
+  return []
+}
+
+function normalizeControlPayload(raw: any): AgentControlBlock | null {
+  if (!raw || typeof raw !== 'object') return null
+  const normalized = {
+    current_mode: typeof raw.current_mode === 'string' && raw.current_mode.trim()
+      ? raw.current_mode.trim()
+      : typeof raw.currentMode === 'string' && raw.currentMode.trim()
+        ? raw.currentMode.trim()
+        : null,
+    awaiting: typeof raw.awaiting === 'string' && raw.awaiting.trim() ? raw.awaiting.trim() : null,
+    current_action_kind: typeof raw.current_action_kind === 'string' && raw.current_action_kind.trim()
+      ? raw.current_action_kind.trim()
+      : typeof raw.currentActionKind === 'string' && raw.currentActionKind.trim()
+        ? raw.currentActionKind.trim()
+        : null,
+    current_action_status: typeof raw.current_action_status === 'string' && raw.current_action_status.trim()
+      ? raw.current_action_status.trim()
+      : typeof raw.currentActionStatus === 'string' && raw.currentActionStatus.trim()
+        ? raw.currentActionStatus.trim()
+        : null,
+    current_action_mode: typeof raw.current_action_mode === 'string' && raw.current_action_mode.trim()
+      ? raw.current_action_mode.trim()
+      : typeof raw.currentActionMode === 'string' && raw.currentActionMode.trim()
+        ? raw.currentActionMode.trim()
+        : null,
+    current_action_target: typeof raw.current_action_target === 'string' && raw.current_action_target.trim()
+      ? raw.current_action_target.trim()
+      : typeof raw.currentActionTarget === 'string' && raw.currentActionTarget.trim()
+        ? raw.currentActionTarget.trim()
+        : null,
+    confirmation_required: coerceBooleanLike(raw.confirmation_required ?? raw.confirmationRequired),
+    phase: typeof raw.phase === 'string' && raw.phase.trim() ? raw.phase.trim() : null,
+    pending_plan: coerceBooleanLike(raw.pending_plan ?? raw.pendingPlan),
+    auto_continue: coerceBooleanLike(raw.auto_continue ?? raw.autoContinue),
+    needs_save: coerceBooleanLike(raw.needs_save ?? raw.needsSave),
+    write_scope: typeof raw.write_scope === 'string' && raw.write_scope.trim()
+      ? raw.write_scope.trim()
+      : typeof raw.writeScope === 'string' && raw.writeScope.trim()
+        ? raw.writeScope.trim()
+        : null,
+    preferred_write_action: typeof raw.preferred_write_action === 'string' && raw.preferred_write_action.trim()
+      ? raw.preferred_write_action.trim()
+      : typeof raw.preferredWriteAction === 'string' && raw.preferredWriteAction.trim()
+        ? raw.preferredWriteAction.trim()
+        : null,
+    task_kind: typeof raw.task_kind === 'string' && raw.task_kind.trim()
+      ? raw.task_kind.trim()
+      : typeof raw.taskKind === 'string' && raw.taskKind.trim()
+        ? raw.taskKind.trim()
+        : null,
+    edit_intent: typeof raw.edit_intent === 'string' && raw.edit_intent.trim()
+      ? raw.edit_intent.trim()
+      : typeof raw.editIntent === 'string' && raw.editIntent.trim()
+        ? raw.editIntent.trim()
+        : null,
+    edit_stage: typeof raw.edit_stage === 'string' && raw.edit_stage.trim()
+      ? raw.edit_stage.trim()
+      : typeof raw.editStage === 'string' && raw.editStage.trim()
+        ? raw.editStage.trim()
+        : null,
+    save_requested: coerceBooleanLike(raw.save_requested ?? raw.saveRequested),
+    write_completed: coerceBooleanLike(raw.write_completed ?? raw.writeCompleted),
+    plan_step_index: coerceNumberLike(raw.plan_step_index ?? raw.planStepIndex),
+    plan_total_steps: coerceNumberLike(raw.plan_total_steps ?? raw.planTotalSteps),
+    plan_current_step: typeof raw.plan_current_step === 'string' && raw.plan_current_step.trim()
+      ? raw.plan_current_step.trim()
+      : typeof raw.planCurrentStep === 'string' && raw.planCurrentStep.trim()
+        ? raw.planCurrentStep.trim()
+        : null,
+    plan_completed_steps: coerceStringListLike(raw.plan_completed_steps ?? raw.planCompletedSteps),
+  }
+  return {
+    currentMode: normalized.current_mode,
+    awaiting: normalized.awaiting,
+    currentActionKind: normalized.current_action_kind,
+    currentActionStatus: normalized.current_action_status,
+    currentActionMode: normalized.current_action_mode,
+    currentActionTarget: normalized.current_action_target,
+    confirmationRequired: normalized.confirmation_required === true,
+    phase: normalized.phase,
+    pendingPlan: normalized.pending_plan === true,
+    autoContinue: normalized.auto_continue === true,
+    needsSave: normalized.needs_save === true,
+    writeScope: normalized.write_scope,
+    preferredWriteAction: normalized.preferred_write_action,
+    taskKind: normalized.task_kind,
+    editIntent: normalized.edit_intent,
+    editStage: normalized.edit_stage,
+    saveRequested: normalized.save_requested === true,
+    writeCompleted: normalized.write_completed === true,
+    planStepIndex: normalized.plan_step_index,
+    planTotalSteps: normalized.plan_total_steps,
+    planCurrentStep: normalized.plan_current_step,
+    planCompletedSteps: normalized.plan_completed_steps,
+  }
+}
+
+function buildControlFromExecutionState(
+  executionState: AgentExecutionState,
+  taskAnalysis: AgentTaskAnalysis | null,
+): AgentControlBlock {
+  return {
+    currentMode: executionState.currentMode,
+    awaiting: executionState.awaiting,
+    currentActionKind: executionState.currentActionKind,
+    currentActionStatus: executionState.currentActionStatus,
+    currentActionMode: executionState.currentActionMode,
+    currentActionTarget: executionState.currentActionTarget,
+    confirmationRequired: executionState.confirmationRequired,
+    phase: null,
+    pendingPlan: Boolean(executionState.confirmationRequired && executionState.pendingPlan),
+    autoContinue: executionState.semanticContinuation,
+    needsSave: executionState.saveRequested,
+    writeScope: taskAnalysis?.writeScope || null,
+    preferredWriteAction: taskAnalysis?.preferredWriteAction || null,
+    taskKind: executionState.taskKind,
+    editIntent: executionState.editIntent,
+    editStage: executionState.editStage,
+    saveRequested: executionState.saveRequested,
+    writeCompleted: executionState.writeCompleted,
+    planStepIndex: executionState.planStepIndex,
+    planTotalSteps: executionState.planTotalSteps,
+    planCurrentStep: executionState.planCurrentStep,
+    planCompletedSteps: [...executionState.planCompletedSteps],
+  }
+}
+
+function isHostStateTool(name: string) {
+  return (
+    name === 'plan_start'
+    || name === 'plan_step_update'
+    || name === 'plan_complete'
+    || name === 'plan_cancel'
+    || name === 'write_start'
+    || name === 'write_end'
+  )
+}
+
 function summarizeRoundActions(roundToolCalls: AgentExecutionToolCallSummary[]) {
   if (!roundToolCalls.length) return []
 
   const createdDirs: string[] = []
   const createdDocs: string[] = []
   const openedTargets: string[] = []
+  const writtenDocs: string[] = []
+  let genericWriteCount = 0
+  let actionWriteFailed = false
   let createdProject: string | null = null
-  let savedCurrentDoc = false
-  let saveNoop = false
-  let saveFailed = false
-  let checkedPageState = false
-  let readContext = false
   const otherActions: string[] = []
 
   for (const call of roundToolCalls) {
     const args = parseToolArguments(call.arguments)
+    const outputPayload = parseToolArguments(call.output)
+    const outputResult = outputPayload?.result && typeof outputPayload.result === 'object'
+      ? outputPayload.result as Record<string, any>
+      : null
     switch (call.name) {
       case 'create_project': {
         const name = typeof args?.name === 'string' && args.name.trim() ? args.name.trim() : ''
@@ -1861,19 +3588,26 @@ function summarizeRoundActions(roundToolCalls: AgentExecutionToolCallSummary[]) 
         }
         break
       }
-      case 'save_current_document':
-        if (call.outcome === 'success') savedCurrentDoc = true
-        else if (call.outcome === 'noop') saveNoop = true
-        else if (call.outcome === 'error') saveFailed = true
+      case 'action_protocol_write': {
+        const docName = typeof outputResult?.doc_name === 'string' && outputResult.doc_name.trim()
+          ? outputResult.doc_name.trim()
+          : ''
+        if (call.outcome === 'success') {
+          if (docName) {
+            writtenDocs.push(docName)
+          } else {
+            genericWriteCount += 1
+          }
+        } else if (call.outcome === 'error') {
+          actionWriteFailed = true
+        }
         break
-      case 'get_current_page_state':
-        checkedPageState = true
-        break
+      }
       case 'read_document':
       case 'read_editor_snapshot':
       case 'get_project_tree':
       case 'list_projects':
-        readContext = true
+      case 'get_current_page_state':
         break
       default:
         otherActions.push(call.name)
@@ -1903,23 +3637,19 @@ function summarizeRoundActions(roundToolCalls: AgentExecutionToolCallSummary[]) 
     const latestTarget = openedTargets[openedTargets.length - 1]
     parts.push(`已打开《${latestTarget}》。`)
   }
-  if (savedCurrentDoc) {
-    parts.push('已保存当前文档。')
-  } else if (saveNoop) {
-    parts.push('当前文档没有新的未保存改动，无需再次保存。')
-  } else if (saveFailed) {
-    parts.push('当前文档保存未成功。')
+  const uniqueWrittenDocs = [...new Set(writtenDocs)]
+  if (uniqueWrittenDocs.length) {
+    parts.push(
+      uniqueWrittenDocs.length <= 4
+        ? `已写入正文：${uniqueWrittenDocs.map((name) => `《${name}》`).join('、')}。`
+        : `已写入 ${uniqueWrittenDocs.length} 篇文档正文。`,
+    )
+  } else if (genericWriteCount > 0) {
+    parts.push(genericWriteCount === 1 ? '已完成正文写入。' : `已完成 ${genericWriteCount} 次正文写入。`)
   }
-  if (checkedPageState) {
-    parts.push('已检查当前页面状态。')
+  if (actionWriteFailed) {
+    parts.push('部分正文写入失败。')
   }
-  if (readContext) {
-    parts.push('已读取当前内容与上下文用于继续执行。')
-  }
-  if (!parts.length && otherActions.length) {
-    parts.push('本轮已完成必要的页面与数据操作。')
-  }
-
   return parts
 }
 
@@ -1933,8 +3663,16 @@ function appendRecentToolCalls(
 
 function buildAgentExecutionContext(state: AgentExecutionState) {
   return {
+    current_mode: state.currentMode,
+    awaiting: state.awaiting,
+    current_action_kind: state.currentActionKind,
+    current_action_status: state.currentActionStatus,
+    current_action_mode: state.currentActionMode,
+    current_action_target: state.currentActionTarget,
+    confirmation_required: state.confirmationRequired,
     pending_plan: state.pendingPlan,
     pending_plan_user_reply: state.pendingPlanUserReply,
+    plan_confirmation_decision: state.planConfirmationDecision,
     composite_write_then_save: state.compositeWriteThenSave,
     semantic_continuation: state.semanticContinuation,
     semantic_continuation_round: state.semanticContinuationRound,
@@ -1950,12 +3688,22 @@ function buildAgentExecutionContext(state: AgentExecutionState) {
     plan_completed_steps: state.planCompletedSteps,
     document_write_observed: state.documentWriteObserved,
     save_attempt_without_document_change: state.saveAttemptWithoutDocumentChange,
+    last_intercept_code: state.lastInterceptCode,
+    last_intercept_message: state.lastInterceptMessage,
+    last_intercept_guidance: state.lastInterceptGuidance,
     recent_tool_calls: state.recentToolCalls,
   }
 }
 
 function buildAgentExecutionMemory(memory: AgentExecutionMemory) {
   return {
+    current_mode: memory.currentMode,
+    awaiting: memory.awaiting,
+    current_action_kind: memory.currentActionKind,
+    current_action_status: memory.currentActionStatus,
+    current_action_mode: memory.currentActionMode,
+    current_action_target: memory.currentActionTarget,
+    confirmation_required: memory.confirmationRequired,
     plan: memory.plan,
     assistant_summary: memory.assistantSummary,
     control_phase: memory.controlPhase,
@@ -1970,6 +3718,9 @@ function buildAgentExecutionMemory(memory: AgentExecutionMemory) {
     plan_completed_steps: memory.planCompletedSteps,
     document_write_observed: memory.documentWriteObserved,
     save_attempt_without_document_change: memory.saveAttemptWithoutDocumentChange,
+    last_intercept_code: memory.lastInterceptCode,
+    last_intercept_message: memory.lastInterceptMessage,
+    last_intercept_guidance: memory.lastInterceptGuidance,
     recent_tool_calls: memory.recentToolCalls,
   }
 }
@@ -2004,15 +3755,23 @@ function extractSaveNoopState(outputs: AgentToolOutputPayload[]) {
 
 function isReadOrSaveOnlyBatch(roundToolCalls: AgentExecutionToolCallSummary[]) {
   if (!roundToolCalls.length) return false
-  return roundToolCalls.every((call) => [
-    'read_document',
-    'read_editor_snapshot',
-    'get_current_page_state',
-    'get_project_tree',
-    'list_projects',
-    'open_tree_node',
-    'save_current_document',
-  ].includes(call.name))
+  return roundToolCalls.every((call) =>
+    toolHasOnlyCapabilities(call.name, ['read', 'save'], {
+      stagePolicy: call.stagePolicy,
+      capabilities: call.capabilities,
+    }),
+  )
+}
+
+function hasSuccessfulMutationToolCall(roundToolCalls: AgentExecutionToolCallSummary[]) {
+  return roundToolCalls.some((call) => (
+    call.outcome === 'success'
+    && !isHostStateTool(call.name)
+    && !toolHasOnlyCapabilities(call.name, ['read', 'save'], {
+      stagePolicy: call.stagePolicy,
+      capabilities: call.capabilities,
+    })
+  ))
 }
 
 function buildHistorySummary(messages: AgentMessage[]) {
@@ -2020,7 +3779,7 @@ function buildHistorySummary(messages: AgentMessage[]) {
   const assistantItems: string[] = []
 
   for (const message of messages) {
-    const compact = compactMessageText(message.content)
+    const compact = compactMessageSummary(message)
     if (!compact) continue
 
     if (message.role === 'user') {
@@ -2092,32 +3851,24 @@ function buildSessionMemory(session: AgentSession): AgentSessionMemory | null {
   }
 }
 
-function buildConversationMessages(messages: AgentMessage[]): AgentRequestMessage[] {
+function buildConversationMessages(
+  messages: AgentMessage[],
+  options: { preserveFullHistory?: boolean } = {},
+): AgentRequestMessage[] {
   const nonEmptyMessages = messages
     .map((message) => ({
       ...message,
       content: message.content.trim(),
     }))
-    .filter((message) => Boolean(message.content) && message.role !== 'system')
+    .filter((message) => (Boolean(message.content) || Boolean(message.attachments?.length)) && message.role !== 'system')
   const normalized = nonEmptyMessages.map((message) => ({
     role: message.role,
     content: message.content,
+    attachments: message.attachments || [],
   }))
 
   if (!normalized.length) return []
-
-  const totalChars = normalized.reduce((sum, message) => sum + message.content.length, 0)
-  if (normalized.length <= REQUEST_RECENT_MESSAGE_COUNT || totalChars <= REQUEST_SUMMARY_TRIGGER_CHARS) {
-    return normalized
-  }
-
-  const recentMessages = normalized.slice(-REQUEST_RECENT_MESSAGE_COUNT)
-  const olderMessages = nonEmptyMessages.slice(0, Math.max(0, normalized.length - REQUEST_RECENT_MESSAGE_COUNT))
-  const summary = buildHistorySummary(olderMessages)
-
-  return summary
-    ? [{ role: 'system', content: summary }, ...recentMessages]
-    : recentMessages
+  return normalized
 }
 
 function extractPlanBlock(content: string) {
@@ -2134,14 +3885,89 @@ function parsePlanSteps(plan: string) {
     .filter(Boolean)
 }
 
-function isPartialWriteTask(taskAnalysis: AgentTaskAnalysis | null) {
-  return taskAnalysis?.writeScope === 'partial'
+function hasActivePendingPlan(session: AgentSession) {
+  return Boolean(session.pendingPlan?.trim())
 }
 
-function stepRequiresDocumentWrite(step: string | null | undefined) {
-  const normalized = typeof step === 'string' ? step.trim() : ''
+function isNeedsSaveContinuation(session: AgentSession) {
+  if (hasActivePendingPlan(session)) return false
+  return session.lastExecutionMemory?.awaiting === 'user_confirm_write'
+}
+
+function isLikelySaveFollowUpReply(text: string) {
+  const normalized = text.trim().toLowerCase()
   if (!normalized) return false
-  return ['写入', '改写', '重写', '替换', '互换', '追加', '应用正文', '局部替换'].some((keyword) => normalized.includes(keyword))
+  const compact = normalized.replace(/\s+/g, '')
+  const negativePatterns = [
+    '不保存',
+    '先不保存',
+    '暂不保存',
+    '不用保存',
+    '别保存',
+    '取消保存',
+    '稍后保存',
+    "don'tsave",
+    'notsave',
+  ]
+  if (negativePatterns.some((pattern) => compact.includes(pattern))) {
+    return false
+  }
+  const explicitSavePatterns = [
+    '保存',
+    '存一下',
+    '请保存',
+    '确认保存',
+    'save',
+    'submit',
+    'apply',
+  ]
+  if (explicitSavePatterns.some((pattern) => compact.includes(pattern))) {
+    return true
+  }
+  return [
+    '好',
+    '好的',
+    '行',
+    '行的',
+    '可以',
+    '确认',
+    '确定',
+    '是',
+    '是的',
+    '嗯',
+    '嗯嗯',
+    'ok',
+    'okay',
+    'yes',
+    'y',
+    'sure',
+  ].includes(compact)
+}
+
+function shouldTreatPlanAsPending(options: {
+  planText: string
+  control: AgentControlBlock | null
+  session: AgentSession
+  executionState: AgentExecutionState
+  sawPlanSignal: boolean
+}) {
+  const planText = options.planText.trim()
+  if (!planText) return false
+  if (options.control?.awaiting === 'user_confirm_write') return false
+  if (options.executionState.saveRequested) return false
+  if (!options.executionState.confirmationRequired) return false
+  if (options.executionState.pendingPlanUserReply?.trim()) return false
+  if (options.executionState.planConfirmationDecision === 'approved') return false
+  if (options.executionState.semanticContinuation) return false
+  if (options.control?.currentMode === 'plan' && options.control?.awaiting === 'user_input') return true
+  const runtimePlanStatus = options.session.runtimePlan?.status?.trim()
+  const hasPlanRuntime = options.session.taskAnalysis?.mode === 'plan'
+    || runtimePlanStatus === 'pending'
+  return options.sawPlanSignal && hasPlanRuntime
+}
+
+function isPartialWriteTask(taskAnalysis: AgentTaskAnalysis | null) {
+  return taskAnalysis?.writeScope === 'partial'
 }
 
 function appendToolEventsToSession(session: AgentSession, roundToolCalls: AgentExecutionToolCallSummary[]) {
@@ -2159,6 +3985,32 @@ function appendToolEventsToSession(session: AgentSession, roundToolCalls: AgentE
   session.toolEvents = [...session.toolEvents, ...nextEvents].slice(-20)
 }
 
+function isDocumentMutationTool(name: string) {
+  return name === 'rewrite_document_section'
+    || name === 'replace_document_block'
+    || name === 'replace_document_blocks'
+    || name === 'swap_document_sections'
+}
+
+function mergePendingPlanToolOutputs(
+  existing: AgentToolOutputPayload[],
+  nextBatch: AgentToolOutputPayload[],
+) {
+  if (!nextBatch.length) return existing
+  const merged = [...existing]
+  const indexByCallId = new Map(merged.map((item, index) => [item.call_id, index]))
+  for (const output of nextBatch) {
+    const existingIndex = indexByCallId.get(output.call_id)
+    if (existingIndex !== undefined) {
+      merged[existingIndex] = output
+      continue
+    }
+    indexByCallId.set(output.call_id, merged.length)
+    merged.push(output)
+  }
+  return merged.slice(-8)
+}
+
 function syncRuntimePlanStatus(
   session: AgentSession,
   control: AgentControlBlock | null,
@@ -2167,30 +4019,229 @@ function syncRuntimePlanStatus(
   const runtimePlan = session.runtimePlan
   if (!runtimePlan) return
   const planStepIndex = Number.isFinite(control?.planStepIndex) ? Number(control?.planStepIndex) : executionState.planStepIndex
-  const phase = typeof control?.phase === 'string' ? control.phase : executionState.pendingPlan ? 'await_user_confirmation' : null
+  const actionStatus = typeof control?.currentActionStatus === 'string' && control.currentActionStatus.trim()
+    ? control.currentActionStatus.trim()
+    : executionState.currentActionStatus?.trim() || ''
+  const awaitingConfirmation = (
+    (control?.currentMode || executionState.currentMode) === 'plan'
+    && (control?.awaiting || executionState.awaiting) === 'user_input'
+  )
+  const planCurrentStep = typeof control?.planCurrentStep === 'string' && control.planCurrentStep.trim()
+    ? control.planCurrentStep.trim()
+    : executionState.planCurrentStep?.trim() || ''
+  const completedStepTitles = (
+    (Array.isArray(control?.planCompletedSteps) && control?.planCompletedSteps?.length
+      ? control.planCompletedSteps
+      : executionState.planCompletedSteps
+    )
+      .map((step) => step.trim())
+      .filter(Boolean)
+  )
+  const completedIndices = new Set(resolvePlanStepIndicesByTitles(runtimePlan.steps, completedStepTitles))
+  let activeIndex = Number.isFinite(planStepIndex) && (planStepIndex || 0) > 0
+    ? Number(planStepIndex) - 1
+    : -1
+  if (activeIndex < 0 && planCurrentStep) {
+    activeIndex = resolveCurrentPlanStepIndexByTitle(runtimePlan.steps, planCurrentStep, completedIndices)
+  }
+  if (activeIndex < 0) {
+    activeIndex = runtimePlan.steps.findIndex((_, index) => !completedIndices.has(index))
+  }
+  const lastStepIndex = runtimePlan.steps.length - 1
+  const allStepsExplicitlyCompleted = runtimePlan.steps.every((_, index) => completedIndices.has(index))
+
   runtimePlan.steps = runtimePlan.steps.map((step, index) => {
-    if (!planStepIndex) {
-      return {
-        ...step,
-        status: phase === 'await_user_confirmation' ? 'pending' : step.status,
+    const explicitCompleted = completedIndices.has(index)
+    if (explicitCompleted) return { ...step, status: 'completed' }
+    if (awaitingConfirmation) return { ...step, status: 'pending' }
+    if (activeIndex >= 0 && index < activeIndex) return { ...step, status: 'completed' }
+    if (activeIndex >= 0 && index === activeIndex) {
+      if (actionStatus === 'failed') return { ...step, status: 'failed' }
+      if (actionStatus === 'completed' && (allStepsExplicitlyCompleted || index === lastStepIndex)) {
+        return { ...step, status: 'completed' }
       }
-    }
-    if (index + 1 < planStepIndex) return { ...step, status: 'completed' }
-    if (index + 1 === planStepIndex) {
       return {
         ...step,
-        status: phase === 'completed' ? 'completed' : phase === 'blocked' ? 'blocked' : phase === 'failed' ? 'failed' : 'running',
+        status: 'running',
       }
     }
     return { ...step, status: 'pending' }
   })
 
-  if (phase === 'completed') runtimePlan.status = 'completed'
-  else if (phase === 'blocked') runtimePlan.status = 'blocked'
-  else if (phase === 'failed') runtimePlan.status = 'failed'
-  else if (phase === 'await_user_confirmation') runtimePlan.status = 'pending'
-  else if (phase === 'auto_continue' || phase === 'in_progress' || planStepIndex) runtimePlan.status = 'running'
+  const hasRunningSteps = runtimePlan.steps.some((step) => step.status === 'running')
+  const hasPendingSteps = runtimePlan.steps.some((step) => step.status === 'pending')
+  const hasFailedSteps = runtimePlan.steps.some((step) => step.status === 'failed')
+  const allStepsCompleted = runtimePlan.steps.every((step) => step.status === 'completed')
+  const hasStartedSteps = runtimePlan.steps.some((step) => step.status === 'running' || step.status === 'completed')
+  if (hasFailedSteps) runtimePlan.status = 'failed'
+  else if (awaitingConfirmation) runtimePlan.status = 'pending'
+  else if (allStepsCompleted) runtimePlan.status = 'completed'
+  else if (hasRunningSteps || hasStartedSteps) runtimePlan.status = 'running'
+  else if (hasPendingSteps) runtimePlan.status = 'pending'
   runtimePlan.updatedAt = new Date().toISOString()
+}
+
+function currentRuntimePlanStep(
+  runtimePlan: AgentRuntimePlan | null,
+  executionState: AgentExecutionState,
+  control: AgentControlBlock | null = null,
+) {
+  if (!runtimePlan?.steps?.length) return null
+  const planStepIndex = Number.isFinite(control?.planStepIndex)
+    ? Number(control?.planStepIndex)
+    : executionState.planStepIndex
+  if (planStepIndex && planStepIndex > 0 && runtimePlan.steps[planStepIndex - 1]) {
+    return runtimePlan.steps[planStepIndex - 1]
+  }
+  const planCurrentStep = typeof control?.planCurrentStep === 'string' && control.planCurrentStep.trim()
+    ? control.planCurrentStep.trim()
+    : executionState.planCurrentStep?.trim() || ''
+  if (planCurrentStep) {
+    return runtimePlan.steps.find((step) => step.title.trim() === planCurrentStep) || null
+  }
+  return runtimePlan.steps.find((step) => step.status === 'running') || null
+}
+
+function currentStepRequiresDocumentWrite(
+  runtimePlan: AgentRuntimePlan | null,
+  executionState: AgentExecutionState,
+  control: AgentControlBlock | null = null,
+) {
+  const runtimeStep = currentRuntimePlanStep(runtimePlan, executionState, control)
+  if (runtimeStep?.requiresDocumentWrite === true) return true
+  if (runtimePlan?.steps?.length) return false
+  return Boolean(
+    (control?.writeScope || control?.preferredWriteAction)
+    && (control?.writeCompleted !== true && executionState.writeCompleted !== true),
+  )
+}
+
+function isAwaitingPlanConfirmation(
+  executionState: AgentExecutionState,
+  control: AgentControlBlock | null = null,
+) {
+  if (control?.currentMode === 'plan' && control?.awaiting === 'user_input') return true
+  if (!executionState.confirmationRequired) return false
+  if (executionState.pendingPlanUserReply?.trim()) return false
+  return executionState.planConfirmationDecision !== 'approved'
+}
+
+function currentStepRequiresDocumentSave(
+  runtimePlan: AgentRuntimePlan | null,
+  executionState: AgentExecutionState,
+  control: AgentControlBlock | null = null,
+) {
+  const runtimeStep = currentRuntimePlanStep(runtimePlan, executionState, control)
+  if (runtimeStep?.requiresDocumentSave === true) return true
+  return executionState.saveRequested || control?.saveRequested === true
+}
+
+function currentPlanStepKey(
+  executionState: AgentExecutionState,
+  control: AgentControlBlock | null = null,
+) {
+  const planStepIndex = Number.isFinite(control?.planStepIndex)
+    ? Number(control?.planStepIndex)
+    : executionState.planStepIndex
+  if (planStepIndex && planStepIndex > 0) {
+    return `index:${planStepIndex}`
+  }
+  const planCurrentStep = typeof control?.planCurrentStep === 'string' && control.planCurrentStep.trim()
+    ? control.planCurrentStep.trim()
+    : executionState.planCurrentStep?.trim() || ''
+  return planCurrentStep ? `title:${planCurrentStep}` : null
+}
+
+function hasRemainingStructuredPlanWork(
+  runtimePlan: AgentRuntimePlan | null,
+  executionState: AgentExecutionState,
+  control: AgentControlBlock | null = null,
+) {
+  if (!runtimePlan?.steps?.length) return false
+  if (runtimePlan.status === 'failed' || runtimePlan.status === 'blocked') {
+    return false
+  }
+
+  const planStepIndex = Number.isFinite(control?.planStepIndex)
+    ? Number(control?.planStepIndex)
+    : executionState.planStepIndex
+
+  if (planStepIndex && runtimePlan.steps.length >= planStepIndex) {
+    return runtimePlan.steps.slice(planStepIndex - 1).some((step) => step.status !== 'completed')
+  }
+
+  return runtimePlan.steps.some((step) => step.status === 'pending' || step.status === 'running')
+}
+
+function advanceExecutionPlanStep(
+  runtimePlan: AgentRuntimePlan | null,
+  executionState: AgentExecutionState,
+  control: AgentControlBlock | null,
+  options: {
+    wroteDocument: boolean
+    savedDocument: boolean
+    mutationCompleted?: boolean
+  },
+) {
+  if (!runtimePlan?.steps?.length || executionState.pendingPlan) return false
+
+  const currentStep = currentRuntimePlanStep(runtimePlan, executionState, control)
+  if (!currentStep) return false
+
+  const currentIndex = runtimePlan.steps.findIndex((step) => step.id === currentStep.id)
+  if (currentIndex < 0) return false
+
+  const writeSatisfied = options.wroteDocument || executionState.writeCompleted || control?.writeCompleted === true
+  const saveSatisfied = options.savedDocument
+  const mutationSatisfied = options.mutationCompleted === true
+  const requiresWrite = currentStepRequiresDocumentWrite(runtimePlan, executionState, control)
+  const requiresSave = currentStepRequiresDocumentSave(runtimePlan, executionState, control)
+  const canAdvance = saveSatisfied
+    || (requiresWrite && writeSatisfied && !requiresSave)
+    || (!requiresWrite && mutationSatisfied && !requiresSave)
+  if (!canAdvance) return false
+
+  const currentTitle = currentStep.title.trim()
+  if (currentTitle && !executionState.planCompletedSteps.includes(currentTitle)) {
+    executionState.planCompletedSteps = [...executionState.planCompletedSteps, currentTitle]
+  }
+
+  const nextStep = runtimePlan.steps[currentIndex + 1] || null
+  executionState.planStepIndex = nextStep ? currentIndex + 2 : currentIndex + 1
+  executionState.planCurrentStep = nextStep ? nextStep.title : currentStep.title
+  executionState.writeCompleted = false
+  executionState.saveRequested = false
+  return true
+}
+
+function buildExecutionProgressSignature(
+  executionState: AgentExecutionState,
+  control: AgentControlBlock | null,
+) {
+  const mode = typeof control?.currentMode === 'string' && control.currentMode.trim()
+    ? control.currentMode.trim()
+    : executionState.currentMode
+  const awaiting = typeof control?.awaiting === 'string' && control.awaiting.trim()
+    ? control.awaiting.trim()
+    : executionState.awaiting || ''
+  const currentStep = typeof control?.planCurrentStep === 'string' && control.planCurrentStep.trim()
+    ? control.planCurrentStep.trim()
+    : executionState.planCurrentStep?.trim() || ''
+  const completedSteps = executionState.planCompletedSteps
+    .map((step) => step.trim())
+    .filter(Boolean)
+    .join('||')
+  return [
+    mode,
+    awaiting,
+    String(executionState.planStepIndex || ''),
+    String(executionState.planTotalSteps || ''),
+    currentStep,
+    completedSteps,
+    executionState.writeCompleted ? 'write:1' : 'write:0',
+    executionState.saveRequested ? 'save:1' : 'save:0',
+    executionState.documentWriteObserved ? 'doc:1' : 'doc:0',
+  ].join('::')
 }
 
 function upsertArtifactDraft(
@@ -2237,6 +4288,14 @@ function buildRequestBody(
     messages: messages.map((message) => ({
       role: message.role,
       content: message.content,
+      attachments: (message.attachments || []).map((attachment) => ({
+        upload_id: attachment.uploadId,
+        kind: attachment.kind,
+        name: attachment.name,
+        url: attachment.url,
+        content_type: attachment.contentType,
+        size: attachment.size,
+      })),
     })),
     mode: 'auto',
     transport_mode: options.transportMode || 'auto',
@@ -2329,8 +4388,14 @@ function stopStreaming() {
 
 async function sendMessage() {
   if (streaming.value) return
+  const session = ensureSession()
   const text = prompt.value.trim()
-  if (!text) return
+  const attachments = [...composerAttachments.value]
+  if (!text && !attachments.length) return
+  if (attachmentUploading.value) {
+    ElMessage.warning('附件仍在上传中，请稍候再发送')
+    return
+  }
 
   const provider = activeProvider.value
   if (!provider) {
@@ -2344,8 +4409,23 @@ async function sendMessage() {
     return
   }
 
-  const session = ensureSession()
   syncSessionWithActiveProvider(session)
+  const pendingPlan = (session.pendingPlan?.trim() || currentConfirmationPlan.value || '').trim()
+  const continuingNeedsSave = !pendingPlan && isNeedsSaveContinuation(session) && isLikelySaveFollowUpReply(text)
+  const shouldPreserveExecutionContext = Boolean(pendingPlan || continuingNeedsSave)
+  const carriedPendingPlanToolOutputs = shouldPreserveExecutionContext
+    ? [...session.pendingPlanToolOutputs]
+    : []
+  let collectedPlanToolOutputs = shouldPreserveExecutionContext
+    ? [...session.pendingPlanToolOutputs]
+    : []
+  if (!shouldPreserveExecutionContext) {
+    session.pendingPlan = null
+    session.pendingPlanToolOutputs = []
+    session.runtimePlan = null
+    session.taskAnalysis = null
+    session.lastPlan = ''
+  }
   const existingMessages = [...session.messages]
 
   if (!session.model.trim()) {
@@ -2354,20 +4434,24 @@ async function sendMessage() {
     return
   }
 
-  const userMessage: AgentMessage = { id: genId(), role: 'user', content: text }
+  const userMessage: AgentMessage = { id: genId(), role: 'user', content: text, attachments }
   let assistantMessage: AgentMessage = { id: genId(), role: 'assistant', content: '', reasoning: '' }
-  session.messages.push(userMessage, assistantMessage)
+  session.messages.push(userMessage)
+  session.messages.push(assistantMessage)
   session.updatedAt = Date.now()
   session.providerId = provider.id
 
   if (session.title === '新会话') {
-    session.title = text.slice(0, 18)
+    session.title = text
+      ? text.slice(0, 18)
+      : attachments[0]?.name?.slice(0, 18) || '附件会话'
   }
 
   sessions.value = [...sessions.value]
   persistSessions()
   scrollMessagesToBottom()
   prompt.value = ''
+  clearComposerAttachments()
   streaming.value = true
   streamingAssistantId.value = assistantMessage.id
   liveAssistantContent.value = ''
@@ -2381,43 +4465,80 @@ async function sendMessage() {
   let streamFailed = false
   let pendingToolOutputs: AgentToolOutputPayload[] | null = null
   let streamAborted = false
-  let previousResponseId: string | null = session.previousResponseId
-  const pendingPlan = session.pendingPlan?.trim() || ''
+  let currentAgentRunId = ''
+  const pendingFrontendToolRequests: Promise<void>[] = []
+  let previousResponseId: string | null = (
+    session.previousResponseId
+    && session.previousResponseId.trim()
+    && session.previousResponseId.trim() !== session.model.trim()
+  )
+    ? session.previousResponseId.trim()
+    : null
+  if (session.previousResponseId && !previousResponseId) {
+    session.previousResponseId = null
+  }
   const pendingPlanSteps = pendingPlan ? parsePlanSteps(pendingPlan) : []
-  const compositeWriteThenSaveRequest = props.docType === 'doc' && Boolean(pendingPlan)
+  const continuationMemory = pendingPlan || continuingNeedsSave
+    ? session.lastExecutionMemory
+    : null
+  const compositeWriteThenSaveRequest = false
   const executionState: AgentExecutionState = {
+    currentMode: pendingPlan || session.runtimePlan?.steps?.length
+      ? 'plan'
+      : continuationMemory?.currentMode || 'normal',
+    awaiting: pendingPlan ? 'user_input' : continuationMemory?.awaiting ?? null,
+    currentActionKind: continuationMemory?.currentActionKind ?? null,
+    currentActionStatus: continuationMemory?.currentActionStatus ?? null,
+    currentActionMode: continuationMemory?.currentActionMode ?? null,
+    currentActionTarget: continuationMemory?.currentActionTarget ?? null,
+    confirmationRequired: Boolean(pendingPlan),
     pendingPlan: pendingPlan || null,
     pendingPlanUserReply: pendingPlan ? text : null,
+    planConfirmationDecision: null,
     compositeWriteThenSave: compositeWriteThenSaveRequest,
     semanticContinuation: false,
     semanticContinuationRound: 0,
     previousAssistantSummary: null,
-    taskKind: null,
-    editIntent: null,
-    editStage: null,
-    saveRequested: false,
-    writeCompleted: false,
-    planStepIndex: pendingPlan
-      ? session.lastExecutionMemory?.planStepIndex ?? (pendingPlanSteps.length ? 1 : null)
+    taskKind: continuingNeedsSave ? continuationMemory?.taskKind ?? null : null,
+    editIntent: continuingNeedsSave ? continuationMemory?.editIntent ?? null : null,
+    editStage: continuingNeedsSave ? continuationMemory?.editStage ?? null : null,
+    saveRequested: continuingNeedsSave,
+    writeCompleted: continuingNeedsSave
+      ? Boolean(continuationMemory?.writeCompleted || continuationMemory?.documentWriteObserved)
+      : false,
+    planStepIndex: continuationMemory
+      ? continuationMemory.planStepIndex ?? (pendingPlanSteps.length ? 1 : null)
       : null,
-    planTotalSteps: pendingPlan
-      ? session.lastExecutionMemory?.planTotalSteps ?? (pendingPlanSteps.length || null)
+    planTotalSteps: continuationMemory
+      ? continuationMemory.planTotalSteps ?? (pendingPlanSteps.length || null)
       : null,
-    planCurrentStep: pendingPlan
-      ? session.lastExecutionMemory?.planCurrentStep ?? pendingPlanSteps[0] ?? null
+    planCurrentStep: continuationMemory
+      ? continuationMemory.planCurrentStep ?? pendingPlanSteps[0] ?? null
       : null,
-    planCompletedSteps: pendingPlan ? [...(session.lastExecutionMemory?.planCompletedSteps || [])] : [],
-    documentWriteObserved: false,
+    planCompletedSteps: continuationMemory ? [...(continuationMemory.planCompletedSteps || [])] : [],
+    documentWriteObserved: continuingNeedsSave
+      ? Boolean(continuationMemory?.documentWriteObserved || continuationMemory?.writeCompleted)
+      : false,
     saveAttemptWithoutDocumentChange: false,
+    lastInterceptCode: null,
+    lastInterceptMessage: null,
+    lastInterceptGuidance: null,
     recentToolCalls: [],
   }
   let semanticContinuationRounds = 0
   let toolCallRounds = 0
   const toolCallSignatureHits = new Map<string, number>()
   let nonWritingPlanRounds = 0
+  let idleSemanticContinuationRounds = 0
   let rawAssistantContent = ''
   let completedAssistantContent = ''
+  let sawPlanSignalThisRound = false
   let wroteDocument = false
+  let writeSatisfiedStepKey: string | null = null
+  let liveAssistantRoundSummary = ''
+  let saveToolAttemptedThisTurn = false
+  let saveToolSucceededThisTurn = false
+  let planStepAdvancedThisRound = false
   let roundDocumentWriteObserved = false
   let roundToolCalls: AgentExecutionToolCallSummary[] = []
   let consumeAssistantText = (_rawChunk: string, _force = false) => {}
@@ -2426,12 +4547,21 @@ async function sendMessage() {
   let recoverTrailingActionMarker = () => {}
   let buildVisibleAssistantContent = (_source = rawAssistantContent, _streamMode = false) => _source
   let appendUnsavedDraftNotice = (_control: AgentControlBlock | null) => {}
-  let finalizePendingAssistantOutput = () => {}
-  let finalizeAssistantMessageForDisplay = (_finalContent: string) => {}
+  let finalizePendingAssistantOutput = (_options?: { allowIncompleteAction?: boolean }) => {}
+  let finalizeAssistantMessageForDisplay = (_finalContent: string, _options?: { includeStructuredMessage?: boolean }) => {}
+  let appendFinalLoopResultMessage = (_resultContent: string) => {}
   let syncExecutionPlanProgress = (_control: AgentControlBlock | null) => {}
+  let syncPendingPlanPreviewFromStream = () => {}
   let finalControl: AgentControlBlock | null = null
+  let latestStructuredResponse: AgentStructuredResponse | null = null
+  let latestToolDrivenControl: AgentControlBlock | null = null
+  let latestToolDrivenPlan: AgentRuntimePlan | null = null
+  let hostStateUpdatedThisRound = false
   let lastWriterResult: AgentWriterResultDetail | null = null
+  let interceptedFailure: ReturnType<typeof resolveAgentInterceptDetails> | null = null
+  let runtimeSummaryAppendedThisRequest = false
   const selectedTransportMode = session.transportMode || 'auto'
+  let requestRound = 0
   const handleWriterResult = (event: Event) => {
     const detail = (event as CustomEvent<AgentWriterResultDetail>).detail
     if (!detail || detail.docId !== props.docId) return
@@ -2452,29 +4582,60 @@ async function sendMessage() {
     }
 
     const shouldTriggerSemanticContinuation = (finalContent: string, control: AgentControlBlock | null) => {
-      if (semanticContinuationRounds >= MAX_SEMANTIC_CONTINUATION_ROUNDS) return false
-      const normalized = finalContent.trim()
-      if (!normalized) return false
-      const explicitAutoContinue = controlRequestsAutoContinuation(control)
-      const explicitAwaitConfirmation = control?.phase === 'await_user_confirmation'
-      if (explicitAwaitConfirmation || control?.phase === 'completed') {
-        return false
-      }
-      if (controlNeedsSave(control) && !explicitAutoContinue) {
-        return false
-      }
-      return explicitAutoContinue
+      void finalContent
+      void control
+      return false
     }
 
     const enqueueSemanticContinuation = (finalContent: string) => {
       semanticContinuationRounds += 1
       executionState.semanticContinuation = true
       executionState.semanticContinuationRound = semanticContinuationRounds
-      executionState.previousAssistantSummary = compactMessageText(finalContent, 320) || null
+      executionState.confirmationRequired = false
+      executionState.pendingPlan = null
+      executionState.pendingPlanUserReply = null
+      executionState.planConfirmationDecision = null
+      session.pendingPlan = null
+      executionState.previousAssistantSummary =
+        compactMessageText(finalContent, 320)
+        || currentRuntimePlanStep(session.runtimePlan, executionState)?.title
+        || executionState.planCurrentStep
+        || '继续执行当前计划'
     }
 
     syncExecutionPlanProgress = (control: AgentControlBlock | null) => {
       if (!control) return
+      executionState.currentMode = typeof control.currentMode === 'string' && control.currentMode.trim()
+        ? control.currentMode.trim()
+        : executionState.currentMode
+      executionState.awaiting = typeof control.awaiting === 'string' && control.awaiting.trim()
+        ? control.awaiting.trim()
+        : control.awaiting === null
+          ? null
+          : executionState.awaiting
+      executionState.currentActionKind = typeof control.currentActionKind === 'string' && control.currentActionKind.trim()
+        ? control.currentActionKind.trim()
+        : control.currentActionKind === null
+          ? null
+          : executionState.currentActionKind
+      executionState.currentActionStatus = typeof control.currentActionStatus === 'string' && control.currentActionStatus.trim()
+        ? control.currentActionStatus.trim()
+        : control.currentActionStatus === null
+          ? null
+          : executionState.currentActionStatus
+      executionState.currentActionMode = typeof control.currentActionMode === 'string' && control.currentActionMode.trim()
+        ? control.currentActionMode.trim()
+        : control.currentActionMode === null
+          ? null
+          : executionState.currentActionMode
+      executionState.currentActionTarget = typeof control.currentActionTarget === 'string' && control.currentActionTarget.trim()
+        ? control.currentActionTarget.trim()
+        : control.currentActionTarget === null
+          ? null
+          : executionState.currentActionTarget
+      if (control.confirmationRequired === true) {
+        executionState.confirmationRequired = true
+      }
       if (session.taskAnalysis) {
         if (typeof control.writeScope === 'string' && control.writeScope.trim()) {
           session.taskAnalysis.writeScope = control.writeScope.trim()
@@ -2506,40 +4667,699 @@ async function sendMessage() {
       if (Array.isArray(control.planCompletedSteps) && control.planCompletedSteps.length) {
         executionState.planCompletedSteps = [...control.planCompletedSteps]
       }
+      if (control.writeCompleted === true) {
+        writeSatisfiedStepKey = currentPlanStepKey(executionState, control) || writeSatisfiedStepKey
+      }
+    }
+
+    const hasImplicitControlSignals = () => Boolean(
+      latestStructuredResponse?.state
+      || latestToolDrivenControl
+      || hostStateUpdatedThisRound
+      || session.pendingPlan?.trim()
+      || session.runtimePlan?.steps?.length
+      || executionState.confirmationRequired
+      || executionState.pendingPlan
+      || executionState.planCurrentStep
+      || executionState.planStepIndex
+      || executionState.planCompletedSteps.length
+      || executionState.saveRequested
+      || executionState.writeCompleted
+      || executionState.documentWriteObserved
+      || roundToolCalls.length
+      || roundDocumentWriteObserved
+      || wroteDocument
+    )
+
+    const resolveEffectiveControl = (content: string) => {
+      const explicitControl = latestStructuredResponse?.state || latestToolDrivenControl
+      if (explicitControl) return explicitControl
+      if (!hasImplicitControlSignals()) return null
+      return buildControlFromExecutionState(executionState, session.taskAnalysis)
+    }
+
+    const setCurrentActionState = (
+      kind: string | null,
+      status: string | null,
+      options: {
+        mode?: string | null
+        target?: string | null
+      } = {},
+    ) => {
+      executionState.currentActionKind = kind
+      executionState.currentActionStatus = status
+      executionState.currentActionMode = options.mode ?? executionState.currentActionMode
+      executionState.currentActionTarget = options.target ?? executionState.currentActionTarget
+    }
+
+    const adoptRuntimePlan = (plan: AgentRuntimePlan | null) => {
+      if (!plan) return
+      session.runtimePlan = plan
+      latestToolDrivenPlan = plan
+      const planText = runtimePlanToPlanText(plan)
+      if (planText) {
+        session.lastPlan = planText
+      }
+      executionState.planTotalSteps = plan.steps.length || null
+    }
+
+    const clearPendingPlanState = () => {
+      executionState.confirmationRequired = false
+      executionState.pendingPlan = null
+      executionState.pendingPlanUserReply = null
+      executionState.planConfirmationDecision = null
+      session.pendingPlan = null
+      session.pendingPlanToolOutputs = []
+    }
+
+    const syncPlanCursorToIndex = (plan: AgentRuntimePlan | null, index: number | null) => {
+      executionState.planStepIndex = index
+      if (!plan || !index || index < 1 || index > plan.steps.length) {
+        executionState.planCurrentStep = null
+        return
+      }
+      executionState.planCurrentStep = plan.steps[index - 1]?.title || null
+    }
+
+    const buildPlanFromHostArgs = (args: Record<string, any>) => {
+      const explicitPlan = normalizeRuntimePlan(parseJsonLikeValue(args.plan))
+      if (explicitPlan) return explicitPlan
+
+      if (Array.isArray(args.steps)) {
+        const normalizedPlan = normalizeRuntimePlan({
+          id: typeof args.id === 'string' && args.id.trim() ? args.id.trim() : genId(),
+          goal: typeof args.goal === 'string' && args.goal.trim() ? args.goal.trim() : (userMessage?.content || pendingPlan || '执行计划'),
+          summary: typeof args.summary === 'string' && args.summary.trim() ? args.summary.trim() : null,
+          status: 'pending',
+          steps: args.steps,
+        })
+        if (normalizedPlan) return normalizedPlan
+      }
+
+      const explicitPlanText = typeof args.plan_text === 'string' && args.plan_text.trim()
+        ? args.plan_text.trim()
+        : typeof args.planText === 'string' && args.planText.trim()
+          ? args.planText.trim()
+          : ''
+      if (!explicitPlanText) return null
+
+      return buildRuntimePlanFromText(
+        explicitPlanText,
+        typeof args.goal === 'string' && args.goal.trim()
+          ? args.goal.trim()
+          : (userMessage?.content || pendingPlan || ''),
+        session.runtimePlan,
+      )
+    }
+
+    const flushOpenWriteStream = () => {
+      if (!(routeAction && routeAction !== 'chat')) return
+      routeChunk('', true)
+      consumeAssistantText('', true)
+      completeWriterBlock()
+    }
+
+    const executeHostStateToolCall = async (call: AgentToolCall): Promise<AgentToolOutputPayload> => {
+      const args = parseToolArguments(call.arguments) || {}
+      const control = normalizeControlPayload(args)
+      let nextPlan = buildPlanFromHostArgs(args)
+
+      switch (call.name) {
+        case 'plan_start': {
+          if (nextPlan) {
+            adoptRuntimePlan(nextPlan)
+            executionState.planCompletedSteps = []
+            executionState.currentMode = 'plan'
+            syncPlanCursorToIndex(nextPlan, nextPlan.steps.length ? 1 : null)
+          }
+          const shouldAwaitConfirmation = session.taskAnalysis?.requiresUserConfirmation !== false
+          const pendingPlanText = (nextPlan ? runtimePlanToPlanText(nextPlan) : session.lastPlan || '').trim() || null
+          if (shouldAwaitConfirmation && pendingPlanText) {
+            executionState.confirmationRequired = true
+            executionState.pendingPlan = pendingPlanText
+            executionState.pendingPlanUserReply = null
+            executionState.planConfirmationDecision = null
+            executionState.awaiting = 'user_input'
+            session.pendingPlan = pendingPlanText
+          } else {
+            clearPendingPlanState()
+            executionState.awaiting = null
+          }
+          setCurrentActionState('plan_start', 'completed')
+          break
+        }
+        case 'plan_step_update': {
+          const stepId = typeof args.step_id === 'string' && args.step_id.trim()
+            ? args.step_id.trim()
+            : typeof args.stepId === 'string' && args.stepId.trim()
+              ? args.stepId.trim()
+              : ''
+          const nextStatus = typeof args.status === 'string' && args.status.trim()
+            ? args.status.trim()
+            : 'completed'
+          const plan = session.runtimePlan
+          executionState.currentMode = 'plan'
+          if (plan && stepId) {
+            const stepIndex = plan.steps.findIndex((step) => step.id === stepId)
+            if (stepIndex >= 0) {
+              plan.steps[stepIndex] = {
+                ...plan.steps[stepIndex],
+                status: nextStatus === 'failed' ? 'failed' : 'completed',
+              }
+              if (nextStatus === 'failed') {
+                plan.status = 'failed'
+                executionState.awaiting = 'user_input'
+                syncPlanCursorToIndex(plan, stepIndex + 1)
+              } else {
+                const completedTitle = plan.steps[stepIndex].title.trim()
+                if (completedTitle && !executionState.planCompletedSteps.includes(completedTitle)) {
+                  executionState.planCompletedSteps.push(completedTitle)
+                }
+                const nextIndex = plan.steps.findIndex((step) => step.status !== 'completed')
+                if (nextIndex >= 0) {
+                  plan.status = 'running'
+                  executionState.awaiting = null
+                  syncPlanCursorToIndex(plan, nextIndex + 1)
+                } else {
+                  plan.status = 'completed'
+                  executionState.awaiting = null
+                  executionState.planStepIndex = plan.steps.length || null
+                  executionState.planCurrentStep = null
+                }
+              }
+              plan.updatedAt = new Date().toISOString()
+            }
+          }
+          setCurrentActionState('plan_step_update', nextStatus === 'failed' ? 'failed' : 'completed')
+          break
+        }
+        case 'plan_complete': {
+          if (session.runtimePlan) {
+            session.runtimePlan.status = 'completed'
+            session.runtimePlan.steps = session.runtimePlan.steps.map((step) => ({
+              ...step,
+              status: step.status === 'failed' ? step.status : 'completed',
+            }))
+            session.runtimePlan.updatedAt = new Date().toISOString()
+            executionState.planCompletedSteps = session.runtimePlan.steps
+              .map((step) => step.title.trim())
+              .filter(Boolean)
+          }
+          executionState.currentMode = 'normal'
+          executionState.awaiting = null
+          executionState.planCurrentStep = null
+          clearPendingPlanState()
+          setCurrentActionState('plan_complete', 'completed')
+          break
+        }
+        case 'plan_cancel': {
+          if (session.runtimePlan) {
+            session.runtimePlan.status = 'cancelled'
+            session.runtimePlan.updatedAt = new Date().toISOString()
+          }
+          executionState.currentMode = 'normal'
+          executionState.awaiting = null
+          executionState.planCurrentStep = null
+          clearPendingPlanState()
+          setCurrentActionState('plan_cancel', 'completed')
+          break
+        }
+        case 'write_start': {
+          const mode = typeof args.mode === 'string' && args.mode.trim() ? args.mode.trim() : 'replace'
+          const target = typeof args.target === 'string' && args.target.trim() ? args.target.trim() : 'full_doc'
+          executionState.currentMode = session.runtimePlan?.steps?.length ? 'plan' : executionState.currentMode
+          executionState.awaiting = null
+          executionState.writeCompleted = false
+          setCurrentActionState('write', 'running', { mode, target })
+          if (props.docType === 'doc' && (mode === 'append' || mode === 'replace')) {
+            routeAction = mode as StreamAction
+          }
+          break
+        }
+        case 'write_end': {
+          const target = typeof args.target === 'string' && args.target.trim()
+            ? args.target.trim()
+            : executionState.currentActionTarget || 'full_doc'
+          flushOpenWriteStream()
+          executionState.writeCompleted = true
+          if (roundDocumentWriteObserved || wroteDocument) {
+            executionState.documentWriteObserved = true
+            executionState.saveAttemptWithoutDocumentChange = false
+            writeSatisfiedStepKey = currentPlanStepKey(executionState) || writeSatisfiedStepKey
+          }
+          setCurrentActionState('write', 'completed', {
+            mode: executionState.currentActionMode,
+            target,
+          })
+          break
+        }
+        default:
+          break
+      }
+
+      if (control) {
+        latestToolDrivenControl = control
+        syncExecutionPlanProgress(control)
+      }
+
+      const explicitPendingPlan = Object.prototype.hasOwnProperty.call(args, 'pending_plan')
+        ? coerceBooleanLike(args.pending_plan)
+        : Object.prototype.hasOwnProperty.call(args, 'pendingPlan')
+          ? coerceBooleanLike(args.pendingPlan)
+          : null
+      const pendingPlanText = (nextPlan ? runtimePlanToPlanText(nextPlan) : '').trim()
+      if (explicitPendingPlan === true) {
+        const nextPendingPlan = pendingPlanText || session.lastPlan || executionState.pendingPlan || pendingPlan || null
+        executionState.confirmationRequired = true
+        executionState.pendingPlan = nextPendingPlan
+        executionState.pendingPlanUserReply = null
+        executionState.planConfirmationDecision = null
+        executionState.awaiting = 'user_input'
+        session.pendingPlan = nextPendingPlan
+      } else if (explicitPendingPlan === false || control?.awaiting !== 'user_input') {
+        clearPendingPlanState()
+      }
+
+      if (control?.currentMode === 'plan' && control?.awaiting === 'user_input') {
+        executionState.confirmationRequired = true
+        executionState.awaiting = 'user_input'
+      } else if (control?.awaiting === 'user_confirm_write') {
+        executionState.confirmationRequired = false
+        executionState.awaiting = 'user_confirm_write'
+      } else if (control?.awaiting == null) {
+        executionState.confirmationRequired = false
+        executionState.awaiting = null
+      }
+
+      if (Object.prototype.hasOwnProperty.call(args, 'save_requested')) {
+        executionState.saveRequested = coerceBooleanLike(args.save_requested) === true
+      } else if (Object.prototype.hasOwnProperty.call(args, 'saveRequested')) {
+        executionState.saveRequested = coerceBooleanLike(args.saveRequested) === true
+      }
+      if (Object.prototype.hasOwnProperty.call(args, 'write_completed')) {
+        executionState.writeCompleted = coerceBooleanLike(args.write_completed) === true
+      } else if (Object.prototype.hasOwnProperty.call(args, 'writeCompleted')) {
+        executionState.writeCompleted = coerceBooleanLike(args.writeCompleted) === true
+      }
+
+      latestToolDrivenControl = buildControlFromExecutionState(executionState, session.taskAnalysis)
+
+      hostStateUpdatedThisRound = true
+      session.updatedAt = Date.now()
+      sessions.value = [...sessions.value]
+
+      return {
+        call_id: call.call_id,
+        name: call.name,
+        arguments: call.arguments,
+        output: {
+          ok: true,
+          tool: call.name,
+          result: {
+            state_updated: true,
+            plan_updated: Boolean(nextPlan),
+            current_mode: executionState.currentMode,
+            awaiting: executionState.awaiting,
+            current_action_kind: executionState.currentActionKind,
+            current_action_status: executionState.currentActionStatus,
+            pending_plan: executionState.pendingPlan,
+            phase: latestToolDrivenControl?.phase || buildControlFromExecutionState(executionState, session.taskAnalysis).phase || null,
+          },
+        },
+      }
+    }
+
+    const executeRoundToolCalls = async (calls: AgentToolCall[]) => {
+      const hostStateCalls = calls.filter((call) => isHostStateTool(call.name))
+      const externalCalls = calls.filter((call) => !isHostStateTool(call.name))
+      const outputs: AgentToolOutputPayload[] = []
+
+      for (const call of hostStateCalls) {
+        outputs.push(await executeHostStateToolCall(call))
+      }
+
+      if (externalCalls.length) {
+        outputs.push(...await executeAgentToolCalls(externalCalls))
+      }
+
+      return outputs
+    }
+
+    const submitFrontendToolResult = async (
+      runId: string,
+      callId: string,
+      output: unknown,
+    ) => {
+      const token = localStorage.getItem('token')
+      const response = await fetch('/api/agent/tool-callback', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({
+          run_id: runId,
+          call_id: callId,
+          output,
+        }),
+      })
+
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}))
+        throw new Error(data.error || '前端工具结果回传失败')
+      }
+    }
+
+    const executeFrontendToolRequest = async (eventData: any) => {
+      const runId = typeof eventData?.run_id === 'string' && eventData.run_id.trim()
+        ? eventData.run_id.trim()
+        : currentAgentRunId
+      const callId = typeof eventData?.call_id === 'string' && eventData.call_id.trim()
+        ? eventData.call_id.trim()
+        : ''
+      const toolName = typeof eventData?.name === 'string' && eventData.name.trim()
+        ? eventData.name.trim()
+        : ''
+      const args = eventData?.arguments && typeof eventData.arguments === 'object'
+        ? eventData.arguments
+        : {}
+
+      if (!runId || !callId || !toolName) {
+        return
+      }
+
+      let callbackOutput: unknown
+      try {
+        if (toolName === 'action_protocol_write') {
+          const writerResult = readLatestWriterResult()
+          const hasFreshWriteResult = Boolean(
+            writerResult?.ok
+            && props.docType === 'doc'
+            && props.docId
+            && writerResult.docId === props.docId
+            && (roundDocumentWriteObserved || wroteDocument),
+          )
+          callbackOutput = hasFreshWriteResult
+            ? {
+                ok: true,
+                tool: toolName,
+                result: {
+                  wrote_document: true,
+                  write_completed: true,
+                  mode: typeof args.mode === 'string' ? args.mode : null,
+                  doc_id: props.docId ?? null,
+                  doc_name: props.docName ?? null,
+                },
+              }
+            : {
+                ok: false,
+                tool: toolName,
+                error: writerResult?.reason || 'ACTION 写入结果不可用或当前文档未完成写入',
+              }
+        } else {
+          const outputs = await executeAgentToolCalls([{
+            call_id: callId,
+            name: toolName,
+            arguments: JSON.stringify(args),
+          }])
+          callbackOutput = outputs[0]?.output ?? {
+            ok: false,
+            tool: toolName,
+            error: '工具没有返回结果',
+          }
+        }
+      } catch (error: any) {
+        callbackOutput = {
+          ok: false,
+          tool: toolName,
+          error: error?.message || '前端工具执行失败',
+        }
+      }
+
+      await submitFrontendToolResult(runId, callId, callbackOutput)
+    }
+
+    const applyLiveHostToolDelta = (eventData: any) => {
+      const toolName = typeof eventData?.name === 'string' ? eventData.name.trim() : ''
+      if (!toolName || !isHostStateTool(toolName)) return
+      const args = parseToolArguments(typeof eventData?.arguments === 'string' ? eventData.arguments : null) || {}
+
+      if (toolName === 'write_start') {
+        const mode = typeof args.mode === 'string' && args.mode.trim() ? args.mode.trim() : 'replace'
+        const target = typeof args.target === 'string' && args.target.trim() ? args.target.trim() : 'full_doc'
+        executionState.currentMode = session.runtimePlan?.steps?.length ? 'plan' : executionState.currentMode
+        executionState.awaiting = null
+        executionState.writeCompleted = false
+        setCurrentActionState('write', 'running', { mode, target })
+        if (props.docType === 'doc' && (mode === 'append' || mode === 'replace')) {
+          routeAction = mode as StreamAction
+        }
+      } else if (toolName === 'write_end') {
+        const target = typeof args.target === 'string' && args.target.trim()
+          ? args.target.trim()
+          : executionState.currentActionTarget || 'full_doc'
+        flushOpenWriteStream()
+        setCurrentActionState('write', 'completed', {
+          mode: executionState.currentActionMode,
+          target,
+        })
+      }
+
+      latestToolDrivenControl = buildControlFromExecutionState(executionState, session.taskAnalysis)
+      hostStateUpdatedThisRound = true
+    }
+
+    syncPendingPlanPreviewFromStream = () => {
+      if (latestStructuredResponse?.plan || latestStructuredResponse?.state || latestToolDrivenPlan || latestToolDrivenControl) {
+        if (latestStructuredResponse?.plan) {
+          session.runtimePlan = latestStructuredResponse.plan
+          const planText = runtimePlanToPlanText(latestStructuredResponse.plan)
+          if (planText) {
+            session.lastPlan = planText
+          }
+        } else if (latestToolDrivenPlan) {
+          session.runtimePlan = latestToolDrivenPlan
+          const planText = runtimePlanToPlanText(latestToolDrivenPlan)
+          if (planText) {
+            session.lastPlan = planText
+          }
+        }
+        return
+      }
+      const source = completedAssistantContent || rawAssistantContent
+      const streamedControl = resolveEffectiveControl(source)
+      const streamedPlan = extractPlanBlock(source)
+      if (streamedPlan) {
+        sawPlanSignalThisRound = true
+      }
+      const runtimePlanText = runtimePlanToPlanText(session.runtimePlan)
+      const nextPlan = streamedPlan || runtimePlanText
+      const requiresConfirmation = shouldTreatPlanAsPending({
+        planText: nextPlan,
+        control: streamedControl,
+        session,
+        executionState,
+        sawPlanSignal: sawPlanSignalThisRound,
+      })
+
+      let changed = false
+
+      if (nextPlan && session.lastPlan !== nextPlan) {
+        session.lastPlan = nextPlan
+        changed = true
+      }
+
+      if (!session.runtimePlan && nextPlan) {
+        const fallbackRuntimePlan = buildRuntimePlanFromText(nextPlan, userMessage?.content || pendingPlan || '', session.runtimePlan)
+        if (fallbackRuntimePlan) {
+          session.runtimePlan = fallbackRuntimePlan
+          changed = true
+        }
+      }
+
+      if (requiresConfirmation && session.pendingPlan !== nextPlan) {
+        session.pendingPlan = nextPlan
+        changed = true
+      }
+
+      if (changed) {
+        session.updatedAt = Date.now()
+        sessions.value = [...sessions.value]
+      }
     }
 
     const buildAssistantRoundSummary = (control: AgentControlBlock | null) => {
       const parts: string[] = []
+      const actionWriteAlreadySummarized = roundToolCalls.some((call) => (
+        call.name === 'action_protocol_write' && call.outcome === 'success'
+      ))
       if (Number.isFinite(control?.planStepIndex) && Number.isFinite(control?.planTotalSteps) && control?.planCurrentStep) {
         parts.push(`当前计划进度：第 ${Number(control.planStepIndex)}/${Number(control.planTotalSteps)} 步，${control.planCurrentStep}。`)
       } else if (control?.planCurrentStep) {
         parts.push(`当前步骤：${control.planCurrentStep}。`)
       }
-      if (roundDocumentWriteObserved) {
+      if (roundDocumentWriteObserved && !actionWriteAlreadySummarized) {
         parts.push(props.docName ? `已写入《${props.docName}》正文。` : '本轮已写入文档内容。')
       }
       parts.push(...summarizeRoundActions(roundToolCalls))
-      if (controlNeedsSave(control)) {
+      if (control?.awaiting === 'user_confirm_write') {
         parts.push('当前文档仍未保存，正在等待保存决策。')
-      } else if (controlRequestsAutoContinuation(control)) {
+      } else if (control?.currentMode === 'plan' && !control?.awaiting && hasRemainingStructuredPlanWork(session.runtimePlan, executionState, control)) {
         parts.push('系统将继续执行后续步骤。')
       }
       return parts.filter(Boolean).join('\n')
     }
 
-    finalizeAssistantMessageForDisplay = (finalContent: string) => {
-      const visible = liveAssistantContent.value.trim()
-      if (visible) {
-        assistantMessage.content = liveAssistantContent.value
-        assistantMessage.reasoning = liveAssistantReasoning.value
-        return
-      }
-      const fallback = buildAssistantRoundSummary(extractAgentControlBlock(finalContent))
-      if (fallback) {
-        liveAssistantContent.value = fallback
-      }
+    const buildPendingPlanConfirmationMessage = () => {
+      const planText = (session.pendingPlan?.trim() || runtimePlanToPlanText(session.runtimePlan)).trim()
+      if (!planText) return '我已经整理好执行计划，请确认后我再继续。'
+      return [
+        '我准备按这个计划继续：',
+        '',
+        planText,
+        '',
+        '请确认是否继续执行？',
+      ].join('\n')
+    }
+
+    const mergeVisibleAssistantContent = (base: string, appendix: string) => {
+      const normalizedBase = base.trim()
+      const normalizedAppendix = appendix.trim()
+      if (!normalizedAppendix) return normalizedBase
+      if (!normalizedBase) return normalizedAppendix
+      if (normalizedBase.includes(normalizedAppendix)) return normalizedBase
+      return `${normalizedBase}\n\n${normalizedAppendix}`.trim()
+    }
+
+    const syncLiveAssistantDisplay = (baseVisible: string) => {
+      liveAssistantContent.value = mergeVisibleAssistantContent(baseVisible, liveAssistantRoundSummary)
       assistantMessage.content = liveAssistantContent.value
       assistantMessage.reasoning = liveAssistantReasoning.value
+      assistantMessage.internalStatus = false
+      scrollMessagesToBottom()
+    }
+
+    const ensureVisibleAssistantRoundSummary = (control: AgentControlBlock | null) => {
+      const fallback = buildAssistantRoundSummary(control)
+      if (!fallback.trim()) return
+      if (fallback !== liveAssistantRoundSummary) {
+        runtimeSummaryAppendedThisRequest = true
+        liveAssistantRoundSummary = fallback
+      }
+      const baseVisible = buildVisibleAssistantContent(
+        completedAssistantContent || rawAssistantContent,
+        !completedAssistantContent,
+      )
+      syncLiveAssistantDisplay(baseVisible)
+    }
+
+    appendFinalLoopResultMessage = (resultContent: string) => {
+      const normalized = stripProtocolContent(resultContent).trim()
+      if (!normalized) return
+      if (!runtimeSummaryAppendedThisRequest && requestRound <= 1) return
+      const currentVisibleBody = buildVisibleAssistantContent(
+        completedAssistantContent || rawAssistantContent || assistantMessage.content || '',
+      ).trim()
+      if (!latestStructuredResponse?.message?.trim() && currentVisibleBody && normalized === currentVisibleBody) {
+        return
+      }
+      const currentRenderedContent = (assistantMessage.content || liveAssistantContent.value || '').trim()
+      if (currentRenderedContent.includes(normalized)) {
+        const cleanedCurrentContent = currentRenderedContent
+          .replace(normalized, '')
+          .replace(/\n{3,}/g, '\n\n')
+          .trim()
+        if (cleanedCurrentContent) {
+          assistantMessage.content = cleanedCurrentContent
+          liveAssistantContent.value = cleanedCurrentContent
+        } else if (!assistantMessage.reasoning?.trim()) {
+          session.messages = session.messages.filter((message) => message.id !== assistantMessage.id)
+        } else {
+          assistantMessage.content = ''
+          liveAssistantContent.value = ''
+        }
+      }
+
+      assistantMessage = {
+        id: genId(),
+        role: 'assistant',
+        content: normalized,
+        reasoning: '',
+      }
+      session.messages.push(assistantMessage)
+      session.updatedAt = Date.now()
+      sessions.value = [...sessions.value]
+      scrollMessagesToBottom()
+    }
+
+    finalizeAssistantMessageForDisplay = (
+      finalContent: string,
+      options: { includeStructuredMessage?: boolean } = {},
+    ) => {
+      if (options.includeStructuredMessage === true && latestStructuredResponse?.message.trim()) {
+        const baseVisible = mergeVisibleAssistantContent(
+          buildVisibleAssistantContent(completedAssistantContent || rawAssistantContent),
+          latestStructuredResponse.message.trim(),
+        )
+        syncLiveAssistantDisplay(baseVisible)
+      }
+      const control = resolveEffectiveControl(finalContent)
+      const hideAsRuntimeMessage = Boolean(
+        (roundToolCalls.length || roundDocumentWriteObserved || executionState.documentWriteObserved)
+        && !(control?.currentMode === 'plan' && control?.awaiting === 'user_input')
+        && hasRemainingStructuredPlanWork(session.runtimePlan, executionState, control),
+      )
+      void hideAsRuntimeMessage
+      ensureVisibleAssistantRoundSummary(control)
+    }
+
+    const maybeAutoSaveAfterDocumentWrite = async (control: AgentControlBlock | null) => {
+      if (streamFailed || streamAborted) return
+      if (props.docType !== 'doc' || !props.docId) return
+      if (!(wroteDocument || executionState.writeCompleted || roundDocumentWriteObserved)) return
+      if (!currentStepRequiresDocumentSave(session.runtimePlan, executionState, control)) return
+      if (!currentDocumentHasUnsavedChanges()) return
+      if (saveToolSucceededThisTurn) return
+
+      const autoSaveOutputs = await executeAgentToolCalls([{
+        call_id: genId(),
+        name: 'save_current_document',
+        arguments: JSON.stringify({ doc_id: props.docId }),
+      }])
+      if (!autoSaveOutputs.length) return
+
+      pendingToolOutputs = mergePendingPlanToolOutputs(pendingToolOutputs || [], autoSaveOutputs)
+      collectedPlanToolOutputs = mergePendingPlanToolOutputs(collectedPlanToolOutputs, autoSaveOutputs)
+
+      const autoSaveCalls = autoSaveOutputs.map((output) => ({
+        call_id: output.call_id,
+        name: output.name || 'save_current_document',
+        arguments: output.arguments || JSON.stringify({ doc_id: props.docId }),
+        stage_policy: 'mutation',
+        capabilities: ['save'],
+      }))
+      const autoSaveRoundCalls = summarizeToolCallBatch(autoSaveCalls, autoSaveOutputs)
+      if (autoSaveRoundCalls.length) {
+        roundToolCalls = [...roundToolCalls, ...autoSaveRoundCalls]
+        executionState.recentToolCalls = appendRecentToolCalls(
+          executionState.recentToolCalls,
+          autoSaveRoundCalls,
+        )
+        appendToolEventsToSession(session, autoSaveRoundCalls)
+      }
+
+      saveToolAttemptedThisTurn = true
+      if (autoSaveRoundCalls.some((call) => call.outcome === 'success' || call.outcome === 'noop')) {
+        saveToolSucceededThisTurn = true
+        executionState.saveRequested = false
+        if (!planStepAdvancedThisRound) {
+          planStepAdvancedThisRound = advanceExecutionPlanStep(session.runtimePlan, executionState, control, {
+            wroteDocument: roundDocumentWriteObserved || wroteDocument,
+            savedDocument: true,
+            mutationCompleted: hasSuccessfulMutationToolCall(autoSaveRoundCalls),
+          })
+        }
+      }
     }
 
     const appendAssistantContent = (content: string) => {
@@ -2574,10 +5394,6 @@ async function sendMessage() {
 
     buildVisibleAssistantContent = (source = rawAssistantContent, streamMode = false) => {
       let visible = source
-        .replace(/\[\[PLAN\]\]\s*/gi, '')
-        .replace(/\s*\[\[\/PLAN\]\]/gi, '')
-        .replace(ACTION_BLOCK_REGEX, '\n')
-        .replace(CONTROL_BLOCK_REGEX, '\n')
 
       if (streamMode) {
         const upperVisible = visible.toUpperCase()
@@ -2592,18 +5408,20 @@ async function sendMessage() {
         }
       }
 
-      return visible
-        .replace(/[ \t]+\n/g, '\n')
-        .replace(/\n{3,}/g, '\n\n')
-        .trim()
+      return stripProtocolContent(visible)
     }
 
     appendUnsavedDraftNotice = (control: AgentControlBlock | null) => {
       if (!wroteDocument || streamAborted || streamFailed) return
       if (!currentDocumentHasUnsavedChanges()) return
-      if (controlNeedsSave(control)) return
-      const prefix = liveAssistantContent.value.trim() ? '\n\n' : ''
-      liveAssistantContent.value = `${liveAssistantContent.value}${prefix}内容已写入当前文档草稿，尚未保存。是否现在保存？`
+      if (control?.awaiting === 'user_confirm_write') return
+      const notice = '内容已写入当前文档草稿，尚未保存。是否现在保存？'
+      const merged = mergeVisibleAssistantContent(liveAssistantRoundSummary, notice)
+      if (merged !== liveAssistantRoundSummary) {
+        liveAssistantRoundSummary = merged
+        runtimeSummaryAppendedThisRequest = true
+      }
+      syncLiveAssistantDisplay(buildVisibleAssistantContent(completedAssistantContent || rawAssistantContent))
     }
 
     const appendCompletedTail = (completedContent: string) => {
@@ -2725,6 +5543,12 @@ async function sendMessage() {
     )
     let actionProbe = ''
 
+    const hasIncompleteActionWrite = () => (
+      Boolean(routeAction && routeAction !== 'chat')
+      && ACTION_OPEN_REGEX.test(rawAssistantContent)
+      && !/\[\[\/ACTION\]\]/i.test(rawAssistantContent)
+    )
+
     const completeWriterBlock = () => {
       if (routeAction && routeAction !== 'chat' && props.docId && writerStarted) {
         lastWriterResult = null
@@ -2737,6 +5561,7 @@ async function sendMessage() {
         executionState.documentWriteObserved = true
         executionState.saveAttemptWithoutDocumentChange = false
         executionState.writeCompleted = true
+        writeSatisfiedStepKey = currentPlanStepKey(executionState) || writeSatisfiedStepKey
         roundDocumentWriteObserved = true
         resetSemanticContinuationBudget()
         upsertArtifactDraft(session, '', {
@@ -2754,13 +5579,16 @@ async function sendMessage() {
       prefixProbe = ''
       pendingRoute = null
       writerStarted = false
+      lastWriterResult = null
       renderBuffer = ''
       inThinkBlock = false
       rawAssistantContent = ''
       completedAssistantContent = ''
+      sawPlanSignalThisRound = false
       actionProbe = ''
       roundDocumentWriteObserved = false
       roundToolCalls = []
+      liveAssistantRoundSummary = ''
       liveAssistantContent.value = ''
       liveAssistantReasoning.value = ''
     }
@@ -2913,7 +5741,7 @@ async function sendMessage() {
           routeAction = resolveAgentWriteMode(upperMarker) || 'chat'
 
           if (routeAction === 'replace' && isPartialWriteTask(session.taskAnalysis)) {
-            throw new Error('当前任务是局部编辑，不能使用 ACTION:replace 整篇覆盖。请改用 ACTION:replace_block、ACTION:rewrite_section 或 ACTION:append。')
+            throw new Error('当前任务是局部编辑，不能使用 ACTION:replace 整篇覆盖。请改用 rewrite_document_section、replace_document_block、replace_document_blocks、swap_document_sections，或在必要时使用 ACTION:append。')
           }
 
           if (routeAction !== 'chat' && props.docType !== 'doc') {
@@ -2947,7 +5775,7 @@ async function sendMessage() {
       routeChunk(flushed)
     }
 
-    finalizePendingAssistantOutput = () => {
+    finalizePendingAssistantOutput = (options: { allowIncompleteAction?: boolean } = {}) => {
       if (!routeAction && prefixProbe.trim()) {
         const flushed = prefixProbe
         prefixProbe = ''
@@ -2958,6 +5786,9 @@ async function sendMessage() {
       recoverTrailingActionMarker()
       if (routeAction && routeAction !== 'chat') {
         if (!/\[\[\/ACTION\]\]/i.test(rawAssistantContent)) {
+          if (options.allowIncompleteAction) {
+            return
+          }
           throw new Error('模型在正文动作未完整闭合时请求了后续工具，已中止执行')
         }
         completeWriterBlock()
@@ -2967,10 +5798,38 @@ async function sendMessage() {
     }
 
     while (true) {
+      requestRound += 1
+      planStepAdvancedThisRound = false
+      const progressSignatureBeforeRound = buildExecutionProgressSignature(executionState, finalControl)
       assistantMessage.content = liveAssistantContent.value
       assistantMessage.reasoning = liveAssistantReasoning.value
-      const requestMessages = buildConversationMessages(session.messages)
+      const requestMessages = buildConversationMessages(session.messages, {
+        preserveFullHistory: Boolean(
+          requestRound > 1
+          || session.pendingPlan
+          || session.runtimePlan?.status === 'running'
+          || session.runtimePlan?.status === 'pending',
+        ),
+      })
+      const requestBody = buildRequestBody(requestMessages, provider, session.model.trim(), {
+        transportMode: selectedTransportMode,
+        previousResponseId,
+        toolOutputs: pendingToolOutputs || (pendingPlan ? carriedPendingPlanToolOutputs : null),
+        agentExecution: executionState,
+        lastExecutionMemory: session.lastExecutionMemory,
+        sessionMemory: session.sessionMemory,
+      })
+      const roundEvents: Array<Record<string, unknown>> = []
+      const roundLabel = `session=${session.id} round=${requestRound}`
       const token = localStorage.getItem('token')
+      logAgentDebugGroup(`${roundLabel} request`, {
+        providerId: provider.id,
+        providerName: provider.name,
+        model: session.model,
+        previousResponseId,
+        executionSnapshotBeforeRound: buildDebugExecutionSnapshot(session, executionState, finalControl),
+        requestBody,
+      })
       const response = await fetch('/api/agent/chat/stream', {
         method: 'POST',
         headers: {
@@ -2978,14 +5837,7 @@ async function sendMessage() {
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
         signal: abortController.signal,
-        body: JSON.stringify(buildRequestBody(requestMessages, provider, session.model.trim(), {
-          transportMode: selectedTransportMode,
-          previousResponseId,
-          toolOutputs: pendingToolOutputs,
-          agentExecution: executionState,
-          lastExecutionMemory: session.lastExecutionMemory,
-          sessionMemory: session.sessionMemory,
-        })),
+        body: JSON.stringify(requestBody),
       })
 
       pendingToolOutputs = null
@@ -3007,28 +5859,74 @@ async function sendMessage() {
 
       const processParsedEvent = (parsed: ReturnType<typeof parseSseBlock>) => {
         if (!parsed) return
+        roundEvents.push(summarizeAgentEventForDebug(parsed.event, parsed.data))
 
-        if (parsed.event === 'message.delta') {
+        if (parsed.event === 'message.started') {
+          currentAgentRunId = typeof parsed.data.run_id === 'string' && parsed.data.run_id.trim()
+            ? parsed.data.run_id.trim()
+            : currentAgentRunId
+        } else if (parsed.event === 'message.delta') {
           cycleReceivedDelta = true
           const content = parsed.data.content || ''
           rawAssistantContent += content
           handleAssistantChunk(content)
-          liveAssistantContent.value = buildVisibleAssistantContent(rawAssistantContent, true)
+          syncLiveAssistantDisplay(buildVisibleAssistantContent(rawAssistantContent, true))
+          syncPendingPlanPreviewFromStream()
+        } else if (parsed.event === 'tool.call.delta') {
+          applyLiveHostToolDelta(parsed.data)
+        } else if (parsed.event === 'structured_response') {
+          const normalized = normalizeStructuredResponse(parsed.data)
+          if (normalized) {
+            latestStructuredResponse = normalized
+            if (normalized.plan) {
+              session.runtimePlan = normalized.plan
+              const planText = runtimePlanToPlanText(normalized.plan)
+              if (planText) {
+                session.lastPlan = planText
+              }
+              sawPlanSignalThisRound = true
+            }
+            syncPendingPlanPreviewFromStream()
+          }
         } else if (parsed.event === 'task_analysis') {
           const normalized = normalizeTaskAnalysis(parsed.data)
           if (normalized) {
             session.taskAnalysis = normalized
+            executionState.confirmationRequired = normalized.requiresUserConfirmation === true
+            syncPendingPlanPreviewFromStream()
           }
         } else if (parsed.event === 'plan_event') {
           const normalized = normalizeRuntimePlan(parsed.data.plan)
           if (normalized) {
             session.runtimePlan = normalized
+            sawPlanSignalThisRound = true
+            syncPendingPlanPreviewFromStream()
           }
         } else if (parsed.event === 'tool_event') {
           const normalized = normalizeToolEvent(parsed.data)
           if (normalized) {
             session.toolEvents = [...session.toolEvents, normalized].slice(-20)
+            const roundCallSummary = buildRoundToolCallSummaryFromToolEvent(parsed.data)
+            if (roundCallSummary) {
+              roundToolCalls = [...roundToolCalls, roundCallSummary]
+              executionState.recentToolCalls = appendRecentToolCalls(
+                executionState.recentToolCalls,
+                [roundCallSummary],
+              )
+              if (roundCallSummary.name === 'action_protocol_write' && roundCallSummary.outcome === 'success') {
+                executionState.documentWriteObserved = true
+                executionState.writeCompleted = true
+                executionState.saveAttemptWithoutDocumentChange = false
+                roundDocumentWriteObserved = true
+              }
+              ensureVisibleAssistantRoundSummary(resolveEffectiveControl(completedAssistantContent || rawAssistantContent))
+            }
           }
+        } else if (parsed.event === 'tool.request') {
+          const requestPromise = executeFrontendToolRequest(parsed.data).catch((error) => {
+            console.error('frontend tool request failed', error)
+          })
+          pendingFrontendToolRequests.push(requestPromise)
         } else if (parsed.event === 'artifact_delta') {
           if (typeof parsed.data.delta === 'string' && parsed.data.delta) {
             upsertArtifactDraft(session, parsed.data.delta, {
@@ -3059,7 +5957,9 @@ async function sendMessage() {
             previousResponseId = responseId
           }
           appendCompletedTail(completedContent)
-          liveAssistantContent.value = buildVisibleAssistantContent(completedAssistantContent || rawAssistantContent)
+          const completedVisibleContent = buildVisibleAssistantContent(completedAssistantContent || rawAssistantContent)
+          syncLiveAssistantDisplay(completedVisibleContent)
+          syncPendingPlanPreviewFromStream()
           streamDone = true
         } else if (parsed.event === 'agent.transport') {
           const mode = parsed.data.mode === 'chat_fallback'
@@ -3068,6 +5968,27 @@ async function sendMessage() {
               ? 'chat'
               : 'responses'
           agentTransportMode.value = mode
+        } else if (parsed.event === 'agent.debug.model_request') {
+          logAgentModelIo(
+            `${roundLabel} model_request`,
+            parsed.data && typeof parsed.data === 'object'
+              ? parsed.data as Record<string, unknown>
+              : { data: parsed.data },
+          )
+        } else if (parsed.event === 'agent.debug.model_response') {
+          logAgentModelIo(
+            `${roundLabel} model_response`,
+            parsed.data && typeof parsed.data === 'object'
+              ? parsed.data as Record<string, unknown>
+              : { data: parsed.data },
+          )
+        } else if (parsed.event === 'agent.debug.model_error') {
+          logAgentModelIo(
+            `${roundLabel} model_error`,
+            parsed.data && typeof parsed.data === 'object'
+              ? parsed.data as Record<string, unknown>
+              : { data: parsed.data },
+          )
         } else if (parsed.event === 'tool.calls.required') {
           const completedContent = typeof parsed.data.content === 'string' ? parsed.data.content : ''
           if (completedContent) {
@@ -3075,6 +5996,27 @@ async function sendMessage() {
             appendCompletedTail(completedContent)
           }
           finalizePendingAssistantOutput()
+          syncPendingPlanPreviewFromStream()
+          const confirmationPlan = (
+            runtimePlanToPlanText(session.runtimePlan)
+            || session.lastPlan?.trim()
+            || session.pendingPlan?.trim()
+            || ''
+          ).trim()
+          const confirmationControl = resolveEffectiveControl(completedAssistantContent || rawAssistantContent)
+          const confirmationRequired = currentPlanNeedsConfirmation.value || shouldTreatPlanAsPending({
+            planText: confirmationPlan,
+            control: confirmationControl,
+            session,
+            executionState,
+            sawPlanSignal: sawPlanSignalThisRound || Boolean(confirmationPlan),
+          })
+          if (confirmationRequired && confirmationPlan) {
+            session.pendingPlan = confirmationPlan
+            session.lastPlan = confirmationPlan
+            session.updatedAt = Date.now()
+            sessions.value = [...sessions.value]
+          }
           toolResponseId = typeof parsed.data.response_id === 'string' ? parsed.data.response_id : ''
           if (toolResponseId.trim()) {
             previousResponseId = toolResponseId.trim()
@@ -3114,29 +6056,85 @@ async function sendMessage() {
         processParsedEvent(parseSseBlock(buffer))
       }
 
+      if (pendingFrontendToolRequests.length) {
+        await Promise.allSettled(pendingFrontendToolRequests.splice(0))
+      }
+
       if (!requiredToolCalls.length) {
-        finalizePendingAssistantOutput()
+        finalizePendingAssistantOutput({ allowIncompleteAction: true })
         const finalContent = completedAssistantContent || rawAssistantContent
-        const control = extractAgentControlBlock(finalContent)
-        syncExecutionPlanProgress(control)
-        const currentStepRequiresWrite = stepRequiresDocumentWrite(
-          (typeof control?.planCurrentStep === 'string' && control.planCurrentStep.trim())
-            ? control.planCurrentStep
-            : executionState.planCurrentStep,
-        )
-        if (currentStepRequiresWrite && !roundDocumentWriteObserved && !ACTION_OPEN_REGEX.test(finalContent)) {
-          throw new Error('当前步骤要求执行正文修改，但本轮没有输出任何有效的正文协议写入。请先产出 ACTION:replace_block、ACTION:rewrite_section 或 ACTION:append/replace 后再继续。')
+        if (hasIncompleteActionWrite()) {
+          executionState.lastInterceptCode = 'action_block_not_closed'
+          executionState.lastInterceptMessage = '模型输出的 ACTION 块未完整闭合'
+          executionState.lastInterceptGuidance = 'Continue the current ACTION block from exactly where it stopped. Output only the remaining markdown body, then close with [[/ACTION]]. Do not repeat the earlier content, do not start a new ACTION block, and do not request any tools before closing it.'
+          enqueueSemanticContinuation(finalContent)
+          startContinuationAssistantMessage(finalContent)
+          continue
         }
-        if (shouldTriggerSemanticContinuation(finalContent, control)) {
+        const control = resolveEffectiveControl(finalContent)
+        syncExecutionPlanProgress(control)
+        const currentStepKey = currentPlanStepKey(executionState, control)
+        const currentStepRequiresWrite = currentStepRequiresDocumentWrite(
+          session.runtimePlan,
+          executionState,
+          control,
+        )
+        const awaitingPlanConfirmation = isAwaitingPlanConfirmation(executionState, control)
+        const writeAlreadySatisfied = Boolean(currentStepKey && writeSatisfiedStepKey === currentStepKey)
+        if (
+          currentStepRequiresWrite
+          && !awaitingPlanConfirmation
+          && !writeAlreadySatisfied
+          && !roundDocumentWriteObserved
+          && !ACTION_OPEN_REGEX.test(finalContent)
+        ) {
+          throw new Error('当前步骤要求执行正文修改，但本轮没有完成有效的正文写入。请先调用 rewrite_document_section / replace_document_block / replace_document_blocks / swap_document_sections，或在空文档/文末写入时产出 ACTION:append，在整篇重写时产出 ACTION:replace。')
+        }
+        if (!planStepAdvancedThisRound) {
+          planStepAdvancedThisRound = advanceExecutionPlanStep(session.runtimePlan, executionState, control, {
+            wroteDocument: roundDocumentWriteObserved || wroteDocument,
+            savedDocument: saveToolSucceededThisTurn,
+            mutationCompleted: hasSuccessfulMutationToolCall(roundToolCalls),
+          })
+        }
+        const shouldContinue = shouldTriggerSemanticContinuation(finalContent, control)
+        const progressSignatureAfterRound = buildExecutionProgressSignature(executionState, control)
+        const roundMadeProgress = Boolean(
+          planStepAdvancedThisRound
+          || roundDocumentWriteObserved
+          || saveToolSucceededThisTurn
+          || progressSignatureAfterRound !== progressSignatureBeforeRound,
+        )
+        if (shouldContinue && !roundMadeProgress) {
+          idleSemanticContinuationRounds += 1
+        } else {
+          idleSemanticContinuationRounds = 0
+        }
+        if (shouldContinue && idleSemanticContinuationRounds >= 3) {
+          throw new Error('计划执行空转：连续多轮没有新的工具结果、正文写入或步骤推进。请重新规划当前步骤后再继续。')
+        }
+        logAgentDebugGroup(`${roundLabel} response`, {
+          events: roundEvents,
+          finalContent,
+          finalControl: control,
+          roundToolCalls,
+          roundDocumentWriteObserved,
+          saveToolAttemptedThisTurn,
+          saveToolSucceededThisTurn,
+          roundMadeProgress,
+          idleSemanticContinuationRounds,
+          progressSignatureBeforeRound,
+          progressSignatureAfterRound,
+          shouldContinue,
+          breakReason: shouldContinue ? 'semantic_continuation' : 'model_finished_without_tool_calls',
+          executionSnapshotAfterRound: buildDebugExecutionSnapshot(session, executionState, control),
+        })
+        if (shouldContinue) {
           enqueueSemanticContinuation(finalContent)
           startContinuationAssistantMessage(finalContent)
           continue
         }
         break
-      }
-
-      if (!toolResponseId) {
-        throw new Error('模型请求了工具调用，但缺少 response_id')
       }
 
       toolCallRounds += 1
@@ -3156,20 +6154,59 @@ async function sendMessage() {
         }
       }
 
-      pendingToolOutputs = await executeAgentToolCalls(requiredToolCalls)
+      if (!pendingToolOutputs) {
+        pendingToolOutputs = await executeRoundToolCalls(requiredToolCalls)
+      }
+      logAgentDebugGroup(`${roundLabel} tool_calls`, {
+        requiredToolCalls,
+        toolOutputs: pendingToolOutputs,
+        executionSnapshotAfterTools: buildDebugExecutionSnapshot(session, executionState, finalControl),
+      })
+      const toolDrivenControl: AgentControlBlock | null = latestToolDrivenControl as AgentControlBlock | null
+      const structuredResponseForHostBatch: AgentStructuredResponse | null = latestStructuredResponse as AgentStructuredResponse | null
+      const hostOnlyBatch = requiredToolCalls.length > 0 && requiredToolCalls.every((call) => isHostStateTool(call.name))
+      const awaitingConfirmationAfterHostSync = hostOnlyBatch
+        && toolDrivenControl?.currentMode === 'plan'
+        && toolDrivenControl?.awaiting === 'user_input'
+        && Boolean(session.pendingPlan?.trim() || session.runtimePlan?.steps?.length)
+      if (awaitingConfirmationAfterHostSync) {
+        liveAssistantContent.value = structuredResponseForHostBatch?.message?.trim()
+          || buildPendingPlanConfirmationMessage()
+        pendingToolOutputs = null
+        break
+      }
       if (pendingToolOutputs.length) {
         resetSemanticContinuationBudget()
+        collectedPlanToolOutputs = mergePendingPlanToolOutputs(collectedPlanToolOutputs, pendingToolOutputs)
       }
       roundToolCalls = summarizeToolCallBatch(requiredToolCalls, pendingToolOutputs)
+      const saveCallOutcomes = roundToolCalls.filter((call) => call.name === 'save_current_document')
+      if (saveCallOutcomes.length) {
+        saveToolAttemptedThisTurn = true
+        if (saveCallOutcomes.some((call) => call.outcome === 'success' || call.outcome === 'noop')) {
+          saveToolSucceededThisTurn = true
+          executionState.saveRequested = false
+        }
+      }
       executionState.recentToolCalls = appendRecentToolCalls(
         executionState.recentToolCalls,
         roundToolCalls,
       )
+      if (roundToolCalls.some((call) => isDocumentMutationTool(call.name) && call.outcome === 'success')) {
+        executionState.documentWriteObserved = true
+        executionState.saveAttemptWithoutDocumentChange = false
+        executionState.writeCompleted = true
+        writeSatisfiedStepKey = currentPlanStepKey(executionState) || writeSatisfiedStepKey
+        roundDocumentWriteObserved = true
+      }
       appendToolEventsToSession(session, roundToolCalls)
       const saveNoopDetected = !wroteDocument && extractSaveNoopState(pendingToolOutputs)
       if (saveNoopDetected) {
         executionState.saveAttemptWithoutDocumentChange = true
       }
+      const controlAfterToolRound = resolveEffectiveControl(completedAssistantContent || rawAssistantContent)
+      await maybeAutoSaveAfterDocumentWrite(controlAfterToolRound)
+      ensureVisibleAssistantRoundSummary(resolveEffectiveControl(completedAssistantContent || rawAssistantContent))
       if (
         pendingPlan
         && !executionState.documentWriteObserved
@@ -3187,16 +6224,42 @@ async function sendMessage() {
     if (error?.name === 'AbortError') {
       streamAborted = true
       ElMessage.info('已停止生成')
+      logAgentDebugGroup(`session=${session.id} aborted`, {
+        previousResponseId,
+        liveAssistantContent: liveAssistantContent.value,
+        liveAssistantReasoning: liveAssistantReasoning.value,
+      })
     } else {
       streamFailed = true
+      const message = error?.message || '智能体请求失败'
+      const intercepted = isAgentInternalInterceptError(message)
+      interceptedFailure = intercepted ? resolveAgentInterceptDetails(message) : null
+      if (interceptedFailure) {
+        executionState.lastInterceptCode = interceptedFailure.code
+        executionState.lastInterceptMessage = message
+        executionState.lastInterceptGuidance = interceptedFailure.modelGuidance
+      }
       logAgentPanelError('send_message', error, {
         sessionId: session.id,
         providerId: provider.id,
         model: session.model,
         docId: props.docId,
         docName: props.docName,
+        intercepted,
       })
-      ElMessage.error(error.message || '智能体请求失败')
+      logAgentDebugGroup(`session=${session.id} error`, {
+        error,
+        intercepted,
+        previousResponseId,
+        liveAssistantContent: liveAssistantContent.value,
+        liveAssistantReasoning: liveAssistantReasoning.value,
+        executionState,
+        runtimePlan: session.runtimePlan,
+        executionSnapshotAtError: buildDebugExecutionSnapshot(session, executionState, finalControl),
+      })
+      if (!intercepted) {
+        ElMessage.error(message)
+      }
     }
   } finally {
     window.removeEventListener(AGENT_WRITER_RESULT_EVENT, handleWriterResult as EventListener)
@@ -3209,31 +6272,152 @@ async function sendMessage() {
       }
     }
     const finalAssistantContent = completedAssistantContent || rawAssistantContent || assistantMessage.content || liveAssistantContent.value
-    finalControl = extractAgentControlBlock(finalAssistantContent)
-    syncExecutionPlanProgress(finalControl)
-    syncRuntimePlanStatus(session, finalControl, executionState)
-    if (!streamFailed) {
-      appendUnsavedDraftNotice(finalControl)
-    }
-    const extractedPlan = extractPlanBlock(finalAssistantContent)
+    const structuredResponse: AgentStructuredResponse | null = latestStructuredResponse as AgentStructuredResponse | null
+    const effectiveStructuredPlan = structuredResponse?.plan || latestToolDrivenPlan
+    const structuredPlanText = effectiveStructuredPlan
+      ? runtimePlanToPlanText(effectiveStructuredPlan)
+      : ''
+    const extractedPlan = structuredPlanText || extractPlanBlock(finalAssistantContent)
     if (extractedPlan) {
       session.lastPlan = extractedPlan
-      session.runtimePlan = buildRuntimePlanFromText(extractedPlan, userMessage.content) || session.runtimePlan
+      session.runtimePlan = effectiveStructuredPlan || buildRuntimePlanFromText(
+        extractedPlan,
+        userMessage?.content || pendingPlan || '',
+        session.runtimePlan,
+      ) || session.runtimePlan
     } else if (pendingPlan && !session.lastPlan) {
       session.lastPlan = pendingPlan
     }
-    if (extractedPlan && controlRequestsPlanConfirmation(finalControl)) {
-      session.pendingPlan = extractedPlan
-    } else if (pendingPlan) {
-      session.pendingPlan = null
-    }
-    finalizeAssistantMessageForDisplay(finalAssistantContent)
+    finalControl = structuredResponse?.state
+      || latestToolDrivenControl
+      || (
+        (
+          hostStateUpdatedThisRound
+          || session.pendingPlan?.trim()
+          || session.runtimePlan?.steps?.length
+          || executionState.confirmationRequired
+          || executionState.pendingPlan
+          || executionState.planCurrentStep
+          || executionState.planStepIndex
+          || executionState.planCompletedSteps.length
+          || executionState.saveRequested
+          || executionState.writeCompleted
+          || executionState.documentWriteObserved
+          || roundToolCalls.length
+          || roundDocumentWriteObserved
+          || wroteDocument
+        )
+          ? buildControlFromExecutionState(executionState, session.taskAnalysis)
+          : null
+      )
+    syncExecutionPlanProgress(finalControl)
+    syncRuntimePlanStatus(session, finalControl, executionState)
     if (!streamFailed && !streamAborted) {
+      if (
+        executionState.semanticContinuation
+        || finalControl?.awaiting === 'user_confirm_write'
+        || finalControl?.currentMode === 'normal'
+      ) {
+        executionState.confirmationRequired = false
+      }
+      executionState.lastInterceptCode = null
+      executionState.lastInterceptMessage = null
+      executionState.lastInterceptGuidance = null
+    }
+    const finalStepRequiresSave = currentStepRequiresDocumentSave(session.runtimePlan, executionState, finalControl)
+    const shouldAutoSaveAfterWrite = (
+      !streamFailed
+      && !streamAborted
+      && props.docType === 'doc'
+      && props.docId
+      && finalStepRequiresSave
+      && (wroteDocument || executionState.writeCompleted || roundDocumentWriteObserved)
+      && currentDocumentHasUnsavedChanges()
+      && !saveToolSucceededThisTurn
+    )
+    if (shouldAutoSaveAfterWrite) {
+      const autoSaveOutputs = await executeAgentToolCalls([{
+        call_id: genId(),
+        name: 'save_current_document',
+        arguments: JSON.stringify({ doc_id: props.docId }),
+      }])
+      const autoSaveOutput = autoSaveOutputs[0]
+      const autoSaveResult = autoSaveOutput?.output && typeof autoSaveOutput.output === 'object'
+        ? autoSaveOutput.output as Record<string, any>
+        : null
+      const autoSavePayload = autoSaveResult?.result && typeof autoSaveResult.result === 'object'
+        ? autoSaveResult.result as Record<string, any>
+        : null
+      saveToolAttemptedThisTurn = true
+      if (autoSaveResult?.ok === true && (autoSavePayload?.saved === true || autoSavePayload?.already_saved === true)) {
+        saveToolSucceededThisTurn = true
+        if (!planStepAdvancedThisRound) {
+          planStepAdvancedThisRound = advanceExecutionPlanStep(session.runtimePlan, executionState, finalControl, {
+            wroteDocument: roundDocumentWriteObserved || wroteDocument,
+            savedDocument: true,
+            mutationCompleted: true,
+          })
+        }
+      } else if (currentDocumentHasUnsavedChanges()) {
+        streamFailed = true
+        const errorMessage = typeof autoSaveResult?.error === 'string' && autoSaveResult.error.trim()
+          ? autoSaveResult.error.trim()
+          : '模型已完成正文修改，但未成功保存当前文档。'
+        ElMessage.error(errorMessage)
+      }
+    }
+    if (!streamFailed) {
+      appendUnsavedDraftNotice(finalControl)
+    }
+    const runtimePlanText = runtimePlanToPlanText(session.runtimePlan)
+    const finalPendingPlanCandidate = (
+      extractedPlan
+      || runtimePlanText
+      || session.lastPlan?.trim()
+      || pendingPlan
+    ).trim()
+    const runtimePlanStillPending = session.runtimePlan?.status === 'pending'
+    const finalHasPlanSignal = Boolean(extractedPlan || sawPlanSignalThisRound)
+    const finalPhase = typeof finalControl?.phase === 'string' ? finalControl.phase : null
+    const finalStillNeedsConfirmation = finalPhase !== 'completed'
+      && shouldTreatPlanAsPending({
+        planText: finalPendingPlanCandidate,
+        control: finalControl,
+        session,
+        executionState,
+        sawPlanSignal: finalHasPlanSignal || runtimePlanStillPending,
+      })
+    if (finalStillNeedsConfirmation) {
+      session.pendingPlan = finalPendingPlanCandidate
+      session.pendingPlanToolOutputs = [...collectedPlanToolOutputs]
+    } else if (session.pendingPlan) {
+      session.pendingPlan = null
+      session.pendingPlanToolOutputs = []
+    } else if (session.pendingPlanToolOutputs.length) {
+      session.pendingPlanToolOutputs = []
+    }
+    finalizeAssistantMessageForDisplay(finalAssistantContent, { includeStructuredMessage: false })
+    const finalLoopResultContent = latestStructuredResponse?.message?.trim()
+      || stripProtocolContent(finalAssistantContent).trim()
+    appendFinalLoopResultMessage(finalLoopResultContent)
+    if ((!streamFailed || Boolean(interceptedFailure)) && !streamAborted) {
       const memoryPlan = session.lastPlan || null
       const memorySummary = compactMessageText(assistantMessage.content || finalAssistantContent, 400) || null
-      const memoryHasSignals = Boolean(memorySummary || executionState.recentToolCalls.length || executionState.documentWriteObserved)
+      const memoryHasSignals = Boolean(
+        memorySummary
+        || executionState.recentToolCalls.length
+        || executionState.documentWriteObserved
+        || executionState.lastInterceptCode,
+      )
       if (memoryHasSignals) {
         session.lastExecutionMemory = {
+          currentMode: executionState.currentMode,
+          awaiting: executionState.awaiting,
+          currentActionKind: executionState.currentActionKind,
+          currentActionStatus: executionState.currentActionStatus,
+          currentActionMode: executionState.currentActionMode,
+          currentActionTarget: executionState.currentActionTarget,
+          confirmationRequired: executionState.confirmationRequired,
           plan: memoryPlan,
           assistantSummary: memorySummary,
           controlPhase: typeof finalControl?.phase === 'string' && finalControl.phase.trim() ? finalControl.phase.trim() : null,
@@ -3248,6 +6432,9 @@ async function sendMessage() {
           planCompletedSteps: [...executionState.planCompletedSteps],
           documentWriteObserved: executionState.documentWriteObserved,
           saveAttemptWithoutDocumentChange: executionState.saveAttemptWithoutDocumentChange,
+          lastInterceptCode: executionState.lastInterceptCode,
+          lastInterceptMessage: executionState.lastInterceptMessage,
+          lastInterceptGuidance: executionState.lastInterceptGuidance,
           recentToolCalls: [...executionState.recentToolCalls],
         }
       }
@@ -3259,6 +6446,20 @@ async function sendMessage() {
     session.previousResponseId = previousResponseId
     session.lastSyncedMessageCount = 0
     session.updatedAt = Date.now()
+    logAgentDebugGroup(`session=${session.id} final`, {
+      finalAssistantContent,
+      finalControl,
+      previousResponseId,
+      executionState,
+      runtimePlan: session.runtimePlan,
+      pendingPlan: session.pendingPlan,
+      lastExecutionMemory: session.lastExecutionMemory,
+      saveToolAttemptedThisTurn,
+      saveToolSucceededThisTurn,
+      streamFailed,
+      streamAborted,
+      executionSnapshotFinal: buildDebugExecutionSnapshot(session, executionState, finalControl),
+    })
     streaming.value = false
     streamingAssistantId.value = ''
     liveAssistantContent.value = ''
@@ -3295,6 +6496,16 @@ watch([collapsed, panelX, panelY, currentSessionId], () => {
 
 watch([activeProviderId, currentSessionId, activeModelKey], () => {
   syncSessionWithActiveProvider(currentSession.value)
+})
+
+watch([currentSessionId, () => currentSessionModel.value, activeProviderId], () => {
+  clearComposerAttachments()
+})
+
+watch(composerAttachmentEnabled, (enabled) => {
+  if (!enabled && composerAttachments.value.length) {
+    clearComposerAttachments()
+  }
 })
 
 watch(showProviderDialog, (visible) => {
@@ -3364,8 +6575,8 @@ onUnmounted(() => {
   top: 0;
   left: 0;
   z-index: 1800;
-  width: 520px;
-  max-width: calc(100vw - 24px);
+  width: 680px;
+  max-width: calc(100vw - 32px);
 }
 
 .agent-panel.collapsed {
@@ -3521,6 +6732,81 @@ onUnmounted(() => {
   flex: 1;
   min-height: 0;
   display: flex;
+  flex-direction: row;
+}
+
+.agent-sidebar {
+  display: none;
+  width: 308px;
+  flex-shrink: 0;
+  border-right: 1px solid rgba(122, 147, 91, 0.12);
+  background: rgba(247, 249, 242, 0.72);
+  padding: 14px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.agent-sidebar-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(122, 147, 91, 0.16);
+  background: rgba(255, 255, 255, 0.88);
+  cursor: pointer;
+  text-align: left;
+}
+
+.agent-sidebar-toggle-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.agent-sidebar-toggle-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #31402b;
+}
+
+.agent-sidebar-toggle-summary {
+  font-size: 12px;
+  color: #6b7961;
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.agent-sidebar-toggle-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.agent-sidebar-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-right: 4px;
+}
+
+.agent-workspace {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
   flex-direction: column;
 }
 
@@ -3532,19 +6818,21 @@ onUnmounted(() => {
   scrollbar-gutter: stable;
   scrollbar-width: thin;
   scrollbar-color: rgba(111, 154, 79, 0.58) rgba(122, 147, 91, 0.12);
-  padding: 16px;
+  padding: 18px 24px;
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 14px;
 }
 
 .agent-messages::-webkit-scrollbar,
+.agent-sidebar-scroll::-webkit-scrollbar,
 .provider-list::-webkit-scrollbar,
 .model-pane-scroll::-webkit-scrollbar {
   width: 10px;
 }
 
 .agent-messages::-webkit-scrollbar-track,
+.agent-sidebar-scroll::-webkit-scrollbar-track,
 .provider-list::-webkit-scrollbar-track,
 .model-pane-scroll::-webkit-scrollbar-track {
   background: rgba(122, 147, 91, 0.12);
@@ -3552,6 +6840,7 @@ onUnmounted(() => {
 }
 
 .agent-messages::-webkit-scrollbar-thumb,
+.agent-sidebar-scroll::-webkit-scrollbar-thumb,
 .provider-list::-webkit-scrollbar-thumb,
 .model-pane-scroll::-webkit-scrollbar-thumb {
   background: rgba(111, 154, 79, 0.58);
@@ -3562,7 +6851,7 @@ onUnmounted(() => {
 .agent-plan-card {
   border: 1px solid rgba(122, 147, 91, 0.2);
   border-radius: 16px;
-  padding: 12px 14px;
+  padding: 11px 12px;
   background: rgba(250, 252, 244, 0.92);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72);
 }
@@ -3607,16 +6896,50 @@ onUnmounted(() => {
 .agent-runtime-card {
   border: 1px solid rgba(122, 147, 91, 0.16);
   border-radius: 16px;
-  padding: 12px 14px;
+  padding: 11px 12px;
   background: rgba(255, 255, 255, 0.72);
 }
 
-.agent-runtime-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px 12px;
+.agent-runtime-overview {
+  gap: 10px;
+}
+
+.agent-runtime-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.agent-runtime-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(122, 147, 91, 0.1);
+  color: #506046;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.agent-runtime-current-step {
+  font-size: 13px;
+  line-height: 1.6;
+  color: #24311f;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.agent-runtime-empty {
+  min-height: 140px;
+  justify-content: center;
+}
+
+.agent-runtime-empty-text {
   font-size: 12px;
-  color: #44533b;
+  line-height: 1.7;
+  color: #6b7961;
 }
 
 .agent-plan-steps {
@@ -3654,40 +6977,66 @@ onUnmounted(() => {
   color: #6a7861;
 }
 
+.agent-plan-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+
 .agent-tool-events {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
 }
 
 .agent-tool-event {
-  display: grid;
-  grid-template-columns: auto auto 1fr;
-  gap: 8px;
-  align-items: start;
-  font-size: 12px;
-  color: #3c4a34;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  background: rgba(248, 250, 243, 0.92);
+  border: 1px solid rgba(122, 147, 91, 0.1);
+}
+
+.agent-tool-event-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
 }
 
 .agent-tool-event-name {
+  min-width: 0;
+  font-size: 12px;
   font-weight: 700;
+  color: #31402b;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .agent-tool-event-status {
+  flex-shrink: 0;
+  font-size: 11px;
   color: #6f7e65;
 }
 
 .agent-tool-event-summary {
+  font-size: 11px;
+  line-height: 1.55;
   color: #4d5b44;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .agent-artifact-card {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  margin-top: 10px;
-  padding-top: 10px;
-  border-top: 1px dashed rgba(122, 147, 91, 0.18);
 }
 
 .agent-artifact-header {
@@ -3701,6 +7050,10 @@ onUnmounted(() => {
   font-size: 12px;
   font-weight: 700;
   color: #24311f;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .agent-artifact-status {
@@ -3736,13 +7089,15 @@ onUnmounted(() => {
 .agent-message {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
+  width: min(100%, 620px);
+  align-self: center;
 }
 
 .message-role {
-  font-size: 14px;
+  font-size: 12px;
   font-weight: 700;
-  color: #24311f;
+  color: #51604a;
 }
 
 .message-content {
@@ -3750,8 +7105,8 @@ onUnmounted(() => {
   white-space: pre-wrap;
   word-break: break-word;
   font-family: inherit;
-  font-size: 15px;
-  line-height: 1.75;
+  font-size: 13px;
+  line-height: 1.6;
   color: #24311f;
   background: transparent;
 }
@@ -3768,8 +7123,8 @@ onUnmounted(() => {
   list-style: none;
   cursor: pointer;
   user-select: none;
-  padding: 10px 12px;
-  font-size: 13px;
+  padding: 8px 10px;
+  font-size: 12px;
   font-weight: 700;
   color: #607057;
 }
@@ -3790,40 +7145,94 @@ onUnmounted(() => {
 
 .message-reasoning-content {
   margin: 0;
-  padding: 0 12px 12px;
+  padding: 0 10px 10px;
   white-space: pre-wrap;
   word-break: break-word;
   font-family: inherit;
-  font-size: 13px;
-  line-height: 1.7;
+  font-size: 12px;
+  line-height: 1.6;
   color: #708067;
+}
+
+.message-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.message-attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid rgba(122, 147, 91, 0.14);
+  color: #51604a;
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 0.16s ease, background 0.16s ease;
+}
+
+.message-attachment-chip:hover {
+  background: rgba(244, 248, 235, 0.98);
+  border-color: rgba(122, 147, 91, 0.22);
+}
+
+.message-attachment-name {
+  font-weight: 700;
+  color: #31402b;
+}
+
+.message-attachment-meta {
+  color: #7a846f;
 }
 
 .agent-composer {
   flex-shrink: 0;
   border-top: 1px solid rgba(122, 147, 91, 0.12);
-  padding: 14px 16px 16px;
+  padding: 12px 18px 16px;
   background: rgba(251, 252, 247, 0.94);
 }
 
+.agent-runtime-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(122, 147, 91, 0.12);
+  color: #537535;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.agent-runtime-chevron {
+  font-size: 11px;
+  color: #7a846f;
+}
+
 .agent-mode-tip {
-  font-size: 12px;
+  width: min(100%, 620px);
+  margin: 0 auto;
+  font-size: 11px;
   color: #7b8771;
-  line-height: 1.7;
+  line-height: 1.6;
 }
 
 .agent-textarea {
-  width: 100%;
-  margin-top: 12px;
-  min-height: 126px;
+  width: min(100%, 620px);
+  margin: 10px auto 0;
+  min-height: 112px;
   resize: none;
   border-radius: 16px;
   border: 1px solid rgba(122, 147, 91, 0.18);
   background: rgba(255, 255, 255, 0.92);
   color: #1d2719;
-  padding: 12px 14px;
+  padding: 10px 12px;
   font: inherit;
-  line-height: 1.7;
+  font-size: 13px;
+  line-height: 1.6;
 }
 
 .agent-textarea::placeholder {
@@ -3836,12 +7245,139 @@ onUnmounted(() => {
   box-shadow: 0 0 0 3px rgba(111, 154, 79, 0.12);
 }
 
+.agent-hidden-input {
+  display: none;
+}
+
+.agent-attachment-panel {
+  width: min(100%, 620px);
+  margin: 10px auto 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.agent-attachment-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.agent-attachment-tip {
+  font-size: 12px;
+  line-height: 1.6;
+  color: #718068;
+}
+
+.agent-attachment-trigger {
+  flex-shrink: 0;
+  margin-left: auto;
+  border: 1px solid rgba(122, 147, 91, 0.18);
+  border-radius: 999px;
+  padding: 6px 12px;
+  background: rgba(122, 147, 91, 0.12);
+  color: #537535;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.agent-attachment-trigger:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.agent-attachment-list {
+  display: flex;
+  flex: 1;
+  gap: 8px;
+  flex-wrap: nowrap;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 2px;
+}
+
+.agent-attachment-item {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+  max-width: 260px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid rgba(122, 147, 91, 0.12);
+  cursor: pointer;
+  transition: border-color 0.16s ease, background 0.16s ease;
+}
+
+.agent-attachment-item:hover {
+  background: rgba(244, 248, 235, 0.98);
+  border-color: rgba(122, 147, 91, 0.22);
+}
+
+.agent-attachment-item-main {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+.agent-attachment-item-name {
+  max-width: 180px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #31402b;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-attachment-item-meta {
+  font-size: 11px;
+  color: #7a846f;
+  white-space: nowrap;
+}
+
+.agent-attachment-remove {
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  color: #c65b4d;
+  font-size: 12px;
+  padding: 0;
+  cursor: pointer;
+}
+
+.agent-attachment-remove:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.attachment-preview-body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 240px;
+}
+
+.attachment-preview-image {
+  display: block;
+  max-width: 100%;
+  max-height: 72vh;
+  object-fit: contain;
+  border-radius: 16px;
+  box-shadow: 0 18px 40px rgba(34, 48, 25, 0.18);
+}
+
 .agent-composer-footer {
+  width: min(100%, 620px);
   display: flex;
   flex-direction: column;
   align-items: stretch;
   gap: 10px;
-  margin-top: 12px;
+  margin: 12px auto 0;
 }
 
 .agent-shortcut-tip {
@@ -4140,7 +7676,21 @@ onUnmounted(() => {
 }
 
 .current-model-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
   flex-shrink: 0;
+}
+
+.model-action-button {
+  --el-button-text-color: #537535;
+  --el-button-hover-text-color: #405a29;
+  --el-button-bg-color: rgba(122, 147, 91, 0.14);
+  --el-button-hover-bg-color: rgba(122, 147, 91, 0.2);
+  --el-button-active-bg-color: rgba(122, 147, 91, 0.24);
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-weight: 700;
 }
 
 .model-source-badge {
@@ -4157,6 +7707,21 @@ onUnmounted(() => {
 .model-source-badge.is-custom {
   background: rgba(37, 99, 235, 0.12);
   color: #2563eb;
+}
+
+.model-source-badge.is-configured {
+  background: rgba(217, 119, 6, 0.12);
+  color: #b45309;
+}
+
+.model-configured-dot {
+  display: inline-flex;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #d97706;
+  box-shadow: 0 0 0 4px rgba(217, 119, 6, 0.12);
+  flex-shrink: 0;
 }
 
 .model-check-list {
@@ -4186,23 +7751,134 @@ onUnmounted(() => {
   gap: 12px;
 }
 
+.model-config-dialog-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.model-config-toolbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.model-config-reference {
+  min-width: 0;
+  flex: 1;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.68);
+  border: 1px solid rgba(122, 147, 91, 0.12);
+}
+
+.model-config-reference-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #24311f;
+  margin-bottom: 4px;
+}
+
+.model-config-reference-text {
+  font-size: 11px;
+  line-height: 1.5;
+  color: #708067;
+}
+
+.model-config-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.model-config-scroll {
+  max-height: 48vh;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.model-config-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.model-config-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.model-config-field-full {
+  grid-column: 1 / -1;
+}
+
+.model-config-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #4f6047;
+}
+
+.param-help-icon {
+  color: #8a957f;
+  cursor: help;
+}
+
+.model-modality-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-height: 36px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.82);
+  border: 1px solid rgba(122, 147, 91, 0.14);
+}
+
+.model-modality-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #51604a;
+}
+
 :deep(.provider-dialog .el-dialog),
-:deep(.model-dialog .el-dialog) {
+:deep(.model-dialog .el-dialog),
+:deep(.model-config-dialog .el-dialog) {
   background: linear-gradient(180deg, rgba(251, 252, 247, 0.98), rgba(246, 248, 239, 0.96));
   border: 1px solid rgba(122, 147, 91, 0.18);
   box-shadow: 0 24px 60px rgba(67, 86, 50, 0.18);
 }
 
+:deep(.model-config-dialog .el-dialog) {
+  width: min(760px, calc(100vw - 36px)) !important;
+}
+
 :deep(.provider-dialog .el-dialog__title),
-:deep(.model-dialog .el-dialog__title) {
+:deep(.model-dialog .el-dialog__title),
+:deep(.model-config-dialog .el-dialog__title) {
   color: #24311f;
 }
 
 :deep(.provider-dialog .el-dialog__header),
-:deep(.model-dialog .el-dialog__header) {
+:deep(.model-dialog .el-dialog__header),
+:deep(.model-config-dialog .el-dialog__header) {
   margin-right: 0;
   padding-bottom: 8px;
   border-bottom: 1px solid rgba(122, 147, 91, 0.1);
+}
+
+:deep(.model-config-dialog .el-dialog__body) {
+  padding-top: 16px;
+  padding-bottom: 12px;
 }
 
 :deep(.provider-dialog .el-input__wrapper),
@@ -4231,10 +7907,31 @@ onUnmounted(() => {
 }
 
 :deep(.provider-dialog .el-button),
-:deep(.model-dialog .el-button) {
+:deep(.model-dialog .el-button),
+:deep(.model-config-dialog .el-button) {
   --el-button-bg-color: rgba(255, 255, 255, 0.78);
   --el-button-border-color: rgba(122, 147, 91, 0.18);
   --el-button-text-color: #607057;
+}
+
+.model-config-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+}
+
+.model-config-footer-tip {
+  font-size: 12px;
+  color: #7a846f;
+  text-align: left;
+}
+
+.model-config-footer-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .model-check-list :deep(.el-checkbox__label) {
@@ -4243,7 +7940,25 @@ onUnmounted(() => {
 
 @media (max-width: 1200px) {
   .agent-panel {
-    width: min(500px, calc(100vw - 24px));
+    width: min(680px, calc(100vw - 32px));
+  }
+
+  .model-config-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .model-config-toolbar-actions {
+    justify-content: flex-start;
+  }
+
+  .model-config-footer {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .model-config-footer-actions {
+    justify-content: flex-end;
   }
 }
 
@@ -4258,14 +7973,30 @@ onUnmounted(() => {
     max-height: calc(100vh - 84px);
   }
 
+  .agent-main {
+    flex-direction: column;
+  }
+
+  .agent-sidebar {
+    width: 100%;
+    max-height: 34vh;
+    border-right: none;
+    border-bottom: 1px solid rgba(122, 147, 91, 0.12);
+  }
+
   .agent-inline-selects {
     grid-template-columns: 1fr;
   }
 
   .agent-toolbar-line,
-  .agent-bottom-bar {
+  .agent-bottom-bar,
+  .agent-attachment-head {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .agent-attachment-list {
+    flex: none;
   }
 
   .agent-session-line,
@@ -4278,6 +8009,10 @@ onUnmounted(() => {
   .model-grid,
   .model-pane-head-row {
     grid-template-columns: 1fr;
+  }
+
+  .model-config-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 </style>

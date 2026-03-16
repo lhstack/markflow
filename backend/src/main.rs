@@ -486,6 +486,7 @@ async fn main() -> anyhow::Result<()> {
             post(routes::agent::activate_provider),
         )
         .route("/agent/chat/stream", post(routes::agent::chat_stream))
+        .route("/agent/tool-callback", post(routes::agent::submit_tool_callback))
         .route("/agent/models", post(routes::agent::list_models))
         .route(
             "/uploads",

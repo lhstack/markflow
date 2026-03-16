@@ -1,32 +1,14 @@
 use std::{
+    collections::HashMap,
     convert::Infallible,
-    sync::Arc,
+    path::PathBuf,
+    sync::{Arc, OnceLock},
     time::Duration,
 };
 
 use aes_gcm::{
     aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
-};
-use async_openai::{
-    config::OpenAIConfig,
-    types::{
-        chat::{
-            ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls,
-            ChatCompletionRequestAssistantMessage, ChatCompletionRequestMessage,
-            ChatCompletionRequestSystemMessage, ChatCompletionRequestToolMessage,
-            ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessage,
-            ChatCompletionTool, ChatCompletionTools, CreateChatCompletionRequestArgs, FinishReason,
-            FunctionCall as ChatFunctionCall, FunctionObject,
-        },
-        responses::{
-            CreateResponseArgs, EasyInputContent, EasyInputMessage, FunctionCallOutput,
-            FunctionCallOutputItemParam, FunctionTool, FunctionToolCall, InputItem, InputParam,
-            Item, MessageType, OutputItem, ReasoningArgs, ReasoningEffort, ReasoningSummary,
-            ResponseStreamEvent, Role, Tool,
-        },
-    },
-    Client,
 };
 use axum::{
     extract::{Extension, Path},
@@ -38,20 +20,41 @@ use axum::{
     Json,
 };
 use base64::{engine::general_purpose, Engine as _};
-use chrono::Utc;
 use futures_util::StreamExt;
+use reqwest::Client as HttpClient;
+use rig::{
+    client::CompletionClient as RigCompletionClient,
+    completion::{
+        CompletionModel as RigCompletionModel, CompletionRequest as RigCompletionRequest,
+        ToolDefinition as RigToolDefinition,
+    },
+    message::{
+        AssistantContent as RigAssistantContent,
+        Document as RigDocument, DocumentMediaType as RigDocumentMediaType,
+        DocumentSourceKind as RigDocumentSourceKind, ImageMediaType as RigImageMediaType,
+        ImageDetail as RigImageDetail, Message as RigMessage, MimeType as RigMimeType,
+        ToolChoice as RigToolChoice, ToolResultContent as RigToolResultContent,
+        UserContent as RigUserContent,
+    },
+    providers::{anthropic, gemini, openai},
+    streaming::StreamedAssistantContent,
+    OneOrMany as RigOneOrMany,
+};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use tokio::sync::mpsc;
+use tokio::fs;
+use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
-use crate::{agent_protocol::{control_close_marker, control_open_marker, control_phases, default_agent_base_url, route_descriptions, route_enum_values, task_analysis_complexities, task_analysis_intents, task_analysis_modes, task_analysis_write_scopes, write_action_markers, write_action_modes, write_action_payload_formats}, auth, db::Database, models::AgentProvider};
+use crate::{agent_protocol::{default_agent_base_url, route_descriptions, route_enum_values}, auth, db::Database, models::{AgentProvider, UploadAsset}};
 
-enum AgentStreamError {
-    Retryable(String),
-    Fatal(String),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentProviderProtocol {
+    OpenAi,
+    Anthropic,
+    Gemini,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -69,21 +72,57 @@ pub struct AgentModelsRequest {
 pub struct AgentProviderUpsertRequest {
     pub id: Option<i64>,
     pub name: String,
+    pub provider_kind: Option<String>,
     pub base_url: Option<String>,
     pub api_key: Option<String>,
     pub remote_models: Option<Vec<String>>,
     pub enabled_models: Option<Vec<String>>,
     pub custom_models: Option<Vec<String>>,
+    pub model_configs: Option<std::collections::HashMap<String, AgentProviderModelConfig>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AgentProviderModelConfig {
+    #[serde(default)]
+    pub modalities: Vec<String>,
+    #[serde(default)]
+    pub thinking: Option<bool>,
+    #[serde(default)]
+    pub tools_enabled: Option<bool>,
+    #[serde(default)]
+    pub temperature: Option<f64>,
+    #[serde(default)]
+    pub max_output_tokens: Option<u64>,
+    #[serde(default)]
+    pub top_p: Option<f64>,
+    #[serde(default)]
+    pub top_k: Option<u64>,
+    #[serde(default)]
+    pub presence_penalty: Option<f64>,
+    #[serde(default)]
+    pub frequency_penalty: Option<f64>,
+    #[serde(default)]
+    pub parallel_tool_calls: Option<bool>,
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub stop_sequences: Vec<String>,
+    #[serde(default)]
+    pub response_mime_type: Option<String>,
+    #[serde(default)]
+    pub additional_params: Option<Value>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct AgentProviderSummary {
     pub id: i64,
     pub name: String,
+    pub provider_kind: String,
     pub base_url: String,
     pub remote_models: Vec<String>,
     pub enabled_models: Vec<String>,
     pub custom_models: Vec<String>,
+    pub model_configs: std::collections::HashMap<String, AgentProviderModelConfig>,
     pub is_active: bool,
     pub has_api_key: bool,
     pub created_at: String,
@@ -100,11 +139,13 @@ pub struct AgentProvidersResponse {
 pub struct AgentProviderDetailResponse {
     pub id: i64,
     pub name: String,
+    pub provider_kind: String,
     pub base_url: String,
     pub api_key: String,
     pub remote_models: Vec<String>,
     pub enabled_models: Vec<String>,
     pub custom_models: Vec<String>,
+    pub model_configs: std::collections::HashMap<String, AgentProviderModelConfig>,
     pub is_active: bool,
 }
 
@@ -119,63 +160,15 @@ pub struct AgentModelSummary {
 pub struct AgentMessagePayload {
     pub role: String,
     pub content: String,
+    #[serde(default)]
+    pub attachments: Vec<AgentMessageAttachmentPayload>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct AgentExecutionToolCallSummaryPayload {
-    pub name: String,
-    pub arguments: Option<String>,
-    pub output: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct AgentExecutionContextPayload {
-    pub pending_plan: Option<String>,
-    pub pending_plan_user_reply: Option<String>,
-    pub composite_write_then_save: Option<bool>,
-    pub semantic_continuation: Option<bool>,
-    pub semantic_continuation_round: Option<i64>,
-    pub previous_assistant_summary: Option<String>,
-    pub task_kind: Option<String>,
-    pub edit_intent: Option<String>,
-    pub edit_stage: Option<String>,
-    pub save_requested: Option<bool>,
-    pub write_completed: Option<bool>,
-    pub plan_step_index: Option<i64>,
-    pub plan_total_steps: Option<i64>,
-    pub plan_current_step: Option<String>,
-    pub plan_completed_steps: Option<Vec<String>>,
-    pub document_write_observed: Option<bool>,
-    pub save_attempt_without_document_change: Option<bool>,
-    pub recent_tool_calls: Option<Vec<AgentExecutionToolCallSummaryPayload>>,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct AgentExecutionMemoryPayload {
-    pub plan: Option<String>,
-    pub assistant_summary: Option<String>,
-    pub control_phase: Option<String>,
-    pub task_kind: Option<String>,
-    pub edit_intent: Option<String>,
-    pub edit_stage: Option<String>,
-    pub save_requested: Option<bool>,
-    pub write_completed: Option<bool>,
-    pub plan_step_index: Option<i64>,
-    pub plan_total_steps: Option<i64>,
-    pub plan_current_step: Option<String>,
-    pub plan_completed_steps: Option<Vec<String>>,
-    pub document_write_observed: Option<bool>,
-    pub save_attempt_without_document_change: Option<bool>,
-    pub recent_tool_calls: Option<Vec<AgentExecutionToolCallSummaryPayload>>,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct AgentSessionMemoryPayload {
-    pub summary: Option<String>,
-    pub active_user_goals: Option<Vec<String>>,
-    pub completed_facts: Option<Vec<String>>,
-    pub open_loops: Option<Vec<String>>,
-    pub updated_at: Option<String>,
+#[derive(Debug, Deserialize, Clone)]
+pub struct AgentMessageAttachmentPayload {
+    pub upload_id: i64,
+    pub kind: Option<String>,
+    pub content_type: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -190,8 +183,11 @@ pub struct AgentContextPayload {
     pub editor_available: Option<bool>,
     pub editor_snapshot_source: Option<String>,
     pub editor_unsaved_changes: Option<bool>,
+    #[serde(default)]
     pub agent_execution: Option<AgentExecutionContextPayload>,
+    #[serde(default)]
     pub last_execution: Option<AgentExecutionMemoryPayload>,
+    #[serde(default)]
     pub session_memory: Option<AgentSessionMemoryPayload>,
 }
 
@@ -199,12 +195,113 @@ pub struct AgentContextPayload {
 pub struct AgentChatStreamRequest {
     pub provider: AgentProviderPayload,
     pub messages: Vec<AgentMessagePayload>,
-    pub mode: Option<String>,
     pub transport_mode: Option<String>,
-    pub write_mode: Option<String>,
     pub context: Option<AgentContextPayload>,
     pub previous_response_id: Option<String>,
-    pub tool_outputs: Option<Vec<AgentToolOutputPayload>>,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub tool_outputs: Vec<AgentToolOutputPayload>,
+}
+
+fn deserialize_null_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Option::<T>::deserialize(deserializer).map(|value| value.unwrap_or_default())
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct AgentExecutionToolCallSummaryPayload {
+    pub name: Option<String>,
+    pub arguments: Option<String>,
+    pub output: Option<String>,
+    pub ok: Option<bool>,
+    pub outcome: Option<String>,
+    pub stage_policy: Option<String>,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct AgentExecutionContextPayload {
+    pub current_mode: Option<String>,
+    pub awaiting: Option<String>,
+    pub current_action_kind: Option<String>,
+    pub current_action_status: Option<String>,
+    pub current_action_mode: Option<String>,
+    pub current_action_target: Option<String>,
+    pub confirmation_required: Option<bool>,
+    pub pending_plan: Option<String>,
+    pub pending_plan_user_reply: Option<String>,
+    pub plan_confirmation_decision: Option<String>,
+    pub composite_write_then_save: Option<bool>,
+    pub semantic_continuation: Option<bool>,
+    pub semantic_continuation_round: Option<i64>,
+    pub previous_assistant_summary: Option<String>,
+    pub task_kind: Option<String>,
+    pub edit_intent: Option<String>,
+    pub edit_stage: Option<String>,
+    pub save_requested: Option<bool>,
+    pub write_completed: Option<bool>,
+    pub plan_step_index: Option<i64>,
+    pub plan_total_steps: Option<i64>,
+    pub plan_current_step: Option<String>,
+    #[serde(default)]
+    pub plan_completed_steps: Vec<String>,
+    pub document_write_observed: Option<bool>,
+    pub save_attempt_without_document_change: Option<bool>,
+    pub last_intercept_code: Option<String>,
+    pub last_intercept_message: Option<String>,
+    pub last_intercept_guidance: Option<String>,
+    #[serde(default)]
+    pub recent_tool_calls: Vec<AgentExecutionToolCallSummaryPayload>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct AgentExecutionMemoryPayload {
+    pub current_mode: Option<String>,
+    pub awaiting: Option<String>,
+    pub current_action_kind: Option<String>,
+    pub current_action_status: Option<String>,
+    pub current_action_mode: Option<String>,
+    pub current_action_target: Option<String>,
+    pub confirmation_required: Option<bool>,
+    pub plan: Option<String>,
+    pub assistant_summary: Option<String>,
+    pub control_phase: Option<String>,
+    pub task_kind: Option<String>,
+    pub edit_intent: Option<String>,
+    pub edit_stage: Option<String>,
+    pub save_requested: Option<bool>,
+    pub write_completed: Option<bool>,
+    pub plan_step_index: Option<i64>,
+    pub plan_total_steps: Option<i64>,
+    pub plan_current_step: Option<String>,
+    #[serde(default)]
+    pub plan_completed_steps: Vec<String>,
+    pub document_write_observed: Option<bool>,
+    pub save_attempt_without_document_change: Option<bool>,
+    pub last_intercept_code: Option<String>,
+    pub last_intercept_message: Option<String>,
+    pub last_intercept_guidance: Option<String>,
+    #[serde(default)]
+    pub recent_tool_calls: Vec<AgentExecutionToolCallSummaryPayload>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct AgentSessionMemoryPayload {
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub active_user_goals: Vec<String>,
+    #[serde(default)]
+    pub completed_facts: Vec<String>,
+    #[serde(default)]
+    pub open_loops: Vec<String>,
+    pub updated_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -212,75 +309,92 @@ pub struct AgentToolOutputPayload {
     pub call_id: String,
     pub name: Option<String>,
     pub arguments: Option<String>,
-    pub output: serde_json::Value,
+    pub output: Value,
 }
 
-#[derive(Debug, Serialize, Clone)]
-pub struct AgentToolCallRequest {
+#[derive(Debug, Deserialize)]
+pub struct AgentToolCallbackRequest {
+    pub run_id: String,
     pub call_id: String,
-    pub name: String,
-    pub arguments: String,
+    pub output: Value,
 }
 
-#[derive(Debug, Serialize, Clone)]
-pub struct RuntimeTargetResourcesPayload {
-    pub project_ids: Vec<String>,
-    pub folder_ids: Vec<String>,
-    pub doc_ids: Vec<String>,
+#[derive(Clone, Default)]
+struct FrontendToolBroker {
+    pending: Arc<Mutex<HashMap<String, oneshot::Sender<Value>>>>,
 }
 
-#[derive(Debug, Serialize, Clone)]
-pub struct RuntimePlanStepPayload {
-    pub id: String,
-    pub title: String,
-    pub kind: String,
-    pub description: String,
-    pub status: String,
-    pub tool_hints: Vec<String>,
-    pub requires_confirmation: bool,
+impl FrontendToolBroker {
+    async fn register(&self, run_id: &str, call_id: &str) -> oneshot::Receiver<Value> {
+        let (tx, rx) = oneshot::channel();
+        self.pending
+            .lock()
+            .await
+            .insert(format!("{}:{}", run_id, call_id), tx);
+        rx
+    }
+
+    async fn resolve(&self, run_id: &str, call_id: &str, output: Value) -> bool {
+        let key = format!("{}:{}", run_id, call_id);
+        let sender = self.pending.lock().await.remove(&key);
+        sender.map(|tx| tx.send(output).is_ok()).unwrap_or(false)
+    }
+
+    async fn cancel_run(&self, run_id: &str) {
+        let prefix = format!("{}:", run_id);
+        self.pending
+            .lock()
+            .await
+            .retain(|key, _| !key.starts_with(&prefix));
+    }
 }
 
-#[derive(Debug, Serialize, Clone)]
-pub struct RuntimeTaskAnalysisPayload {
-    pub intent: String,
-    pub complexity: String,
-    pub mode: String,
-    pub requires_tools: bool,
-    pub requires_user_confirmation: bool,
-    pub write_scope: Option<String>,
-    pub preferred_write_action: Option<String>,
-    pub target_resources: RuntimeTargetResourcesPayload,
-    pub deliverable: Option<String>,
-    pub steps: Vec<RuntimePlanStepPayload>,
+fn frontend_tool_broker() -> &'static FrontendToolBroker {
+    static BROKER: OnceLock<FrontendToolBroker> = OnceLock::new();
+    BROKER.get_or_init(FrontendToolBroker::default)
 }
 
-#[derive(Debug, Serialize, Clone)]
-pub struct RuntimePlanPayload {
-    pub id: String,
-    pub goal: String,
-    pub summary: Option<String>,
-    pub status: String,
-    pub steps: Vec<RuntimePlanStepPayload>,
-    pub created_at: String,
-    pub updated_at: String,
+#[derive(Debug, Clone)]
+struct PendingFrontendToolCall {
+    id: String,
+    call_id: String,
+    name: String,
+    arguments: Value,
 }
 
-enum AgentStreamOutcome {
-    Message {
-        text: String,
-        response_id: Option<String>,
-    },
-    ToolCalls {
-        response_id: String,
-        text: String,
-        calls: Vec<AgentToolCallRequest>,
-    },
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CompletedActionBlock {
+    mode: String,
+    body: String,
 }
+
+const ACTION_PROTOCOL_TOOL_NAME: &str = "action_protocol_write";
 
 fn normalize_base_url(value: Option<&str>) -> String {
     match value.map(str::trim).filter(|v| !v.is_empty()) {
         Some(url) => url.trim_end_matches('/').to_string(),
         None => default_agent_base_url().to_string(),
+    }
+}
+
+fn normalize_provider_kind(value: Option<&str>) -> String {
+    match value.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(value) if value.eq_ignore_ascii_case("anthropic") || value.eq_ignore_ascii_case("claude") => {
+            "anthropic".to_string()
+        }
+        Some(value) if value.eq_ignore_ascii_case("gemini") || value.eq_ignore_ascii_case("google") => {
+            "gemini".to_string()
+        }
+        _ => "openai".to_string(),
+    }
+}
+
+fn provider_protocol_from_kind(kind: &str) -> Option<AgentProviderProtocol> {
+    match kind.trim().to_ascii_lowercase().as_str() {
+        "anthropic" | "claude" => Some(AgentProviderProtocol::Anthropic),
+        "gemini" | "google" => Some(AgentProviderProtocol::Gemini),
+        "openai" => Some(AgentProviderProtocol::OpenAi),
+        _ => None,
     }
 }
 
@@ -335,6 +449,97 @@ fn serialize_json_string_array(values: &[String]) -> String {
     serde_json::to_string(values).unwrap_or_else(|_| "[]".to_string())
 }
 
+fn normalize_modalities(values: Vec<String>) -> Vec<String> {
+    unique_strings(
+        values
+            .into_iter()
+            .map(|item| item.trim().to_ascii_lowercase())
+            .collect(),
+    )
+}
+
+fn normalize_reasoning_effort(value: Option<&str>) -> Option<String> {
+    match value.map(str::trim).filter(|item| !item.is_empty()) {
+        Some(value)
+            if matches!(
+                value.to_ascii_lowercase().as_str(),
+                "minimal" | "low" | "medium" | "high"
+            ) =>
+        {
+            Some(value.to_ascii_lowercase())
+        }
+        _ => None,
+    }
+}
+
+fn normalize_model_config(mut config: AgentProviderModelConfig) -> Option<AgentProviderModelConfig> {
+    config.modalities = normalize_modalities(config.modalities);
+    config.stop_sequences = unique_strings(config.stop_sequences);
+    config.reasoning_effort = normalize_reasoning_effort(config.reasoning_effort.as_deref());
+    if matches!(config.additional_params, Some(Value::Null)) {
+        config.additional_params = None;
+    }
+
+    let is_empty = config.modalities.is_empty()
+        && config.thinking.is_none()
+        && config.tools_enabled.is_none()
+        && config.temperature.is_none()
+        && config.max_output_tokens.is_none()
+        && config.top_p.is_none()
+        && config.top_k.is_none()
+        && config.presence_penalty.is_none()
+        && config.frequency_penalty.is_none()
+        && config.parallel_tool_calls.is_none()
+        && config.reasoning_effort.is_none()
+        && config.stop_sequences.is_empty()
+        && config
+            .response_mime_type
+            .as_ref()
+            .map(|item| item.trim().is_empty())
+            .unwrap_or(true)
+        && config.additional_params.is_none();
+
+    if is_empty {
+        None
+    } else {
+        if let Some(mime) = config.response_mime_type.as_mut() {
+            *mime = mime.trim().to_string();
+        }
+        Some(config)
+    }
+}
+
+fn parse_model_configs(raw: &str) -> std::collections::HashMap<String, AgentProviderModelConfig> {
+    serde_json::from_str::<std::collections::HashMap<String, AgentProviderModelConfig>>(raw)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(model, config)| {
+            let key = model.trim().to_string();
+            if key.is_empty() {
+                return None;
+            }
+            normalize_model_config(config).map(|config| (key, config))
+        })
+        .collect()
+}
+
+fn serialize_model_configs(
+    values: &std::collections::HashMap<String, AgentProviderModelConfig>,
+) -> String {
+    let normalized = values
+        .iter()
+        .filter_map(|(model, config)| {
+            let key = model.trim().to_string();
+            if key.is_empty() {
+                return None;
+            }
+            normalize_model_config(config.clone()).map(|config| (key, config))
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    serde_json::to_string(&normalized).unwrap_or_else(|_| "{}".to_string())
+}
+
 fn unique_strings(values: Vec<String>) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     let mut items = Vec::new();
@@ -356,10 +561,12 @@ fn provider_to_summary(provider: AgentProvider) -> AgentProviderSummary {
     AgentProviderSummary {
         id: provider.id,
         name: provider.name,
+        provider_kind: normalize_provider_kind(Some(&provider.provider_kind)),
         base_url: provider.base_url,
         remote_models: parse_json_string_array(&provider.remote_models),
         enabled_models: parse_json_string_array(&provider.enabled_models),
         custom_models: parse_json_string_array(&provider.custom_models),
+        model_configs: parse_model_configs(&provider.model_configs),
         is_active: provider.is_active == 1,
         has_api_key: !provider.api_key_ciphertext.trim().is_empty(),
         created_at: provider.created_at,
@@ -369,7 +576,7 @@ fn provider_to_summary(provider: AgentProvider) -> AgentProviderSummary {
 
 async fn list_user_providers(db: &Database, user_id: i64) -> Result<Vec<AgentProvider>, Response> {
     sqlx::query_as::<_, AgentProvider>(
-        "SELECT * FROM agent_providers WHERE user_id = ? ORDER BY is_active DESC, updated_at DESC, id DESC",
+        "SELECT * FROM agent_providers WHERE user_id = ? ORDER BY updated_at DESC, id DESC",
     )
     .bind(user_id)
     .fetch_all(&db.pool)
@@ -414,7 +621,7 @@ async fn set_active_provider(
     user_id: i64,
     provider_id: i64,
 ) -> Result<(), Response> {
-    sqlx::query("UPDATE agent_providers SET is_active = CASE WHEN id = ? THEN 1 ELSE 0 END, updated_at = datetime('now') WHERE user_id = ?")
+    sqlx::query("UPDATE agent_providers SET is_active = CASE WHEN id = ? THEN 1 ELSE 0 END WHERE user_id = ?")
         .bind(provider_id)
         .bind(user_id)
         .execute(&db.pool)
@@ -430,14 +637,6 @@ async fn set_active_provider(
     Ok(())
 }
 
-fn normalize_agent_mode(value: Option<&str>) -> String {
-    match value.map(str::trim).filter(|v| !v.is_empty()) {
-        Some("chat") => "chat".to_string(),
-        Some("write") => "write".to_string(),
-        _ => "auto".to_string(),
-    }
-}
-
 fn normalize_transport_mode(value: Option<&str>) -> String {
     match value.map(str::trim).filter(|v| !v.is_empty()) {
         Some("responses") => "responses".to_string(),
@@ -446,865 +645,366 @@ fn normalize_transport_mode(value: Option<&str>) -> String {
     }
 }
 
-fn normalize_write_mode(value: Option<&str>) -> Option<String> {
-    match value.map(str::trim).filter(|v| !v.is_empty()) {
-        Some("append") => Some("append".to_string()),
-        Some("replace") => Some("replace".to_string()),
-        _ => None,
+fn resolve_openai_transport_mode(requested: Option<&str>, base_url: &str) -> &'static str {
+    let normalized = base_url.trim_end_matches('/').to_ascii_lowercase();
+    let is_official_openai = normalized == default_agent_base_url()
+        || normalized == "https://api.openai.com/v1"
+        || normalized.starts_with("https://api.openai.com/");
+
+    if !is_official_openai {
+        return "chat";
+    }
+
+    match normalize_transport_mode(requested).as_str() {
+        "chat" => "chat",
+        _ => "responses",
     }
 }
 
-fn latest_user_message(messages: &[AgentMessagePayload]) -> String {
-    messages
-        .iter()
-        .rev()
-        .find(|message| message.role.trim().eq_ignore_ascii_case("user") && !message.content.trim().is_empty())
-        .map(|message| message.content.trim().to_string())
+fn detect_provider_protocol(provider: &AgentProvider, model: &str) -> AgentProviderProtocol {
+    if let Some(protocol) = provider_protocol_from_kind(provider.provider_kind.as_str()) {
+        return protocol;
+    }
+
+    let provider_hint = format!("{} {}", provider.name, provider.base_url).to_lowercase();
+    let model_hint = model.to_lowercase();
+
+    if provider_hint.contains("anthropic")
+        || provider_hint.contains("claude")
+        || (provider_hint.is_empty() && model_hint.starts_with("claude"))
+    {
+        AgentProviderProtocol::Anthropic
+    } else if provider_hint.contains("google")
+        || provider_hint.contains("gemini")
+        || provider_hint.contains("generativelanguage")
+        || (provider_hint.is_empty() && model_hint.starts_with("gemini"))
+    {
+        AgentProviderProtocol::Gemini
+    } else {
+        AgentProviderProtocol::OpenAi
+    }
+}
+
+fn normalize_provider_base_url(protocol: AgentProviderProtocol, value: Option<&str>) -> String {
+    match protocol {
+        AgentProviderProtocol::OpenAi => normalize_base_url(value),
+        AgentProviderProtocol::Anthropic => value
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .unwrap_or("https://api.anthropic.com")
+            .to_string(),
+        AgentProviderProtocol::Gemini => value
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .unwrap_or("https://generativelanguage.googleapis.com")
+            .to_string(),
+    }
+}
+
+fn upload_root() -> PathBuf {
+    std::env::var("UPLOAD_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("uploads"))
+}
+
+fn image_media_type_from_name_or_mime(
+    content_type: Option<&str>,
+    original_name: &str,
+) -> Option<RigImageMediaType> {
+    content_type
+        .and_then(RigImageMediaType::from_mime_type)
+        .or_else(|| match original_name.rsplit('.').next().unwrap_or_default().to_ascii_lowercase().as_str() {
+            "jpg" | "jpeg" => Some(RigImageMediaType::JPEG),
+            "png" => Some(RigImageMediaType::PNG),
+            "gif" => Some(RigImageMediaType::GIF),
+            "webp" => Some(RigImageMediaType::WEBP),
+            "heic" => Some(RigImageMediaType::HEIC),
+            "heif" => Some(RigImageMediaType::HEIF),
+            "svg" => Some(RigImageMediaType::SVG),
+            _ => None,
+        })
+}
+
+fn document_media_type_from_name_or_mime(
+    content_type: Option<&str>,
+    original_name: &str,
+) -> Option<RigDocumentMediaType> {
+    content_type
+        .and_then(RigDocumentMediaType::from_mime_type)
+        .or_else(|| match original_name.rsplit('.').next().unwrap_or_default().to_ascii_lowercase().as_str() {
+            "pdf" => Some(RigDocumentMediaType::PDF),
+            "txt" => Some(RigDocumentMediaType::TXT),
+            "rtf" => Some(RigDocumentMediaType::RTF),
+            "html" | "htm" => Some(RigDocumentMediaType::HTML),
+            "css" => Some(RigDocumentMediaType::CSS),
+            "md" | "markdown" => Some(RigDocumentMediaType::MARKDOWN),
+            "csv" => Some(RigDocumentMediaType::CSV),
+            "xml" => Some(RigDocumentMediaType::XML),
+            "js" | "mjs" | "cjs" => Some(RigDocumentMediaType::Javascript),
+            "py" => Some(RigDocumentMediaType::Python),
+            _ => None,
+        })
+}
+
+async fn attachment_to_user_content(
+    db: &Database,
+    user_id: i64,
+    attachment: &AgentMessageAttachmentPayload,
+) -> Result<RigUserContent, String> {
+    let asset = sqlx::query_as::<_, UploadAsset>(
+        "SELECT * FROM uploads WHERE id = ? AND user_id = ?",
+    )
+    .bind(attachment.upload_id)
+    .bind(user_id)
+    .fetch_optional(&db.pool)
+    .await
+    .map_err(|err| format!("读取附件 {} 失败: {}", attachment.upload_id, err))?
+    .ok_or_else(|| format!("未找到附件 {}", attachment.upload_id))?;
+
+    let file_path = upload_root().join(asset.stored_path.replace('\\', "/"));
+    let bytes = fs::read(&file_path)
+        .await
+        .map_err(|err| format!("读取附件文件 {} 失败: {}", asset.original_name, err))?;
+    let content_type = asset.content_type.as_deref().or(attachment.content_type.as_deref());
+    let declared_kind = attachment
+        .kind
+        .as_deref()
+        .map(str::trim)
         .unwrap_or_default()
-}
+        .to_ascii_lowercase();
 
-fn plan_lines_from_text(plan_text: &str) -> Vec<String> {
-    plan_text
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(|line| {
-            line.trim_start_matches(|ch: char| {
-                ch.is_ascii_digit() || matches!(ch, '.' | '、' | ')' | '）' | '-' | ' ')
-            })
-            .trim()
-            .to_string()
-        })
-        .filter(|line| !line.is_empty())
-        .collect()
-}
+    if declared_kind == "image" || content_type.unwrap_or_default().starts_with("image/") {
+        let media_type = image_media_type_from_name_or_mime(content_type, &asset.original_name)
+            .ok_or_else(|| format!("附件 {} 不是受支持的图片类型", asset.original_name))?;
+        return Ok(RigUserContent::image_base64(
+            general_purpose::STANDARD.encode(bytes),
+            Some(media_type),
+            Some(RigImageDetail::default()),
+        ));
+    }
 
-fn current_plan_text(ctx: &AgentContextPayload) -> Option<String> {
-    ctx.agent_execution
-        .as_ref()
-        .and_then(|state| state.pending_plan.clone())
-        .or_else(|| {
-            ctx.last_execution
-                .as_ref()
-                .and_then(|memory| memory.plan.clone())
-        })
-        .map(|plan| plan.trim().to_string())
-        .filter(|plan| !plan.is_empty())
-}
-
-fn current_plan_progress(
-    ctx: &AgentContextPayload,
-) -> (Option<usize>, Option<usize>, Vec<String>, Option<String>) {
-    let execution = ctx.agent_execution.as_ref();
-    let memory = ctx.last_execution.as_ref();
-    let step_index = execution
-        .and_then(|state| state.plan_step_index)
-        .or_else(|| memory.and_then(|state| state.plan_step_index))
-        .and_then(|value| usize::try_from(value).ok())
-        .filter(|value| *value > 0);
-    let total_steps = execution
-        .and_then(|state| state.plan_total_steps)
-        .or_else(|| memory.and_then(|state| state.plan_total_steps))
-        .and_then(|value| usize::try_from(value).ok())
-        .filter(|value| *value > 0);
-    let completed_steps = execution
-        .and_then(|state| state.plan_completed_steps.clone())
-        .or_else(|| memory.and_then(|state| state.plan_completed_steps.clone()))
-        .unwrap_or_default();
-    let current_step = execution
-        .and_then(|state| state.plan_current_step.clone())
-        .or_else(|| memory.and_then(|state| state.plan_current_step.clone()))
-        .map(|step| step.trim().to_string())
-        .filter(|step| !step.is_empty());
-    (step_index, total_steps, completed_steps, current_step)
-}
-
-fn build_structured_steps_from_current_plan(ctx: &AgentContextPayload) -> Vec<RuntimePlanStepPayload> {
-    let Some(plan_text) = current_plan_text(ctx) else {
-        return Vec::new();
+    let media_type = match document_media_type_from_name_or_mime(content_type, &asset.original_name) {
+        Some(media_type) => media_type,
+        None => {
+            String::from_utf8(bytes.clone())
+                .map(|_| RigDocumentMediaType::TXT)
+                .map_err(|_| format!("附件 {} 不是受支持的文件类型", asset.original_name))?
+        }
     };
 
-    let (current_step_index, _, completed_steps, current_step) = current_plan_progress(ctx);
-    let parsed_steps = plan_lines_from_text(&plan_text);
-    if parsed_steps.is_empty() {
-        return Vec::new();
+    if matches!(media_type, RigDocumentMediaType::PDF) {
+        return Ok(RigUserContent::Document(RigDocument {
+            data: RigDocumentSourceKind::Base64(general_purpose::STANDARD.encode(bytes)),
+            media_type: Some(media_type),
+            additional_params: None,
+        }));
     }
 
-    parsed_steps
-        .into_iter()
-        .enumerate()
-        .map(|(index, title)| {
-            let step_number = index + 1;
-            let is_completed = completed_steps.iter().any(|step| step.trim() == title)
-                || current_step_index.map(|value| step_number < value).unwrap_or(false);
-            let is_current = current_step_index.map(|value| step_number == value).unwrap_or(false)
-                || current_step
-                    .as_deref()
-                    .map(|step| step == title)
-                    .unwrap_or(false);
-            let status = if is_completed {
-                "completed"
-            } else if is_current {
-                "in_progress"
-            } else {
-                "pending"
-            };
-
-            RuntimePlanStepPayload {
-                id: format!("step_{}", step_number),
-                title: title.clone(),
-                kind: "edit".to_string(),
-                description: title,
-                status: status.to_string(),
-                tool_hints: Vec::new(),
-                requires_confirmation: false,
-            }
-        })
-        .collect()
+    let text = String::from_utf8(bytes)
+        .map_err(|_| format!("附件 {} 需要为 UTF-8 文本编码", asset.original_name))?;
+    Ok(RigUserContent::document(text, Some(media_type)))
 }
 
-fn build_analysis_steps(mode: &str, ctx: &AgentContextPayload) -> Vec<RuntimePlanStepPayload> {
-    if mode != "plan" {
-        return Vec::new();
-    }
-
-    let explicit_steps = build_structured_steps_from_current_plan(ctx);
-    if !explicit_steps.is_empty() {
-        return explicit_steps;
-    }
-
-    let current_doc = ctx
-        .doc_name
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| format!("《{}》", value))
-        .unwrap_or_else(|| "当前文档".to_string());
-
-    let current_project = ctx
-        .project_name
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| format!("《{}》", value))
-        .unwrap_or_else(|| "当前项目".to_string());
-
-    let step_specs: Vec<(&str, &str, String, Vec<&str>, bool)> = if ctx.doc_id.is_some() {
-        vec![
-            (
-                "analyze",
-                "读取当前文档与目标片段",
-                format!("读取 {} 的最新正文，定位本次改写所需的章节或片段。", current_doc),
-                vec!["read_editor_snapshot", "read_document"],
-                false,
-            ),
-            (
-                "draft",
-                "生成正文草稿",
-                format!("根据用户要求为 {} 生成修改后的 Markdown 草稿。", current_doc),
-                vec![],
-                false,
-            ),
-            (
-                "edit",
-                "应用正文修改",
-                format!("将草稿写入 {}，完成本次正文调整。", current_doc),
-                vec![],
-                false,
-            ),
-            (
-                "edit",
-                "保存文档",
-                format!("按用户要求保存 {}。", current_doc),
-                vec!["save_current_document"],
-                false,
-            ),
-        ]
-    } else if ctx
-        .project_name
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .is_some()
-    {
-        vec![
-            (
-                "analyze",
-                "扫描现有资源",
-                format!("读取 {} 的项目结构、目录与相关文档。", current_project),
-                vec!["get_project_tree", "list_projects", "read_document"],
-                false,
-            ),
-            (
-                "outline",
-                "生成结构化方案",
-                "根据现有资源生成结构化目录、文档或处理方案。".to_string(),
-                vec![],
-                false,
-            ),
-            (
-                "draft",
-                "生成草稿产物",
-                "为目标目录、首页或文档生成可预览的 Markdown 草稿。".to_string(),
-                vec![],
-                false,
-            ),
-            (
-                "edit",
-                "执行资源变更",
-                "按确认后的方案执行创建、移动、写入和保存。".to_string(),
-                vec!["create_project", "create_tree_node", "open_tree_node", "save_current_document"],
-                true,
-            ),
-        ]
-    } else {
-        vec![
-            (
-                "analyze",
-                "定位目标资源",
-                "确认当前请求涉及的项目、目录或文档，并补全执行所需上下文。".to_string(),
-                vec!["get_current_page_state", "read_editor_snapshot", "read_document"],
-                false,
-            ),
-            (
-                "draft",
-                "生成结果草稿",
-                "生成本次请求需要的正文、结构或草稿结果。".to_string(),
-                vec![],
-                false,
-            ),
-            (
-                "edit",
-                "应用并收尾",
-                "将确认后的结果写入目标资源，并完成必要的保存或状态更新。".to_string(),
-                vec!["save_current_document"],
-                false,
-            ),
-        ]
-    };
-
-    step_specs
-        .into_iter()
-        .enumerate()
-        .map(|(index, (kind, title, description, tool_hints, requires_confirmation))| RuntimePlanStepPayload {
-            id: format!("step_{}", index + 1),
-            title: title.to_string(),
-            kind: kind.to_string(),
-            description,
-            status: "pending".to_string(),
-            tool_hints: tool_hints.into_iter().map(|item| item.to_string()).collect(),
-            requires_confirmation,
-        })
-        .collect()
-}
-
-fn analyze_task_request(
+async fn build_rig_conversation(
+    db: &Database,
+    user_id: i64,
     payload: &AgentChatStreamRequest,
-    ctx: &AgentContextPayload,
-) -> RuntimeTaskAnalysisPayload {
-    let latest_user_request = latest_user_message(&payload.messages);
-    let requested_mode = normalize_agent_mode(payload.mode.as_deref());
-    let has_tool_outputs = payload
-        .tool_outputs
-        .as_ref()
-        .map(|items| !items.is_empty())
-        .unwrap_or(false);
-    let has_pending_plan = ctx
-        .agent_execution
-        .as_ref()
-        .and_then(|state| state.pending_plan.as_ref())
-        .map(|plan| !plan.trim().is_empty())
-        .unwrap_or(false);
-    let has_plan_reply = ctx
-        .agent_execution
-        .as_ref()
-        .and_then(|state| state.pending_plan_user_reply.as_ref())
-        .map(|reply| !reply.trim().is_empty())
-        .unwrap_or(false);
-    let semantic_continuation = ctx
-        .agent_execution
-        .as_ref()
-        .and_then(|state| state.semantic_continuation)
-        .unwrap_or(false);
-    let existing_plan_steps = current_plan_progress(ctx)
-        .1
-        .or_else(|| current_plan_text(ctx).map(|plan| plan_lines_from_text(&plan).len()))
-        .unwrap_or(0);
+) -> Result<Vec<RigMessage>, String> {
+    let mut messages = Vec::new();
 
-    let mode = if has_pending_plan
-        || has_plan_reply
-        || semantic_continuation
-        || has_tool_outputs
-        || requested_mode == "auto"
-        || requested_mode == "write"
-    {
-        "plan"
-    } else {
-        "chat"
-    };
+    for message in &payload.messages {
+        let content = message.content.trim();
 
-    let complexity = if mode != "plan" {
-        "low"
-    } else if existing_plan_steps >= 4 || (ctx.project_name.is_some() && ctx.doc_id.is_some()) {
-        "high"
-    } else {
-        "medium"
-    };
-
-    let requires_tools = mode == "plan" || has_tool_outputs;
-    let requires_user_confirmation =
-        mode == "plan" && !has_pending_plan && !has_plan_reply && !semantic_continuation && !has_tool_outputs;
-    let steps = build_analysis_steps(mode, ctx);
-    let intent = ctx
-        .agent_execution
-        .as_ref()
-        .and_then(|state| state.task_kind.clone())
-        .or_else(|| {
-            ctx.last_execution
-                .as_ref()
-                .and_then(|memory| memory.task_kind.clone())
-        })
-        .unwrap_or_else(|| {
-            if mode == "plan" {
-                "execution".to_string()
-            } else {
-                "conversation".to_string()
+        match message.role.as_str() {
+            "assistant" => {
+                if !content.is_empty() {
+                    messages.push(RigMessage::assistant(content));
+                }
             }
-        });
-    RuntimeTaskAnalysisPayload {
-        intent,
-        complexity: complexity.to_string(),
-        mode: mode.to_string(),
-        requires_tools,
-        requires_user_confirmation,
-        write_scope: None,
-        preferred_write_action: None,
-        target_resources: RuntimeTargetResourcesPayload {
-            project_ids: ctx
-                .project_name
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(|_| vec!["current_project".to_string()])
-                .unwrap_or_default(),
-            folder_ids: Vec::new(),
-            doc_ids: ctx
-                .doc_id
-                .map(|doc_id| vec![doc_id.to_string()])
-                .unwrap_or_default(),
-        },
-        deliverable: if mode == "plan" && !latest_user_request.trim().is_empty() {
-            Some(latest_user_request.clone())
-        } else {
-            None
-        },
-        steps,
+            "system" | "developer" => {}
+            _ => {
+                let mut parts = Vec::new();
+                if !content.is_empty() {
+                    parts.push(RigUserContent::text(content));
+                }
+                for attachment in &message.attachments {
+                    parts.push(attachment_to_user_content(db, user_id, attachment).await?);
+                }
+                if parts.is_empty() {
+                    continue;
+                }
+                messages.push(RigMessage::User {
+                    content: RigOneOrMany::many(parts).map_err(|_| "用户消息内容不能为空".to_string())?,
+                });
+            }
+        }
     }
+
+    append_pending_tool_outputs_history(&mut messages, &payload.tool_outputs)?;
+
+    Ok(messages)
 }
 
-fn build_runtime_plan(
-    analysis: &RuntimeTaskAnalysisPayload,
-    payload: &AgentChatStreamRequest,
-) -> Option<RuntimePlanPayload> {
-    if analysis.mode != "plan" {
+fn parse_tool_arguments(raw: Option<&str>) -> Value {
+    raw.and_then(|value| serde_json::from_str::<Value>(value).ok())
+        .unwrap_or_else(|| json!({}))
+}
+
+fn detect_completed_action_block(text: &str) -> Option<CompletedActionBlock> {
+    let upper = text.to_uppercase();
+    let start = upper.find("[[ACTION:")?;
+    let open_end = upper[start..].find("]]")? + start;
+    let close_start = upper[open_end + 2..].find("[[/ACTION]]")? + open_end + 2;
+    let mode = text[start + "[[ACTION:".len()..open_end].trim().to_ascii_lowercase();
+    if mode.is_empty() {
         return None;
     }
-
-    let goal = latest_user_message(&payload.messages);
-    let now = Utc::now().to_rfc3339();
-    Some(RuntimePlanPayload {
-        id: format!("plan_{}", Uuid::new_v4().simple()),
-        goal: if goal.trim().is_empty() {
-            "执行当前任务".to_string()
-        } else {
-            goal
-        },
-        summary: Some("系统根据当前请求预估的结构化执行计划。若模型生成正式计划，以模型确认版本为准。".to_string()),
-        status: "pending".to_string(),
-        steps: analysis.steps.clone(),
-        created_at: now.clone(),
-        updated_at: now,
-    })
+    let body = text[open_end + 2..close_start].to_string();
+    Some(CompletedActionBlock { mode, body })
 }
 
-fn build_task_analysis_prompt_section(analysis: &RuntimeTaskAnalysisPayload) -> Option<String> {
-    let allowed_modes = task_analysis_modes()
-        .iter()
-        .map(|item| format!("`{}`", item))
-        .collect::<Vec<_>>()
-        .join(" / ");
-    let allowed_complexities = task_analysis_complexities()
-        .iter()
-        .map(|item| format!("`{}`", item))
-        .collect::<Vec<_>>()
-        .join(" / ");
-    let allowed_intents = task_analysis_intents()
-        .iter()
-        .map(|item| format!("`{}`", item))
-        .collect::<Vec<_>>()
-        .join(" / ");
-    let allowed_write_scopes = task_analysis_write_scopes()
-        .iter()
-        .map(|item| format!("`{}`", item))
-        .collect::<Vec<_>>()
-        .join(" / ");
-    let write_scope = analysis
-        .write_scope
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or("未指定");
-    let preferred_write_action = analysis
-        .preferred_write_action
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or("未指定");
-    let deliverable = analysis
-        .deliverable
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or("未指定");
-    let mut lines = vec![
-        format!("- intent: {}", analysis.intent),
-        format!("- complexity: {}", analysis.complexity),
-        format!("- mode: {}", analysis.mode),
-        format!("- requires_tools: {}", if analysis.requires_tools { "true" } else { "false" }),
-        format!(
-            "- requires_user_confirmation: {}",
-            if analysis.requires_user_confirmation { "true" } else { "false" }
-        ),
-        format!("- write_scope: {}", write_scope),
-        format!("- preferred_write_action: {}", preferred_write_action),
-        format!("- deliverable: {}", deliverable),
-    ];
-    if !analysis.steps.is_empty() {
-        lines.push("- suggested_step_titles:".to_string());
-        lines.extend(
-            analysis
-                .steps
-                .iter()
-                .take(8)
-                .map(|step| format!("  - {}", step.title)),
-        );
-    }
-    Some(format!(
-        "## 任务分析
-以下是系统基于显式运行时输入、页面上下文和已有机器状态生成的内部任务分析摘要。它不使用自然语言关键词猜测用户意图。任务分析字段的允许值来自共享协议：mode={}；complexity={}；intent={}；write_scope={}。你应优先遵循这里的 mode / complexity / requires_tools / requires_user_confirmation 运行约束；如果还需要更细的写入范围、编辑意图或动作类型，必须通过正式协议字段显式给出，而不是依赖自然语言猜测。`write_scope` 与 `preferred_write_action` 不由系统猜测，必须由你在执行协议里显式给出。
-{}",
-        allowed_modes,
-        allowed_complexities,
-        allowed_intents,
-        allowed_write_scopes,
-        lines.join("\n")
-    ))
-}
-
-fn build_suggested_plan_prompt_section(plan: Option<&RuntimePlanPayload>) -> Option<String> {
-    let plan = plan?;
-    let mut lines = vec![
-        format!("- goal: {}", plan.goal),
-        format!(
-            "- summary: {}",
-            plan.summary
-                .as_deref()
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or("未提供")
-        ),
-        format!("- status: {}", plan.status),
-    ];
-    if !plan.steps.is_empty() {
-        lines.push("- candidate_steps:".to_string());
-        lines.extend(
-            plan.steps
-                .iter()
-                .take(12)
-                .enumerate()
-                .map(|(index, step)| format!("  {}. {}", index + 1, step.title)),
-        );
-    }
-    Some(format!(
-        "## 建议计划对象
-以下是系统为当前请求生成的候选计划摘要。它只是内部参考骨架，不是用户可见输出模板。若你判断当前请求确实需要计划模式，应优先沿用这份计划的目标与步骤语义，再输出正式 `[[PLAN]]` 供用户确认；不要忽略已有步骤重新发散。
-{}",
-        lines.join("\n")
-    ))
-}
-
-fn extract_plan_block_text(content: &str) -> Option<String> {
-    let open_marker = "[[PLAN]]";
-    let close_marker = "[[/PLAN]]";
-    let start = content.find(open_marker)?;
-    let end = content[start + open_marker.len()..].find(close_marker)?;
-    let plan = &content[start + open_marker.len()..start + open_marker.len() + end];
-    let trimmed = plan.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
-}
-
-fn structured_plan_from_text(plan_text: &str, goal: &str) -> RuntimePlanPayload {
-    let now = Utc::now().to_rfc3339();
-    let steps: Vec<RuntimePlanStepPayload> = plan_lines_from_text(plan_text)
-        .into_iter()
-        .enumerate()
-        .map(|(index, line)| RuntimePlanStepPayload {
-            id: format!("step_{}", index + 1),
-            title: line.to_string(),
-            kind: "edit".to_string(),
-            description: line.to_string(),
-            status: "pending".to_string(),
-            tool_hints: Vec::new(),
-            requires_confirmation: false,
-        })
-        .collect();
-
-    RuntimePlanPayload {
-        id: format!("plan_{}", Uuid::new_v4().simple()),
-        goal: if goal.trim().is_empty() {
-            "执行当前任务".to_string()
-        } else {
-            goal.trim().to_string()
-        },
-        summary: Some("由模型输出并等待用户确认的正式执行计划。".to_string()),
-        status: "pending".to_string(),
-        steps,
-        created_at: now.clone(),
-        updated_at: now,
-    }
-}
-
-
-fn build_agent_execution_prompt_section(
-    execution: Option<&AgentExecutionContextPayload>,
-) -> Option<String> {
-    let execution = execution?;
-    let serialized = serde_json::to_string_pretty(execution).ok()?;
-    Some(format!(
-        "## 当前执行状态
-以下是系统维护的结构化机器状态。它描述当前这次请求正在执行到哪里、是否仍在等待确认、是否已发生正文写入，以及最近工具调用事实。它不是聊天文本，也不是让你复述给用户看的内容；当它与自然语言历史冲突时，以它为准。
-{}",
-        serialized
-    ))
-}
-
-fn build_last_execution_prompt_section(
-    memory: Option<&AgentExecutionMemoryPayload>,
-) -> Option<String> {
-    let memory = memory?;
-    let serialized = serde_json::to_string_pretty(memory).ok()?;
-    Some(format!(
-        "## 上一轮完成记录
-以下是上一轮已完成执行的结构化记录。它用于回答“你刚才做了什么”“之前执行到哪里了”“你还记得吗”这类追问。若当前 `agent_execution` 为空但这里有记录，表示本轮尚未开始，不表示之前什么都没做。
-{}",
-        serialized
-    ))
-}
-
-fn build_session_memory_prompt_section(
-    memory: Option<&AgentSessionMemoryPayload>,
-) -> Option<String> {
-    let memory = memory?;
-    let serialized = serde_json::to_string_pretty(memory).ok()?;
-    Some(format!(
-        "## 会话记忆
-以下是系统维护的当前会话结构化记忆。它用于补充长期对话中的稳定目标、最近完成事实和仍待继续的事项。它不是执行状态真值，但比自然语言旧消息更可靠；若与较早聊天内容冲突，优先依据这里和实时上下文继续工作。
-{}",
-        serialized
-    ))
-}
-
-fn build_protocol_prompt_section() -> String {
-    let write_action_pairs = write_action_modes()
-        .into_iter()
-        .zip(write_action_markers())
-        .map(|(mode, marker)| format!("`{}` -> `{}`", mode, marker))
-        .collect::<Vec<_>>()
-        .join("；");
-    let write_action_payloads = write_action_payload_formats().join("\n");
-    let control_phase_summary = control_phases()
-        .iter()
-        .map(|phase| format!("`{}`", phase))
-        .collect::<Vec<_>>()
-        .join(" / ");
-    let control_example = serde_json::to_string_pretty(&json!({
-        "phase": "completed",
-        "pending_plan": false,
-        "auto_continue": false,
-        "needs_save": false
-    }))
-    .unwrap_or_else(|_| "{\"phase\":\"completed\"}".to_string());
-    format!(
-        "## 协议
-正文动作协议：{}。
-正文动作 payload 规范：
-{}
-控制协议：`{}` + JSON + `{}`。
-控制阶段枚举：{}。
-每轮响应结尾都必须输出一个控制块；最小合法示例：
-{}",
-        write_action_pairs,
-        write_action_payloads,
-        control_open_marker(),
-        control_close_marker(),
-        control_phase_summary,
-        control_example
-    )
-}
-
-fn build_context_priority_prompt_section() -> String {
-    "## 上下文优先级
-1. `context.agent_execution` 是当前轮机器状态，优先用于判断是否等待确认、是否继续执行、是否已写正文、最近工具是否真的发生。
-2. `context.last_execution` 是上一轮已完成记录，优先用于回答“你刚才做了什么”“之前执行到哪里了”。
-3. `context.session_memory` 是当前会话的结构化记忆，用于补充稳定目标、最近完成事实和待继续事项，但不替代执行状态真值。
-4. 当前页面、项目、文档、编辑器未保存状态属于实时环境事实。
-5. 普通消息历史只作为补充语义，不作为状态真值。
-6. 若高优先级机器状态与旧 assistant 总结、计划文案或自然语言回忆冲突，以机器状态为准；不要把旧聊天中的口头承诺当成已经执行的事实。".to_string()
-}
-
-fn build_execution_rules_prompt_section() -> String {
-    let control_phase_summary = control_phases()
-        .iter()
-        .map(|phase| format!("`{}`", phase))
-        .collect::<Vec<_>>()
-        .join(" / ");
-    format!(
-        r#"## 执行规则
-1. 只有“会改变页面、项目、目录、文档或需要实际执行步骤”的执行型请求，才必须先给出完整执行计划，再等待用户确认；在用户确认之前，禁止调用任何工具、禁止写入正文、禁止保存、禁止声称已经开始执行。纯问答、解释、回忆、状态说明这类不改变状态的请求，不需要先列执行计划，应直接回答。
-2. 对执行型请求，初次响应或重新规划时，必须把计划完整包在 `[[PLAN]]` 与 `[[/PLAN]]` 之间；`[[PLAN]]` 内只写计划本身，不写额外解释。给出计划的同一轮，控制块必须使用 `phase="await_user_confirmation"` 且 `pending_plan=true`。对纯问答请求，不输出 `[[PLAN]]`。
-2.1 `任务分析`、`建议计划对象`、`当前执行状态`、`上一轮完成记录`、`会话记忆` 都是内部机器上下文，不是用户可见模板。禁止把这些内部对象原样回显给用户，尤其禁止直接输出 JSON / 对象字面量 / 字段列表来代替正式答复或正式 `[[PLAN]]`。
-2.2 用户可见的计划只能以自然语言步骤列表写在 `[[PLAN]]...[[/PLAN]]` 中；不要把 `id`、`status`、`tool_hints`、`created_at`、`updated_at` 等内部字段展示给用户，除非用户明确要求查看原始机器状态。
-3. 对同一确认点只问一次。若同时存在高风险确认与语义澄清，合并成一条确认消息一次问完；不要多轮重复追问。
-4. 只有真实执行过的工具结果或正文协议写入，才算“已完成”。不要把口头说明、计划文案或未落地的承诺说成已经做完。
-4.1 一旦用户已经确认你提出的执行计划，就视为对该计划内普通步骤的统一授权。除非出现新的高风险操作、真实冲突或关键缺失信息，否则执行过程中不得再次追问“是否继续”“需要我继续吗”“还要不要继续执行”“是否现在开始下一篇”等重复确认。
-4.2 如果用户原请求已经明确包含保存（如“最后保存”“分别保存”“逐一保存”），这本身就是保存授权；执行过程中不得在每篇文档之间再次追问是否保存，也不得在计划尚未完成时因为某篇文档暂未保存就停下来二次确认。
-5. 回答“你刚才做了什么”“你还记得吗”时，优先依据 `context.last_execution`；若其中已有工具调用、计划、正文写入记录，就不能回答成“什么都没做”。
-6. 正文只能通过 assistant 文本流里的正文协议写入；工具只负责定位、创建空节点、读取、保存、重命名、导航、校验。禁止在 `create_tree_node` 里直接塞完整正文。
-7. 正文协议只允许使用 `[[ACTION:append]]`、`[[ACTION:replace]]`、`[[ACTION:rewrite_section]]`、`[[ACTION:replace_block]]` 四种之一，并以 `[[/ACTION]]` 结束。标记内写入编辑器，标记外显示在聊天面板。
-7.0 `append` 与 `replace` 直接输出 Markdown 正文；`rewrite_section` 必须输出 `[[TARGET]]...[[/TARGET]]` 和 `[[CONTENT]]...[[/CONTENT]]`；`replace_block` 必须输出 `[[FIND]]...[[/FIND]]` 和 `[[REPLACE]]...[[/REPLACE]]`。这些内层标签都是强制字段，不能省略、不能用自然语言解释代替。
-7.1 协议闭合是强约束，不是建议。只要输出了 `[[ACTION:...]]`，就必须在同一轮输出中补上 `[[/ACTION]]`；只要输出了 `[[PLAN]]`，就必须补上 `[[/PLAN]]`；只要输出了 `[[CONTROL]]`，就必须补上 `[[/CONTROL]]`。禁止输出半截标记、禁止漏掉结束标记、禁止把结束标记省略给系统“自行理解”。
-7.2 输出前先自检一遍协议完整性：检查 `ACTION / PLAN / CONTROL` 是否成对闭合、`[[CONTROL]]` 内是否是完整合法 JSON。若你已经写出开头但还没写完结尾，不要提交这一轮，先把协议补完整再结束响应。
-7.3 若本轮无法产出完整闭合的协议块，就不要输出该协议块开头；宁可先输出普通说明，也不要留下半截 `[[ACTION:...]]` 或半截 `[[CONTROL]]`。
-8. 选择动作时按影响范围最小化原则：局部新增优先 `append`；整篇改写或大范围重排用 `replace`；按标题整节改写用 `rewrite_section`；替换指定片段用 `replace_block`。局部改写后必须删除旧内容，最终只保留一份。
-8.1 对涉及文档写入的任务，你必须在 `[[CONTROL]]` 中显式输出 `write_scope` 与 `preferred_write_action`。不要让前端或系统根据自然语言猜测写入范围。
-8.2 当 `write_scope="partial"` 时，禁止使用 `[[ACTION:replace]]`；局部编辑只能使用 `append`、`rewrite_section` 或 `replace_block`。只有 `write_scope="full"` 时才允许 `replace`。
-9. 若某个后续动作依赖正文已经产生，就先完成正文协议写入，再执行保存、校验、重命名或下一步；不要只在聊天区承诺“接下来处理”就停止。
-9.1 聊天区可见文本只描述“本轮已经完成了什么”和“紧接着将自动处理什么”，不要先输出纯预告式文案再在下一轮重复总结。同一篇文档不要先说“下面写入《X》正文”，下一轮又说“已写入《X》正文”；如果本轮实际完成写入，应直接写“已写入《X》正文。下一步处理《Y》”。若本轮尚未真正写入，就不要提前宣称正在写入。
-10. 工具调用按需、一次到位。上下文已足够时不要重复读取同一信息；若连续两次工具调用都没有新增关键信息，立即停止探测并给出当前最佳结果或一次性最小澄清。
-11. 读取当前文档时：若已知存在未保存修改或用户刚改过内容，优先 `read_editor_snapshot`；否则 `read_document`。当前文档未保存时，不要只依赖 `read_document` 做续写或替换判断。
-11.1 对于“改写/互换/补充正文”这类计划，`read_editor_snapshot` 或上下文里出现 `unsaved_changes=false`，只表示当前文档还没有新的未保存修改，或当前编辑器内容与已保存版本一致；这不代表任务已经完成，也不代表无需继续改写。你仍应基于返回的最新内容继续执行当前正文修改步骤。
-11.2 只有在本轮真实请求了 `read_editor_snapshot` 后，才允许说“等待快照返回后继续执行”；只有在收到了对应工具结果后，才允许说“已读取当前快照”“正在根据快照继续处理”。禁止口头宣称等待或已读取快照，但实际上没有发生工具调用或尚未收到结果。
-11.3 若 `read_editor_snapshot` 返回 `source="saved_document"`、`freshness="saved_fallback"`、`editor_ready=false` 或等价含义，说明这次没有拿到实时编辑器快照，只拿到了已保存正文回退版本。此时不要把它当成“最新未保存内容”；若任务依赖实时改动，应先承认当前只拿到了已保存版本，再决定是否继续读取、等待编辑器就绪或调整方案。
-12. 保存默认需要用户明确授权；除非用户明确要求保存，否则生成未保存草稿，不得擅自声称“已保存”。
-12.1 如果用户要求修改头像，而上下文或用户消息里已经提供了可直接使用的图片 URL，应直接调用 `update_profile` 并传 `avatar=<url>`；不要错误声称“当前无法调用头像更新工具”或要求用户必须手动进入个人设置页面上传。
-12.2 只有在用户没有提供可用图片 URL、也没有可复用的现有图片附件时，才说明当前缺少头像来源；此时应明确缺的是“可用图片 URL 或可用附件”，而不是否认 `update_profile` 工具存在。
-12.3 若用户要求“随便找一张图片帮我换头像”，但当前没有真实可用的图片 URL 来源，就应坦诚说明缺少可直接设置的 URL；不要把“暂时没有 URL”说成“不能更新头像”。
-13. 调用 `save_current_document` 之前，必须先确认当前文档确实存在新的未保存修改，或者本轮已经实际完成正文写入。若当前只是读取、定位、检查上下文，禁止提前保存。
-13.1 当 `save_current_document` 返回 `saved=false`、`already_saved=true`、`unsaved_changes_before_save=false` 或等价含义时，说明当前文档在调用前就是已保存状态，这次没有形成新的保存动作。不要把它说成“已保存成功”，也不要继续重复保存；应重新判断是否其实还没写入正文，或当前步骤根本还停留在读取/规划阶段。
-13.2 若已确认计划中的当前步骤是“改写/互换/补充正文”，就必须先输出正文协议完成该步骤，再决定是否保存。禁止在 `read_editor_snapshot -> save_current_document -> read_editor_snapshot` 这类只读/只存循环里空转。
-14. 每轮末尾都必须输出完整控制块 `[[CONTROL]]{{...}}[[/CONTROL]]`，且 `phase` 只能取这些值：{}。
-15. 若当前正在执行一个已确认的多步骤计划，控制块还必须同步输出真实计划进度：`plan_step_index`、`plan_total_steps`、`plan_current_step`、`plan_completed_steps`。这些字段只反映已经实际完成或当前正在执行的步骤，不能把“准备做”“打算做”写成已完成。
-16. 一致性要求：计划一旦已经得到用户确认并进入执行阶段，后续轮次必须把 `pending_plan=false`；只有真正再次停下来等待用户确认时，才能设为 `true`。
-17. `needs_save=true` 只用于“当前必须停下来等待用户决定是否保存”的场景；如果同一用户请求还有后续步骤要继续自动执行，或者用户已经明确要求最终保存，则不要因为当前文档暂时未保存就提前输出 `needs_save=true`。
-18. `phase="await_user_confirmation"` 表示等待用户确认，且 `pending_plan=true`；`phase="auto_continue"` 或 `phase="in_progress"` 表示当前请求还要继续自动推进，且 `auto_continue=true`；`phase="needs_save"` 表示正文已写入但仍需保存决策，且 `needs_save=true`；全部完成且无需继续时使用 `phase="completed"`。
-19. 不要输出 `[[CONTINUE]]`，也不要依赖自然语言让前端猜状态；前端只读取控制块。
-20. 对于已经确认并开始执行的计划，只有两种情况下允许输出 `phase="await_user_confirmation"`：出现新的高风险操作，或真实缺少继续所必需的信息。禁止仅因为中途切换到下一篇文档、某篇文档刚保存完成、或你想让用户“确认继续”就切回等待确认。
-21. 计划确认后必须严格按计划顺序推进。若当前步骤尚未真正完成，不要跳到下一步，也不要把“准备做”“打算做”写成“已完成”。
-22. 收尾时保持精简：单行动给出本次结果和必要的下一步；多行动给出已完成、未完成或受阻项，以及下一步。"#,
-        control_phase_summary
-    )
-}
-
-fn build_system_prompt(
-    _mode: &str,
-    username: &str,
-    ctx: &AgentContextPayload,
-    analysis: Option<&RuntimeTaskAnalysisPayload>,
-    suggested_plan: Option<&RuntimePlanPayload>,
-) -> String {
-    let mut parts = vec![
-        "你是 MarkFlow 内置的智能文档助手。请使用中文，回答直接、可执行、少废话。".to_string(),
-        "如果用户要求输出 Markdown 文档内容，优先输出结构清晰的 Markdown。".to_string(),
-        format!("当前登录用户：{}", username),
-        build_protocol_prompt_section(),
-        build_context_priority_prompt_section(),
-    ];
-
-    let mut runtime_context = vec!["## 当前页面上下文".to_string()];
-    if let Some(scope) = ctx.page_scope.as_deref() {
-        runtime_context.push(format!("页面作用域：{}", scope));
-    }
-    if let Some(page_state) = ctx.page_state.as_deref() {
-        runtime_context.push(format!("页面状态：{}", page_state));
-    }
-    if let Some(project_name) = ctx.project_name.as_deref() {
-        runtime_context.push(format!("当前项目：{}", project_name));
-    }
-    if let Some(doc_name) = ctx.doc_name.as_deref() {
-        runtime_context.push(format!("当前文档：{}", doc_name));
-    }
-    if let Some(doc_id) = ctx.doc_id {
-        runtime_context.push(format!("当前文档 ID：{}", doc_id));
-    }
-    if let Some(project_catalog) = ctx
-        .project_catalog
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-    {
-        runtime_context.push(format!("当前可见项目列表：{}", project_catalog));
-    }
-    if let Some(current_node_catalog) = ctx
-        .current_node_catalog
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-    {
-        runtime_context.push(format!("当前项目可见目录/文档：{}", current_node_catalog));
-    }
-    if let Some(editor_available) = ctx.editor_available {
-        runtime_context.push(format!(
-            "编辑器是否可用：{}",
-            if editor_available { "是" } else { "否" }
-        ));
-    }
-    if let Some(snapshot_source) = ctx
-        .editor_snapshot_source
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-    {
-        runtime_context.push(format!("编辑器快照来源：{}", snapshot_source));
-    }
-    if let Some(unsaved_changes) = ctx.editor_unsaved_changes {
-        runtime_context.push(format!(
-            "当前文档未保存修改：{}",
-            if unsaved_changes { "是" } else { "否" }
-        ));
-    }
-    if runtime_context.len() > 1 {
-        parts.push(runtime_context.join("\n"));
+fn append_pending_tool_outputs_history(
+    messages: &mut Vec<RigMessage>,
+    tool_outputs: &[AgentToolOutputPayload],
+) -> Result<(), String> {
+    if tool_outputs.is_empty() {
+        return Ok(());
     }
 
-    if let Some(execution_section) = build_agent_execution_prompt_section(ctx.agent_execution.as_ref()) {
-        parts.push(execution_section);
-    }
-    if let Some(last_execution_section) = build_last_execution_prompt_section(ctx.last_execution.as_ref()) {
-        parts.push(last_execution_section);
-    }
-    if let Some(session_memory_section) = build_session_memory_prompt_section(ctx.session_memory.as_ref()) {
-        parts.push(session_memory_section);
-    }
-    if let Some(task_analysis_section) = analysis.and_then(build_task_analysis_prompt_section) {
-        parts.push(task_analysis_section);
-    }
-    if let Some(suggested_plan_section) = build_suggested_plan_prompt_section(suggested_plan) {
-        parts.push(suggested_plan_section);
-    }
+    let mut assistant_items = Vec::new();
+    let mut normalized_outputs = Vec::new();
 
-    parts.push(build_execution_rules_prompt_section());
-
-    parts.join("\n\n")
-}
-
-fn build_response_input(payload: &AgentChatStreamRequest) -> Vec<InputItem> {
-    if let Some(outputs) = payload
-        .tool_outputs
-        .as_ref()
-        .filter(|items| !items.is_empty())
-    {
-        let mut items: Vec<InputItem> = payload
-            .messages
-            .iter()
-            .filter_map(|message| {
-                let content = message.content.trim();
-                if content.is_empty() {
-                    return None;
-                }
-
-                let role = match message.role.as_str() {
-                    "assistant" => Role::Assistant,
-                    "system" => Role::System,
-                    "developer" => Role::Developer,
-                    _ => Role::User,
-                };
-
-                Some(InputItem::from(EasyInputMessage {
-                    r#type: MessageType::Message,
-                    role,
-                    content: EasyInputContent::Text(content.to_string()),
-                }))
-            })
-            .collect();
-
-        for output in outputs {
-            if let (Some(name), Some(arguments)) = (
-                output
-                    .name
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty()),
-                output
-                    .arguments
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty()),
-            ) {
-                items.push(InputItem::from(Item::FunctionCall(FunctionToolCall {
-                    arguments: arguments.to_string(),
-                    call_id: output.call_id.clone(),
-                    name: name.to_string(),
-                    id: None,
-                    status: None,
-                })));
-            }
-
-            items.push(InputItem::from(Item::FunctionCallOutput(
-                FunctionCallOutputItemParam {
-                    call_id: output.call_id.clone(),
-                    output: FunctionCallOutput::Text(output.output.to_string()),
-                    id: None,
-                    status: None,
-                },
-            )));
+    for (index, output) in tool_outputs.iter().enumerate() {
+        let call_id = output.call_id.trim();
+        if call_id.is_empty() {
+            continue;
         }
 
-        return items;
+        let tool_name = output
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("unknown_tool");
+        let tool_id = format!("resume_tool_{}_{}", index, call_id);
+        let arguments = parse_tool_arguments(output.arguments.as_deref());
+
+        assistant_items.push(RigAssistantContent::tool_call_with_call_id(
+            tool_id.clone(),
+            call_id.to_string(),
+            tool_name.to_string(),
+            arguments,
+        ));
+
+        let output_text = serde_json::to_string(&output.output)
+            .map_err(|err| format!("序列化延续工具结果失败: {err}"))?;
+        normalized_outputs.push((tool_id, call_id.to_string(), output_text));
     }
 
-    payload
-        .messages
-        .iter()
-        .filter_map(|message| {
-            let content = message.content.trim();
-            if content.is_empty() {
-                return None;
+    if assistant_items.is_empty() {
+        return Ok(());
+    }
+
+    let assistant_message = RigOneOrMany::many(assistant_items)
+        .map_err(|_| "恢复工具结果历史时缺少 assistant 内容".to_string())?;
+    messages.push(RigMessage::Assistant {
+        id: None,
+        content: assistant_message,
+    });
+
+    for (tool_id, call_id, output_text) in normalized_outputs {
+        messages.push(tool_result_user_message(
+            &tool_id,
+            Some(call_id.as_str()),
+            &output_text,
+        ));
+    }
+
+    Ok(())
+}
+
+fn append_action_tool_result_history(
+    messages: &mut Vec<RigMessage>,
+    mode: &str,
+    output: Value,
+) -> Result<(), String> {
+    let tool_id = format!("action_protocol_write_{}", Uuid::new_v4().simple());
+    let arguments = json!({ "mode": mode });
+    let assistant_message = RigOneOrMany::many(vec![RigAssistantContent::tool_call_with_call_id(
+        tool_id.clone(),
+        tool_id.clone(),
+        ACTION_PROTOCOL_TOOL_NAME.to_string(),
+        arguments,
+    )])
+    .map_err(|_| "恢复 ACTION 工具结果历史时缺少 assistant 内容".to_string())?;
+    messages.push(RigMessage::Assistant {
+        id: None,
+        content: assistant_message,
+    });
+
+    let output_text = serde_json::to_string(&output)
+        .map_err(|err| format!("序列化 ACTION 工具结果失败: {err}"))?;
+    messages.push(tool_result_user_message(
+        &tool_id,
+        Some(tool_id.as_str()),
+        &output_text,
+    ));
+
+    Ok(())
+}
+
+fn build_action_protocol_tool_call(current_turns: usize, mode: &str) -> PendingFrontendToolCall {
+    let id = format!("action_protocol_write_{}", current_turns);
+    PendingFrontendToolCall {
+        id: id.clone(),
+        call_id: id,
+        name: ACTION_PROTOCOL_TOOL_NAME.to_string(),
+        arguments: json!({
+            "mode": mode,
+        }),
+    }
+}
+
+fn find_model_config(
+    provider: &AgentProvider,
+    model: &str,
+) -> Option<AgentProviderModelConfig> {
+    parse_model_configs(&provider.model_configs)
+        .remove(model.trim())
+        .and_then(normalize_model_config)
+}
+
+fn merge_json_values(base: Option<Value>, extra: Option<Value>) -> Option<Value> {
+    match (base, extra) {
+        (Some(Value::Object(mut left)), Some(Value::Object(right))) => {
+            for (key, value) in right {
+                left.insert(key, value);
             }
-
-            let role = match message.role.as_str() {
-                "assistant" => Role::Assistant,
-                "system" => Role::System,
-                "developer" => Role::Developer,
-                _ => Role::User,
-            };
-
-            Some(InputItem::from(EasyInputMessage {
-                r#type: MessageType::Message,
-                role,
-                content: EasyInputContent::Text(content.to_string()),
-            }))
-        })
-        .collect()
-}
-
-fn function_tool(name: &str, description: impl Into<String>, parameters: serde_json::Value) -> Tool {
-    FunctionTool {
-        name: name.to_string(),
-        description: Some(description.into()),
-        parameters: Some(parameters),
-        strict: Some(false),
+            Some(Value::Object(left))
+        }
+        (Some(base), Some(extra)) => Some(match (base, extra) {
+            (Value::Null, value) => value,
+            (value, Value::Null) => value,
+            (_, value) => value,
+        }),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
     }
-    .into()
 }
 
-fn agent_function_tools() -> Vec<Tool> {
+fn function_tool(
+    name: &str,
+    description: impl Into<String>,
+    parameters: serde_json::Value,
+) -> RigToolDefinition {
+    RigToolDefinition {
+        name: name.to_string(),
+        description: description.into(),
+        parameters,
+    }
+}
+
+fn agent_function_tools() -> Vec<RigToolDefinition> {
     let route_description_summary = route_descriptions().join("；");
     let route_enum_values = route_enum_values();
 
@@ -1602,6 +1302,89 @@ fn agent_function_tools() -> Vec<Tool> {
             }),
         ),
         function_tool(
+            "rewrite_document_section",
+            "按章节标题替换当前 Markdown 文档中的整节内容。适用于“重写某一节”“替换某个标题下的整段正文”“局部编辑但不想整篇 replace”这类场景。调用前应先通过 read_editor_snapshot 或 read_document 确认当前文档和目标标题；content 需要提供替换后的完整章节 Markdown，通常应包含章节标题本身。可选传入项目和文档定位参数，工具会先打开目标文档再执行替换。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "project_id": { "type": "integer", "description": "目标项目 ID。优先使用。" },
+                    "project_name": { "type": "string", "description": "目标项目名称。只有拿不到 project_id 时再使用。" },
+                    "doc_id": { "type": "integer", "description": "目标文档 ID。优先使用。" },
+                    "doc_path": { "type": "string", "description": "目标文档路径。只有拿不到 doc_id 时再使用。" },
+                    "doc_name": { "type": "string", "description": "目标文档名称。只有拿不到 doc_id 和 doc_path 时再使用。" },
+                    "target_heading": { "type": "string", "description": "要替换的章节标题，例如 ## 结论 或 结论。" },
+                    "content": { "type": "string", "description": "替换后的完整章节 Markdown，通常包含新的标题和正文。" }
+                },
+                "required": ["target_heading", "content"],
+                "additionalProperties": false,
+            }),
+        ),
+        function_tool(
+            "replace_document_block",
+            "按原文片段精确替换当前 Markdown 文档中的一段内容。适用于“把某段文字替换成新版”“互换两个相邻片段时先做精确局部替换”“需要保留其余正文不变”这类场景。调用前应先通过 read_editor_snapshot 或 read_document 读取最新正文，并确保 find 参数与原文完全匹配；否则替换不会成功。可选传入项目和文档定位参数，工具会先打开目标文档再执行替换。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "project_id": { "type": "integer", "description": "目标项目 ID。优先使用。" },
+                    "project_name": { "type": "string", "description": "目标项目名称。只有拿不到 project_id 时再使用。" },
+                    "doc_id": { "type": "integer", "description": "目标文档 ID。优先使用。" },
+                    "doc_path": { "type": "string", "description": "目标文档路径。只有拿不到 doc_id 时再使用。" },
+                    "doc_name": { "type": "string", "description": "目标文档名称。只有拿不到 doc_id 和 doc_path 时再使用。" },
+                    "find": { "type": "string", "description": "要匹配的原文片段，必须与当前文档中的真实内容完全一致。" },
+                    "replace": { "type": "string", "description": "替换后的新片段。" }
+                },
+                "required": ["find", "replace"],
+                "additionalProperties": false,
+            }),
+        ),
+        function_tool(
+            "replace_document_blocks",
+            "在一次调用中顺序执行多段精确块替换，并只对编辑器做一次最终写入。适用于“同一轮需要做多处局部替换”“多个 replace_document_block 想合并成一次操作”“一次性完成一组相关块替换”这类场景。调用前应先通过 read_editor_snapshot 或 read_document 读取最新正文；replacements 中每一项都需要提供完整匹配的 find 和对应 replace，后续项会基于前一项已经替换后的正文继续执行。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "project_id": { "type": "integer", "description": "目标项目 ID。优先使用。" },
+                    "project_name": { "type": "string", "description": "目标项目名称。只有拿不到 project_id 时再使用。" },
+                    "doc_id": { "type": "integer", "description": "目标文档 ID。优先使用。" },
+                    "doc_path": { "type": "string", "description": "目标文档路径。只有拿不到 doc_id 时再使用。" },
+                    "doc_name": { "type": "string", "description": "目标文档名称。只有拿不到 doc_id 和 doc_path 时再使用。" },
+                    "replacements": {
+                        "type": "array",
+                        "description": "按顺序执行的局部替换列表。",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "find": { "type": "string", "description": "要匹配的原文片段，必须与当前执行时的正文完全一致。" },
+                                "replace": { "type": "string", "description": "替换后的新片段。" }
+                            },
+                            "required": ["find", "replace"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["replacements"],
+                "additionalProperties": false,
+            }),
+        ),
+        function_tool(
+            "swap_document_sections",
+            "按章节标题直接互换当前 Markdown 文档中的两个整节位置。适用于“把结论和重要发现互换一下”“交换两个章节顺序”“整节对调且保留各自标题与正文”这类场景。即使两个标题位于不同的 Markdown 层级，也可以使用该工具；它会整体移动两节内容并保留原有标题层级，而不是只改写标题下的正文。调用前应先通过 read_editor_snapshot 或 read_document 确认两个章节标题真实存在。可选传入项目和文档定位参数，工具会先打开目标文档再执行互换。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "project_id": { "type": "integer", "description": "目标项目 ID。优先使用。" },
+                    "project_name": { "type": "string", "description": "目标项目名称。只有拿不到 project_id 时再使用。" },
+                    "doc_id": { "type": "integer", "description": "目标文档 ID。优先使用。" },
+                    "doc_path": { "type": "string", "description": "目标文档路径。只有拿不到 doc_id 时再使用。" },
+                    "doc_name": { "type": "string", "description": "目标文档名称。只有拿不到 doc_id 和 doc_path 时再使用。" },
+                    "first_heading": { "type": "string", "description": "第一个要互换的章节标题，例如 结论。" },
+                    "second_heading": { "type": "string", "description": "第二个要互换的章节标题，例如 重要发现与意义。" }
+                },
+                "required": ["first_heading", "second_heading"],
+                "additionalProperties": false,
+            }),
+        ),
+        function_tool(
             "save_current_document",
             "保存当前正在编辑的 Markdown 文档。适用于用户明确要求“保存”“提交修改”“应用更改”“确认保存”时调用。调用前应先确认当前文档确实存在新的未保存修改；若工具返回 `already_saved=true`、`unsaved_changes_before_save=false` 或等价含义，表示当前文档本来就是已保存状态，这次不需要执行保存，也不应把它说成“已保存成功”。可选传入项目和文档定位参数，工具会先打开目标文档再执行保存；如果编辑器尚未初始化完成会报错，不应在仅需生成草稿时调用。",
             json!({
@@ -1686,130 +1469,6 @@ fn agent_function_tools() -> Vec<Tool> {
     ]
 }
 
-fn agent_chat_completion_tools() -> Vec<ChatCompletionTools> {
-    agent_function_tools()
-        .into_iter()
-        .filter_map(|tool| match tool {
-            Tool::Function(function) => Some(ChatCompletionTools::Function(ChatCompletionTool {
-                function: FunctionObject {
-                    name: function.name,
-                    description: function.description,
-                    parameters: function.parameters,
-                    strict: function.strict,
-                },
-            })),
-            _ => None,
-        })
-        .collect()
-}
-
-fn build_chat_completion_messages(
-    payload: &AgentChatStreamRequest,
-    system_prompt: &str,
-) -> Vec<ChatCompletionRequestMessage> {
-    let mut messages =
-        vec![ChatCompletionRequestSystemMessage::from(system_prompt.to_string()).into()];
-
-    for message in &payload.messages {
-        let content = message.content.trim();
-        if content.is_empty() {
-            continue;
-        }
-
-        let next_message: ChatCompletionRequestMessage = match message.role.as_str() {
-            "assistant" => ChatCompletionRequestAssistantMessage::from(content.to_string()).into(),
-            "system" | "developer" => {
-                ChatCompletionRequestSystemMessage::from(content.to_string()).into()
-            }
-            _ => ChatCompletionRequestUserMessage::from(content.to_string()).into(),
-        };
-
-        messages.push(next_message);
-    }
-
-    if let Some(outputs) = payload
-        .tool_outputs
-        .as_ref()
-        .filter(|items| !items.is_empty())
-    {
-        let tool_calls: Vec<ChatCompletionMessageToolCalls> = outputs
-            .iter()
-            .filter_map(|output| {
-                let name = output
-                    .name
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())?;
-                let arguments = output
-                    .arguments
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())?;
-
-                Some(ChatCompletionMessageToolCalls::Function(
-                    ChatCompletionMessageToolCall {
-                        id: output.call_id.clone(),
-                        function: ChatFunctionCall {
-                            name: name.to_string(),
-                            arguments: arguments.to_string(),
-                        },
-                    },
-                ))
-            })
-            .collect();
-
-        if !tool_calls.is_empty() {
-            messages.push(
-                ChatCompletionRequestAssistantMessage {
-                    content: None,
-                    refusal: None,
-                    name: None,
-                    audio: None,
-                    tool_calls: Some(tool_calls),
-                    ..Default::default()
-                }
-                .into(),
-            );
-        }
-
-        for output in outputs {
-            messages.push(
-                ChatCompletionRequestToolMessage {
-                    content: ChatCompletionRequestToolMessageContent::Text(
-                        output.output.to_string(),
-                    ),
-                    tool_call_id: output.call_id.clone(),
-                }
-                .into(),
-            );
-        }
-    }
-
-    let needs_semantic_continuation_prompt = payload
-        .context
-        .as_ref()
-        .and_then(|ctx| ctx.agent_execution.as_ref())
-        .map(|execution| execution.semantic_continuation.unwrap_or(false))
-        .unwrap_or(false);
-    let has_tool_outputs = payload
-        .tool_outputs
-        .as_ref()
-        .map(|items| !items.is_empty())
-        .unwrap_or(false);
-
-    if needs_semantic_continuation_prompt && !has_tool_outputs {
-        messages.push(
-            ChatCompletionRequestUserMessage::from(
-                "继续执行当前同一用户请求的剩余步骤。不要重复已完成内容，直接进入下一步；若仍需自动续轮，请继续按控制协议输出。"
-                    .to_string(),
-            )
-            .into(),
-        );
-    }
-
-    messages
-}
-
 async fn send_json_event(
     tx: &mpsc::Sender<Result<Event, Infallible>>,
     name: &str,
@@ -1820,307 +1479,1055 @@ async fn send_json_event(
         .is_ok()
 }
 
-async fn stream_via_responses(
-    client: &Client<OpenAIConfig>,
-    payload: &AgentChatStreamRequest,
-    system_prompt: &str,
-    model: &str,
-    tx: &mpsc::Sender<Result<Event, Infallible>>,
-) -> Result<AgentStreamOutcome, AgentStreamError> {
-    let reasoning = ReasoningArgs::default()
-        .effort(ReasoningEffort::Medium)
-        .summary(ReasoningSummary::Detailed)
-        .build()
-        .map_err(|err| AgentStreamError::Fatal(format!("Reasoning 参数构造失败: {}", err)))?;
+fn merge_reasoning_blocks(
+    accumulated_reasoning: &mut Vec<rig::message::Reasoning>,
+    incoming: &rig::message::Reasoning,
+) {
+    let ids_match = |existing: &rig::message::Reasoning| {
+        matches!(
+            (&existing.id, &incoming.id),
+            (Some(existing_id), Some(incoming_id)) if existing_id == incoming_id
+        )
+    };
 
-    let mut request = CreateResponseArgs::default();
-    request
-        .model(model.to_string())
-        .input(InputParam::Items(build_response_input(payload)))
-        .instructions(system_prompt.to_string())
-        .reasoning(reasoning)
-        .tools(agent_function_tools())
-        .parallel_tool_calls(false)
-        .stream(true);
-    let can_reuse_previous_response = payload
-        .tool_outputs
-        .as_ref()
-        .map(|items| items.is_empty())
-        .unwrap_or(true);
-
-    if can_reuse_previous_response {
-        if let Some(previous_response_id) = payload
-            .previous_response_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            request.previous_response_id(previous_response_id.to_string());
-        }
+    if let Some(existing) = accumulated_reasoning
+        .iter_mut()
+        .rev()
+        .find(|existing| ids_match(existing))
+    {
+        existing.content.extend(incoming.content.clone());
+    } else {
+        accumulated_reasoning.push(incoming.clone());
     }
-    let request = request
-        .build()
-        .map_err(|err| AgentStreamError::Fatal(format!("Responses 请求构造失败: {}", err)))?;
-
-    let mut stream = client
-        .responses()
-        .create_stream(request)
-        .await
-        .map_err(|err| AgentStreamError::Retryable(format!("Responses 初始化失败: {}", err)))?;
-
-    let mut final_text = String::new();
-    let mut response_id = payload.previous_response_id.clone().unwrap_or_default();
-    let mut tool_calls: Vec<AgentToolCallRequest> = Vec::new();
-
-    while let Some(event) = stream.next().await {
-        match event {
-            Ok(ResponseStreamEvent::ResponseCreated(ev)) => {
-                response_id = ev.response.id;
-            }
-            Ok(ResponseStreamEvent::ResponseOutputTextDelta(ev)) => {
-                if !ev.delta.is_empty() {
-                    final_text.push_str(&ev.delta);
-                    if !send_json_event(tx, "message.delta", json!({ "content": ev.delta })).await {
-                        return Err(AgentStreamError::Fatal("客户端连接已关闭".to_string()));
-                    }
-                    if !send_json_event(tx, "assistant_text_delta", json!({ "delta": ev.delta })).await {
-                        return Err(AgentStreamError::Fatal("客户端连接已关闭".to_string()));
-                    }
-                }
-            }
-            Ok(ResponseStreamEvent::ResponseReasoningTextDelta(ev)) => {
-                if !ev.delta.is_empty() {
-                    if !send_json_event(
-                        tx,
-                        "reasoning.delta",
-                        json!({ "item_id": ev.item_id, "delta": ev.delta }),
-                    )
-                    .await
-                    {
-                        return Err(AgentStreamError::Fatal("客户端连接已关闭".to_string()));
-                    }
-                }
-            }
-            Ok(ResponseStreamEvent::ResponseReasoningSummaryTextDelta(ev)) => {
-                if !ev.delta.is_empty() {
-                    if !send_json_event(
-                        tx,
-                        "reasoning.delta",
-                        json!({ "item_id": ev.item_id, "delta": ev.delta }),
-                    )
-                    .await
-                    {
-                        return Err(AgentStreamError::Fatal("客户端连接已关闭".to_string()));
-                    }
-                }
-            }
-            Ok(ResponseStreamEvent::ResponseOutputItemDone(ev)) => {
-                if let OutputItem::FunctionCall(call) = ev.item {
-                    tool_calls.push(AgentToolCallRequest {
-                        call_id: call.call_id,
-                        name: call.name,
-                        arguments: call.arguments,
-                    });
-                }
-            }
-            Ok(ResponseStreamEvent::ResponseCompleted(ev)) => {
-                if response_id.is_empty() {
-                    response_id = ev.response.id;
-                }
-            }
-            Ok(ResponseStreamEvent::ResponseFailed(ev)) => {
-                let message = ev
-                    .response
-                    .error
-                    .as_ref()
-                    .map(|error| error.message.clone())
-                    .unwrap_or_else(|| "Responses 调用失败".to_string());
-                return if final_text.is_empty() {
-                    Err(AgentStreamError::Retryable(message))
-                } else {
-                    Err(AgentStreamError::Fatal(message))
-                };
-            }
-            Ok(ResponseStreamEvent::ResponseError(ev)) => {
-                return if final_text.is_empty() {
-                    Err(AgentStreamError::Retryable(ev.message))
-                } else {
-                    Err(AgentStreamError::Fatal(ev.message))
-                };
-            }
-            Ok(_) => {}
-            Err(err) => {
-                let message = format!("Responses 流式调用失败: {}", err);
-                return if final_text.is_empty() {
-                    Err(AgentStreamError::Retryable(message))
-                } else {
-                    Err(AgentStreamError::Fatal(message))
-                };
-            }
-        }
-    }
-
-    if !tool_calls.is_empty() {
-        if response_id.is_empty() {
-            return Err(AgentStreamError::Fatal(
-                "模型请求了工具调用，但缺少 response_id".to_string(),
-            ));
-        }
-        return Ok(AgentStreamOutcome::ToolCalls {
-            response_id,
-            text: final_text,
-            calls: tool_calls,
-        });
-    }
-
-    Ok(AgentStreamOutcome::Message {
-        text: final_text,
-        response_id: if response_id.trim().is_empty() {
-            None
-        } else {
-            Some(response_id)
-        },
-    })
 }
 
-async fn stream_via_chat_completions(
-    client: &Client<OpenAIConfig>,
-    payload: &AgentChatStreamRequest,
-    system_prompt: &str,
-    model: &str,
+fn tool_result_user_message(id: &str, call_id: Option<&str>, output: &str) -> RigMessage {
+    let content = RigToolResultContent::from_tool_output(output.to_string());
+    let user_content = match call_id.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(call_id) => RigUserContent::tool_result_with_call_id(
+            id.to_string(),
+            call_id.to_string(),
+            content,
+        ),
+        None => RigUserContent::tool_result(id.to_string(), content),
+    };
+
+    RigMessage::User {
+        content: RigOneOrMany::one(user_content),
+    }
+}
+
+fn extend_loop_visible_text(accumulated: &mut String, turn_text: &str) {
+    let visible_text = strip_completed_action_blocks(turn_text);
+    if visible_text.is_empty() {
+        return;
+    }
+
+    accumulated.push_str(&visible_text);
+}
+
+fn strip_completed_action_blocks(text: &str) -> String {
+    let mut remaining = text;
+    let mut stripped = String::new();
+
+    loop {
+        let upper = remaining.to_ascii_uppercase();
+        let Some(start) = upper.find("[[ACTION:") else {
+            stripped.push_str(remaining);
+            break;
+        };
+
+        stripped.push_str(&remaining[..start]);
+        let after_start = &remaining[start..];
+        let after_start_upper = &upper[start..];
+        let Some(close_relative) = after_start_upper.find("[[/ACTION]]") else {
+            stripped.push_str(after_start);
+            break;
+        };
+        let close_end = start + close_relative + "[[/ACTION]]".len();
+        remaining = &remaining[close_end..];
+    }
+
+    stripped
+}
+
+fn summarize_frontend_tool_output(call: &PendingFrontendToolCall, output: &Value) -> String {
+    let ok = output.get("ok").and_then(Value::as_bool);
+    let result = output.get("result").and_then(Value::as_object);
+
+    if call.name == ACTION_PROTOCOL_TOOL_NAME {
+        let doc_name = result
+            .and_then(|result| result.get("doc_name"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let wrote_document = result
+            .and_then(|result| result.get("wrote_document"))
+            .and_then(Value::as_bool)
+            == Some(true);
+        let write_completed = result
+            .and_then(|result| result.get("write_completed"))
+            .and_then(Value::as_bool)
+            == Some(true);
+
+        return match ok {
+            Some(true) if wrote_document || write_completed => doc_name
+                .map(|name| format!("已写入《{}》正文", name))
+                .unwrap_or_else(|| "已完成正文写入".to_string()),
+            Some(false) => "正文写入失败".to_string(),
+            _ => "正文写入已返回结果".to_string(),
+        };
+    }
+
+    match ok {
+        Some(true) => format!("前端工具 {} 执行完成", call.name),
+        Some(false) => format!("前端工具 {} 返回错误", call.name),
+        None => format!("前端工具 {} 已返回结果", call.name),
+    }
+}
+
+fn with_frontend_tool_summary(mut output: Value, summary: &str) -> Value {
+    if summary.trim().is_empty() {
+        return output;
+    }
+
+    if let Some(object) = output.as_object_mut() {
+        object
+            .entry("summary".to_string())
+            .or_insert_with(|| Value::String(summary.to_string()));
+    }
+
+    output
+}
+
+async fn request_frontend_tool_output(
     tx: &mpsc::Sender<Result<Event, Infallible>>,
-) -> Result<AgentStreamOutcome, AgentStreamError> {
-    let request = CreateChatCompletionRequestArgs::default()
-        .model(model.to_string())
-        .reasoning_effort(ReasoningEffort::Medium)
-        .messages(build_chat_completion_messages(payload, system_prompt))
-        .tools(agent_chat_completion_tools())
-        .parallel_tool_calls(false)
-        .stream(true)
-        .build()
-        .map_err(|err| {
-            AgentStreamError::Fatal(format!("Chat Completions 请求构造失败: {}", err))
-        })?;
-    let mut stream =
-        client.chat().create_stream(request).await.map_err(|err| {
-            AgentStreamError::Fatal(format!("Chat Completions 初始化失败: {}", err))
-        })?;
-    let mut final_text = String::new();
-    let mut response_id = String::new();
-    let mut tool_calls: std::collections::BTreeMap<u32, AgentToolCallRequest> =
-        std::collections::BTreeMap::new();
+    run_id: &str,
+    call: &PendingFrontendToolCall,
+) -> Result<Value, String> {
+    let receiver = frontend_tool_broker()
+        .register(run_id, &call.call_id)
+        .await;
 
-    while let Some(event) = stream.next().await {
-        match event {
-            Ok(chunk) => {
-                if response_id.is_empty() {
-                    response_id = chunk.id.clone();
+    if !send_json_event(
+        tx,
+        "tool.request",
+        json!({
+            "run_id": run_id,
+            "call_id": call.call_id,
+            "name": call.name,
+            "arguments": call.arguments,
+        }),
+    )
+    .await
+    {
+        return Err("前端工具请求通道已关闭".to_string());
+    }
+
+    let _ = send_json_event(
+        tx,
+        "tool_event",
+        json!({
+            "tool": call.name,
+            "status": "requested",
+            "summary": format!("正在请求前端工具 {}", call.name),
+            "call_id": call.call_id,
+            "arguments": call.arguments,
+        }),
+    )
+    .await;
+
+    let raw_output = match tokio::time::timeout(Duration::from_secs(120), receiver).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(_)) => return Err(format!("前端工具 {} 的结果通道已中断", call.name)),
+        Err(_) => return Err(format!("等待前端工具 {} 超时", call.name)),
+    };
+
+    let summary = summarize_frontend_tool_output(call, &raw_output);
+    let output = with_frontend_tool_summary(raw_output, &summary);
+    let _ = send_json_event(
+        tx,
+        "tool_event",
+        json!({
+            "tool": call.name,
+            "status": if output.get("ok").and_then(Value::as_bool) == Some(true) {
+                "completed"
+            } else {
+                "failed"
+            },
+            "summary": summary,
+            "call_id": call.call_id,
+            "arguments": call.arguments,
+            "output": output,
+        }),
+    )
+    .await;
+
+    Ok(output)
+}
+
+fn split_agent_prompt(messages: Vec<RigMessage>) -> (RigMessage, Vec<RigMessage>) {
+    if let Some((prompt, history)) = messages.split_last() {
+        match prompt {
+            RigMessage::User { .. } => (prompt.clone(), history.to_vec()),
+            _ => (RigMessage::user("继续"), messages),
+        }
+    } else {
+        (RigMessage::user("继续"), Vec::new())
+    }
+}
+
+fn non_empty_trimmed(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn summarize_recent_tool_calls(tool_calls: &[AgentExecutionToolCallSummaryPayload]) -> Vec<String> {
+    tool_calls
+        .iter()
+        .filter_map(|call| {
+            let name = non_empty_trimmed(call.name.as_deref())?;
+            let outcome = non_empty_trimmed(call.outcome.as_deref())
+                .unwrap_or_else(|| match call.ok {
+                    Some(true) => "success".to_string(),
+                    Some(false) => "error".to_string(),
+                    None => "unknown".to_string(),
+                });
+            Some(format!("{} ({})", name, outcome))
+        })
+        .take(4)
+        .collect()
+}
+
+fn summarize_tool_outputs(tool_outputs: &[AgentToolOutputPayload]) -> Vec<String> {
+    tool_outputs
+        .iter()
+        .filter_map(|tool_output| {
+            let tool_name = non_empty_trimmed(tool_output.name.as_deref())?;
+            let payload = tool_output.output.as_object()?;
+            let ok = payload.get("ok").and_then(Value::as_bool);
+            let result = payload.get("result").and_then(Value::as_object);
+            let wrote_document = result
+                .and_then(|result| result.get("wrote_document"))
+                .and_then(Value::as_bool)
+                == Some(true);
+            let write_completed = result
+                .and_then(|result| result.get("write_completed"))
+                .and_then(Value::as_bool)
+                == Some(true);
+            let saved = result
+                .and_then(|result| result.get("saved"))
+                .and_then(Value::as_bool)
+                == Some(true);
+            let already_saved = result
+                .and_then(|result| result.get("already_saved"))
+                .and_then(Value::as_bool)
+                == Some(true);
+            let outcome = match ok {
+                Some(true) if wrote_document || write_completed => "成功，已完成正文写入",
+                Some(true) if saved => "成功，已保存当前文档",
+                Some(true) if already_saved => "成功，文档本来就是已保存状态",
+                Some(true) => "成功",
+                Some(false) => "失败",
+                None => "已返回结果",
+            };
+            Some(format!("{}: {}", tool_name, outcome))
+        })
+        .take(4)
+        .collect()
+}
+
+fn build_execution_context_prompt_section(ctx: &AgentContextPayload) -> Option<String> {
+    let execution = ctx.agent_execution.as_ref()?;
+    let mut lines = Vec::new();
+
+    if let Some(mode) = non_empty_trimmed(execution.current_mode.as_deref()) {
+        lines.push(format!("当前模式: {}", mode));
+    }
+    if let Some(awaiting) = non_empty_trimmed(execution.awaiting.as_deref()) {
+        lines.push(format!("当前等待状态: {}", awaiting));
+    }
+    if let Some(summary) = non_empty_trimmed(execution.previous_assistant_summary.as_deref()) {
+        lines.push(format!("上一轮助手摘要: {}", summary));
+    }
+    if let Some(task_kind) = non_empty_trimmed(execution.task_kind.as_deref()) {
+        lines.push(format!("任务类型: {}", task_kind));
+    }
+    if let Some(edit_intent) = non_empty_trimmed(execution.edit_intent.as_deref()) {
+        lines.push(format!("编辑意图: {}", edit_intent));
+    }
+    if let Some(step) = non_empty_trimmed(execution.plan_current_step.as_deref()) {
+        match (execution.plan_step_index, execution.plan_total_steps) {
+            (Some(index), Some(total)) => {
+                lines.push(format!("当前计划步骤: 第 {}/{} 步 - {}", index, total, step));
+            }
+            _ => lines.push(format!("当前计划步骤: {}", step)),
+        }
+    }
+    if !execution.plan_completed_steps.is_empty() {
+        lines.push(format!(
+            "已完成计划步骤: {}",
+            execution.plan_completed_steps.join("；")
+        ));
+    }
+    if execution.write_completed == Some(true) || execution.document_write_observed == Some(true) {
+        lines.push("本轮之前已经完成正文写入，不要把文档写入步骤当成未执行。".to_string());
+    }
+    if execution.save_requested == Some(true) {
+        lines.push("当前仍需保存文档。".to_string());
+    }
+    let recent_tools = summarize_recent_tool_calls(&execution.recent_tool_calls);
+    if !recent_tools.is_empty() {
+        lines.push(format!("最近工具调用: {}", recent_tools.join("；")));
+    }
+
+    if lines.is_empty() {
+        None
+    } else {
+        Some(format!("## 当前执行状态\n{}", lines.join("\n")))
+    }
+}
+
+fn build_execution_memory_prompt_section(ctx: &AgentContextPayload) -> Option<String> {
+    let memory = ctx.last_execution.as_ref()?;
+    let mut lines = Vec::new();
+
+    if let Some(summary) = non_empty_trimmed(memory.assistant_summary.as_deref()) {
+        lines.push(format!("上一轮完成摘要: {}", summary));
+    }
+    if let Some(plan) = non_empty_trimmed(memory.plan.as_deref()) {
+        lines.push(format!("上一轮计划: {}", plan));
+    }
+    if let Some(step) = non_empty_trimmed(memory.plan_current_step.as_deref()) {
+        lines.push(format!("上一轮所处步骤: {}", step));
+    }
+    if !memory.plan_completed_steps.is_empty() {
+        lines.push(format!(
+            "上一轮已完成步骤: {}",
+            memory.plan_completed_steps.join("；")
+        ));
+    }
+    if memory.write_completed == Some(true) || memory.document_write_observed == Some(true) {
+        lines.push("上一轮已经确认发生正文写入。".to_string());
+    }
+    let recent_tools = summarize_recent_tool_calls(&memory.recent_tool_calls);
+    if !recent_tools.is_empty() {
+        lines.push(format!("上一轮工具结果摘要: {}", recent_tools.join("；")));
+    }
+
+    if lines.is_empty() {
+        None
+    } else {
+        Some(format!("## 上一轮执行记忆\n{}", lines.join("\n")))
+    }
+}
+
+fn build_session_memory_prompt_section(ctx: &AgentContextPayload) -> Option<String> {
+    let memory = ctx.session_memory.as_ref()?;
+    let mut lines = Vec::new();
+
+    if let Some(summary) = non_empty_trimmed(memory.summary.as_deref()) {
+        lines.push(format!("会话摘要: {}", summary));
+    }
+    if !memory.active_user_goals.is_empty() {
+        lines.push(format!(
+            "当前用户目标: {}",
+            memory.active_user_goals.join("；")
+        ));
+    }
+    if !memory.completed_facts.is_empty() {
+        lines.push(format!(
+            "已完成事实: {}",
+            memory.completed_facts.join("；")
+        ));
+    }
+    if !memory.open_loops.is_empty() {
+        lines.push(format!("尚未完成事项: {}", memory.open_loops.join("；")));
+    }
+
+    if lines.is_empty() {
+        None
+    } else {
+        Some(format!("## 会话记忆\n{}", lines.join("\n")))
+    }
+}
+
+fn build_tool_outputs_prompt_section(tool_outputs: &[AgentToolOutputPayload]) -> Option<String> {
+    let summaries = summarize_tool_outputs(tool_outputs);
+    if summaries.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "## 最近一轮工具执行回执\n{}",
+            summaries.join("\n")
+        ))
+    }
+}
+
+fn build_loop_system_prompt(
+    username: &str,
+    ctx: &AgentContextPayload,
+    tool_outputs: &[AgentToolOutputPayload],
+) -> String {
+    let mut lines = vec![
+        "你是 MarkFlow 内置的工作区智能助手。".to_string(),
+        "默认使用用户最新一条消息的语言回复；只有在用户明确要求时才切换到其他语言。".to_string(),
+        "回答要简洁、基于事实，并以推进任务为目标。".to_string(),
+        "当你需要当前工作区状态、文档内容、页面导航或执行修改时，应主动使用工具。".to_string(),
+        "先分析用户意图，判断当前任务是简单操作还是复杂操作。".to_string(),
+        "如果任务包含多个相互依赖的步骤、删除或覆盖等破坏性操作、跨项目或跨文档修改、创建加移动加写入这类组合流程，或任何理应先让用户确认的执行方案，都视为复杂操作。".to_string(),
+        "对于复杂操作，先给出简洁的执行计划，并等待用户确认；在确认之前不要执行任意修改数据的操作操作。".to_string(),
+        "对于简单操作，如果下一步明显且风险较低，你可以自行决定并直接执行。".to_string(),
+        "对于文档写作,如空白文档编写,重新编写文档,或者文档末尾追加内容，使用 ACTION 协议，而不是整篇写入工具。".to_string(),
+        "当需要向空文档写入首稿，或需要把内容追加到当前文档末尾时，一律使用 [[ACTION:append]]...[[/ACTION]]。空文档首稿也属于追加写入。".to_string(),
+        "只有在确实需要用一份新的完整正文整体替换当前整篇文档时，才使用 [[ACTION:replace]]...[[/ACTION]]。".to_string(),
+        "输出 ACTION 块时，只输出该次写入对应的动作块内容，必须正确闭合标记，并且在动作块结束前不要请求后续工具。".to_string(),
+        format!("当前登录用户: {}", username),
+        "## 页面上下文".to_string(),
+    ];
+
+    if let Some(scope) = ctx.page_scope.as_deref() {
+        lines.push(format!("页面范围: {}", scope));
+    }
+    if let Some(page_state) = ctx.page_state.as_deref() {
+        lines.push(format!("页面状态: {}", page_state));
+    }
+    if let Some(project_name) = ctx.project_name.as_deref() {
+        lines.push(format!("当前项目: {}", project_name));
+    }
+    if let Some(doc_name) = ctx.doc_name.as_deref() {
+        lines.push(format!("当前文档: {}", doc_name));
+    }
+    if let Some(doc_id) = ctx.doc_id {
+        lines.push(format!("当前文档 ID: {}", doc_id));
+    }
+    if let Some(project_catalog) = ctx
+        .project_catalog
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        lines.push(format!("当前可见项目: {}", project_catalog));
+    }
+    if let Some(current_node_catalog) = ctx
+        .current_node_catalog
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        lines.push(format!("当前可见树节点: {}", current_node_catalog));
+    }
+    if let Some(editor_available) = ctx.editor_available {
+        lines.push(format!(
+            "编辑器可用: {}",
+            if editor_available { "是" } else { "否" }
+        ));
+    }
+    if let Some(snapshot_source) = ctx
+        .editor_snapshot_source
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        lines.push(format!("编辑器快照来源: {}", snapshot_source));
+    }
+    if let Some(unsaved_changes) = ctx.editor_unsaved_changes {
+        lines.push(format!(
+            "编辑器存在未保存修改: {}",
+            if unsaved_changes { "是" } else { "否" }
+        ));
+    }
+
+    if let Some(section) = build_execution_context_prompt_section(ctx) {
+        lines.push(section);
+    }
+    if let Some(section) = build_execution_memory_prompt_section(ctx) {
+        lines.push(section);
+    }
+    if let Some(section) = build_session_memory_prompt_section(ctx) {
+        lines.push(section);
+    }
+    if let Some(section) = build_tool_outputs_prompt_section(tool_outputs) {
+        lines.push(section);
+    }
+
+    lines.join("\n")
+}
+
+fn build_manual_rig_request<M: RigCompletionModel>(
+    model: &M,
+    prompt: RigMessage,
+    history: Vec<RigMessage>,
+    system_prompt: &str,
+    tools: Vec<RigToolDefinition>,
+    model_config: Option<&AgentProviderModelConfig>,
+    additional_params: Option<Value>,
+) -> RigCompletionRequest {
+    let tools_enabled = model_config
+        .and_then(|config| config.tools_enabled)
+        .unwrap_or(true);
+
+    let mut builder = model
+        .completion_request(prompt)
+        .preamble(system_prompt.to_string())
+        .messages(history)
+        .temperature_opt(model_config.and_then(|config| config.temperature))
+        .max_tokens_opt(model_config.and_then(|config| config.max_output_tokens))
+        .tools(if tools_enabled { tools } else { Vec::new() });
+
+    if !tools_enabled {
+        builder = builder.tool_choice(RigToolChoice::None);
+    }
+
+    if let Some(params) = additional_params {
+        builder = builder.additional_params(params);
+    }
+
+    builder.build()
+}
+
+async fn stream_rig_agent_loop<M>(
+    model_handle: M,
+    conversation: Vec<RigMessage>,
+    ctx: &AgentContextPayload,
+    tool_outputs: &[AgentToolOutputPayload],
+    username: &str,
+    model_name: &str,
+    tx: &mpsc::Sender<Result<Event, Infallible>>,
+    model_config: Option<&AgentProviderModelConfig>,
+    additional_params: Option<Value>,
+) -> Result<(), String>
+where
+    M: RigCompletionModel + 'static,
+    M::StreamingResponse: Clone + Unpin + rig::completion::GetTokenUsage,
+{
+    const MAX_AGENT_TURNS: usize = 64;
+
+    let run_id = format!("run_{}", Uuid::new_v4().simple());
+    let system_prompt = build_loop_system_prompt(username, ctx, tool_outputs);
+    let tools = agent_function_tools();
+    let (mut current_prompt, mut chat_history) = split_agent_prompt(conversation);
+    let mut current_turns = 0usize;
+    let mut accumulated_text_response = String::new();
+
+    let _ = send_json_event(
+        tx,
+        "message.started",
+        json!({
+            "model": model_name,
+            "run_id": run_id,
+        }),
+    )
+    .await;
+
+    loop {
+        if current_turns > MAX_AGENT_TURNS + 1 {
+            frontend_tool_broker().cancel_run(&run_id).await;
+            return Err(format!("Agent 超过最大轮次限制（{}）", MAX_AGENT_TURNS));
+        }
+
+        current_turns += 1;
+
+        let request = build_manual_rig_request(
+            &model_handle,
+            current_prompt.clone(),
+            chat_history.clone(),
+            &system_prompt,
+            tools.clone(),
+            model_config,
+            additional_params.clone(),
+        );
+        let mut stream = model_handle
+            .stream(request)
+            .await
+            .map_err(|err| format!("初始化模型流失败: {err}"))?;
+
+        chat_history.push(current_prompt.clone());
+
+        let mut turn_tool_calls: Vec<PendingFrontendToolCall> = Vec::new();
+        let mut turn_tool_results: Vec<(String, Option<String>, String)> = Vec::new();
+        let mut accumulated_reasoning: Vec<rig::message::Reasoning> = Vec::new();
+        let mut pending_reasoning_delta_text = String::new();
+        let mut pending_reasoning_delta_id: Option<String> = None;
+        let mut last_text_response = String::new();
+        let mut saw_tool_call_this_turn = false;
+
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(StreamedAssistantContent::Text(text)) => {
+                    last_text_response.push_str(&text.text);
+                    if !send_json_event(tx, "message.delta", json!({ "content": text.text })).await {
+                        break;
+                    }
                 }
-                for choice in chunk.choices {
-                    if let Some(content) = choice.delta.content {
-                        if !content.is_empty() {
-                            final_text.push_str(&content);
-                            if !send_json_event(tx, "message.delta", json!({ "content": content }))
-                                .await
-                            {
-                                return Err(AgentStreamError::Fatal(
-                                    "客户端连接已关闭".to_string(),
-                                ));
-                            }
-                            if !send_json_event(tx, "assistant_text_delta", json!({ "delta": content }))
-                                .await
-                            {
-                                return Err(AgentStreamError::Fatal(
-                                    "客户端连接已关闭".to_string(),
-                                ));
-                            }
-                        }
+                Ok(StreamedAssistantContent::ReasoningDelta { reasoning, id }) => {
+                    pending_reasoning_delta_text.push_str(&reasoning);
+                    if pending_reasoning_delta_id.is_none() {
+                        pending_reasoning_delta_id = id.clone();
                     }
-
-                    if let Some(refusal) = choice.delta.refusal {
-                        if !refusal.is_empty() {
-                            final_text.push_str(&refusal);
-                            if !send_json_event(tx, "message.delta", json!({ "content": refusal }))
-                                .await
-                            {
-                                return Err(AgentStreamError::Fatal(
-                                    "客户端连接已关闭".to_string(),
-                                ));
-                            }
-                            if !send_json_event(tx, "assistant_text_delta", json!({ "delta": refusal }))
-                                .await
-                            {
-                                return Err(AgentStreamError::Fatal(
-                                    "客户端连接已关闭".to_string(),
-                                ));
-                            }
-                        }
-                    }
-
-                    if let Some(delta_tool_calls) = choice.delta.tool_calls {
-                        for tool_call in delta_tool_calls {
-                            let entry = tool_calls.entry(tool_call.index).or_insert_with(|| {
-                                AgentToolCallRequest {
-                                    call_id: String::new(),
-                                    name: String::new(),
-                                    arguments: String::new(),
-                                }
-                            });
-
-                            if let Some(id) = tool_call.id {
-                                entry.call_id = id;
-                            }
-
-                            if let Some(function) = tool_call.function {
-                                if let Some(name) = function.name {
-                                    entry.name.push_str(&name);
-                                }
-                                if let Some(arguments) = function.arguments {
-                                    entry.arguments.push_str(&arguments);
-                                }
-                            }
-                        }
-                    }
-
-                    if matches!(
-                        choice.finish_reason,
-                        Some(FinishReason::ToolCalls | FinishReason::FunctionCall)
-                    ) {
-                        let calls: Vec<AgentToolCallRequest> = tool_calls
-                            .values()
-                            .filter(|call| {
-                                !call.call_id.trim().is_empty() && !call.name.trim().is_empty()
-                            })
-                            .cloned()
-                            .collect();
-
-                        if !calls.is_empty() {
-                            return Ok(AgentStreamOutcome::ToolCalls {
-                                response_id: if response_id.trim().is_empty() {
-                                    model.to_string()
-                                } else {
-                                    response_id
-                                },
-                                text: final_text,
-                                calls,
-                            });
-                        }
-                    }
+                    let _ = send_json_event(tx, "reasoning.delta", json!({ "delta": reasoning })).await;
+                }
+                Ok(StreamedAssistantContent::Reasoning(reasoning)) => {
+                    merge_reasoning_blocks(&mut accumulated_reasoning, &reasoning);
+                    let _ = send_json_event(
+                        tx,
+                        "reasoning.delta",
+                        json!({ "delta": reasoning.display_text() }),
+                    )
+                    .await;
+                }
+                Ok(StreamedAssistantContent::ToolCall { tool_call, .. }) => {
+                    let call_id = tool_call
+                        .call_id
+                        .clone()
+                        .filter(|value| !value.trim().is_empty())
+                        .unwrap_or_else(|| tool_call.id.clone());
+                    let arguments = tool_call.function.arguments.clone();
+                    let _ = send_json_event(
+                        tx,
+                        "tool.call.delta",
+                        json!({
+                            "call_id": call_id,
+                            "name": tool_call.function.name,
+                            "arguments": arguments.to_string(),
+                        }),
+                    )
+                    .await;
+                    turn_tool_calls.push(PendingFrontendToolCall {
+                        id: tool_call.id.clone(),
+                        call_id: call_id.clone(),
+                        name: tool_call.function.name.clone(),
+                        arguments: arguments.clone(),
+                    });
+                    let output = match request_frontend_tool_output(
+                        tx,
+                        &run_id,
+                        &PendingFrontendToolCall {
+                            id: tool_call.id.clone(),
+                            call_id: call_id.clone(),
+                            name: tool_call.function.name.clone(),
+                            arguments: arguments.clone(),
+                        },
+                    )
+                    .await
+                    {
+                        Ok(output) => output,
+                        Err(error) => json!({
+                            "ok": false,
+                            "tool": tool_call.function.name,
+                            "error": error,
+                        }),
+                    };
+                    let output_text = serde_json::to_string(&output)
+                        .map_err(|err| format!("序列化工具结果失败: {err}"))?;
+                    turn_tool_results.push((tool_call.id, Some(call_id), output_text));
+                    saw_tool_call_this_turn = true;
+                }
+                Ok(StreamedAssistantContent::ToolCallDelta { .. }) | Ok(StreamedAssistantContent::Final(_)) => {}
+                Err(err) => {
+                    frontend_tool_broker().cancel_run(&run_id).await;
+                    return Err(format!("Agent 执行失败: {err}"));
                 }
             }
-            Err(err) => {
-                return Err(AgentStreamError::Fatal(format!(
-                    "Chat Completions 流式调用失败: {}",
-                    err
-                )));
+        }
+
+        let response_id = stream
+            .message_id
+            .clone()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+
+        if accumulated_reasoning.is_empty() && !pending_reasoning_delta_text.is_empty() {
+            let mut assembled = rig::message::Reasoning::new(&pending_reasoning_delta_text);
+            if let Some(id) = pending_reasoning_delta_id.take() {
+                assembled = assembled.with_id(id);
+            }
+            accumulated_reasoning.push(assembled);
+        }
+
+        let completed_action = detect_completed_action_block(&last_text_response);
+
+        let mut assistant_items: Vec<RigAssistantContent> = accumulated_reasoning
+            .into_iter()
+            .map(RigAssistantContent::Reasoning)
+            .collect();
+        if saw_tool_call_this_turn && !last_text_response.is_empty() {
+            assistant_items.push(RigAssistantContent::text(last_text_response.clone()));
+        }
+        assistant_items.extend(turn_tool_calls.iter().map(|call| {
+            RigAssistantContent::tool_call_with_call_id(
+                call.id.clone(),
+                call.call_id.clone(),
+                call.name.clone(),
+                call.arguments.clone(),
+            )
+        }));
+
+        if !assistant_items.is_empty() {
+            let assistant_message = RigOneOrMany::many(assistant_items)
+                .map_err(|_| "工具轮次缺少 assistant 内容".to_string())?;
+            chat_history.push(RigMessage::Assistant {
+                id: response_id.clone(),
+                content: assistant_message,
+            });
+        }
+
+        extend_loop_visible_text(&mut accumulated_text_response, &last_text_response);
+
+        if let Some(action) = completed_action.as_ref() {
+            if !saw_tool_call_this_turn && !last_text_response.is_empty() {
+                chat_history.push(RigMessage::assistant(last_text_response.clone()));
+            }
+            let synthetic_call =
+                build_action_protocol_tool_call(current_turns, action.mode.as_str());
+            let output = request_frontend_tool_output(tx, &run_id, &synthetic_call)
+                .await
+                .unwrap_or_else(|error| {
+                    json!({
+                        "ok": false,
+                        "tool": ACTION_PROTOCOL_TOOL_NAME,
+                        "error": error,
+                    })
+                });
+            append_action_tool_result_history(
+                &mut chat_history,
+                synthetic_call
+                    .arguments
+                    .get("mode")
+                    .and_then(Value::as_str)
+                    .unwrap_or("append"),
+                output,
+            )?;
+
+            if !saw_tool_call_this_turn {
+                current_prompt = chat_history
+                    .pop()
+                    .ok_or_else(|| "ACTION 工具结果后缺少后续 prompt".to_string())?;
+                continue;
+            }
+        }
+
+        if !saw_tool_call_this_turn {
+            if completed_action.is_some() {
+                current_prompt = chat_history
+                    .pop()
+                    .ok_or_else(|| "ACTION 工具结果后缺少后续 prompt".to_string())?;
+                continue;
+            }
+
+            current_prompt = chat_history
+                .pop()
+                .ok_or_else(|| "工具执行后缺少后续 prompt".to_string())?;
+            chat_history.push(current_prompt.clone());
+            if !last_text_response.is_empty() {
+                chat_history.push(RigMessage::assistant(last_text_response.clone()));
+            }
+
+            let _ = send_json_event(
+                tx,
+                "message.completed",
+                json!({
+                    "content": accumulated_text_response,
+                    "run_id": run_id,
+                    "response_id": response_id,
+                }),
+            )
+            .await;
+            let _ = send_json_event(tx, "done", json!({})).await;
+            frontend_tool_broker().cancel_run(&run_id).await;
+            return Ok(());
+        }
+
+        for (id, call_id, output_text) in turn_tool_results {
+            chat_history.push(tool_result_user_message(&id, call_id.as_deref(), &output_text));
+        }
+
+        current_prompt = chat_history
+            .pop()
+            .ok_or_else(|| "工具执行后缺少后续 prompt".to_string())?;
+    }
+}
+
+fn build_openai_additional_params(
+    payload: &AgentChatStreamRequest,
+    model_config: Option<&AgentProviderModelConfig>,
+    use_responses_api: bool,
+) -> Option<Value> {
+    let mut params = serde_json::Map::new();
+
+    if let Some(config) = model_config {
+        if let Some(top_p) = config.top_p {
+            params.insert("top_p".to_string(), json!(top_p));
+        }
+        if let Some(presence_penalty) = config.presence_penalty {
+            params.insert("presence_penalty".to_string(), json!(presence_penalty));
+        }
+        if let Some(frequency_penalty) = config.frequency_penalty {
+            params.insert("frequency_penalty".to_string(), json!(frequency_penalty));
+        }
+        if !config.stop_sequences.is_empty() {
+            params.insert("stop".to_string(), json!(config.stop_sequences));
+        }
+        if use_responses_api {
+            if let Some(parallel_tool_calls) = config.parallel_tool_calls {
+                params.insert(
+                    "parallel_tool_calls".to_string(),
+                    json!(parallel_tool_calls),
+                );
             }
         }
     }
 
-    Ok(AgentStreamOutcome::Message {
-        text: final_text,
-        response_id: None,
-    })
+    if let Some(previous_response_id) = payload
+        .previous_response_id
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        if use_responses_api {
+            params.insert(
+                "previous_response_id".to_string(),
+                Value::String(previous_response_id.to_string()),
+            );
+        }
+    }
+
+    let thinking = model_config.and_then(|config| config.thinking);
+    if use_responses_api {
+        match thinking {
+            Some(true) => {
+                params.insert(
+                    "reasoning".to_string(),
+                    json!({
+                        "effort": model_config
+                            .and_then(|config| config.reasoning_effort.as_deref())
+                            .unwrap_or("medium"),
+                        "summary": "detailed"
+                    }),
+                );
+            }
+            Some(false) => {}
+            None => {
+                params.insert(
+                    "reasoning".to_string(),
+                    json!({
+                        "effort": "medium",
+                        "summary": "detailed"
+                    }),
+                );
+            }
+        }
+    }
+
+    merge_json_values(
+        if params.is_empty() {
+            None
+        } else {
+            Some(Value::Object(params))
+        },
+        model_config.and_then(|config| config.additional_params.clone()),
+    )
+}
+
+fn build_anthropic_additional_params(
+    model_config: Option<&AgentProviderModelConfig>,
+) -> Option<Value> {
+    let Some(config) = model_config else {
+        return None;
+    };
+
+    let mut params = serde_json::Map::new();
+    if let Some(top_p) = config.top_p {
+        params.insert("top_p".to_string(), json!(top_p));
+    }
+    if let Some(top_k) = config.top_k {
+        params.insert("top_k".to_string(), json!(top_k));
+    }
+    if !config.stop_sequences.is_empty() {
+        params.insert("stop_sequences".to_string(), json!(config.stop_sequences));
+    }
+
+    merge_json_values(
+        if params.is_empty() {
+            None
+        } else {
+            Some(Value::Object(params))
+        },
+        config.additional_params.clone(),
+    )
+}
+
+fn build_gemini_additional_params(
+    model_config: Option<&AgentProviderModelConfig>,
+) -> Option<Value> {
+    let Some(config) = model_config else {
+        return None;
+    };
+
+    let mut generation_config = serde_json::Map::new();
+    if let Some(top_p) = config.top_p {
+        generation_config.insert("topP".to_string(), json!(top_p));
+    }
+    if let Some(top_k) = config.top_k {
+        generation_config.insert("topK".to_string(), json!(top_k));
+    }
+    if let Some(presence_penalty) = config.presence_penalty {
+        generation_config.insert("presencePenalty".to_string(), json!(presence_penalty));
+    }
+    if let Some(frequency_penalty) = config.frequency_penalty {
+        generation_config.insert("frequencyPenalty".to_string(), json!(frequency_penalty));
+    }
+    if !config.stop_sequences.is_empty() {
+        generation_config.insert("stopSequences".to_string(), json!(config.stop_sequences));
+    }
+    if let Some(response_mime_type) = config
+        .response_mime_type
+        .as_ref()
+        .map(|item| item.trim())
+        .filter(|item| !item.is_empty())
+    {
+        generation_config.insert(
+            "responseMimeType".to_string(),
+            json!(response_mime_type),
+        );
+    }
+    if matches!(config.thinking, Some(true)) {
+        generation_config.insert(
+            "thinkingConfig".to_string(),
+            json!({
+                "thinkingBudget": 2048,
+                "includeThoughts": true
+            }),
+        );
+    }
+
+    merge_json_values(
+        if generation_config.is_empty() {
+            None
+        } else {
+            Some(json!({ "generationConfig": generation_config }))
+        },
+        config.additional_params.clone(),
+    )
+}
+
+fn join_api_path(base_url: &str, path: &str) -> String {
+    format!(
+        "{}/{}",
+        base_url.trim_end_matches('/'),
+        path.trim_start_matches('/')
+    )
+}
+
+fn models_endpoint(protocol: AgentProviderProtocol, base_url: &str) -> String {
+    match protocol {
+        AgentProviderProtocol::OpenAi => join_api_path(base_url, "models"),
+        AgentProviderProtocol::Anthropic => {
+            if base_url.trim_end_matches('/').ends_with("/v1") {
+                join_api_path(base_url, "models")
+            } else {
+                join_api_path(base_url, "v1/models")
+            }
+        }
+        AgentProviderProtocol::Gemini => {
+            if base_url.contains("/v1beta") || base_url.contains("/v1/") || base_url.ends_with("/v1") {
+                join_api_path(base_url, "models")
+            } else {
+                join_api_path(base_url, "v1beta/models")
+            }
+        }
+    }
+}
+
+async fn fetch_models_via_http(
+    protocol: AgentProviderProtocol,
+    base_url: &str,
+    api_key: &str,
+) -> Result<Vec<AgentModelSummary>, anyhow::Error> {
+    let client = HttpClient::new();
+    let url = models_endpoint(protocol, base_url);
+    let mut request = client.get(url.clone());
+
+    request = match protocol {
+        AgentProviderProtocol::OpenAi => request.bearer_auth(api_key),
+        AgentProviderProtocol::Anthropic => request
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01"),
+        AgentProviderProtocol::Gemini => client.get(format!("{url}?key={api_key}")),
+    };
+
+    let value = request
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Value>()
+        .await?;
+
+    let models = match protocol {
+        AgentProviderProtocol::OpenAi => value
+            .get("data")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|item| AgentModelSummary {
+                id: item
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                owned_by: item
+                    .get("owned_by")
+                    .and_then(Value::as_str)
+                    .unwrap_or("openai")
+                    .to_string(),
+                created: item
+                    .get("created")
+                    .and_then(Value::as_u64)
+                    .unwrap_or_default() as u32,
+            })
+            .collect::<Vec<_>>(),
+        AgentProviderProtocol::Anthropic => value
+            .get("data")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|item| AgentModelSummary {
+                id: item
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                owned_by: "anthropic".to_string(),
+                created: 0,
+            })
+            .collect::<Vec<_>>(),
+        AgentProviderProtocol::Gemini => value
+            .get("models")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|item| {
+                let raw_name = item
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .trim_start_matches("models/")
+                    .to_string();
+                AgentModelSummary {
+                    id: raw_name,
+                    owned_by: "google".to_string(),
+                    created: 0,
+                }
+            })
+            .collect::<Vec<_>>(),
+    };
+
+    Ok(models
+        .into_iter()
+        .filter(|model| !model.id.trim().is_empty())
+        .collect())
 }
 
 pub async fn list_providers(
@@ -2155,7 +2562,9 @@ pub async fn save_provider(
             .into_response());
     }
 
-    let base_url = normalize_base_url(payload.base_url.as_deref());
+    let provider_kind = normalize_provider_kind(payload.provider_kind.as_deref());
+    let protocol = provider_protocol_from_kind(&provider_kind).unwrap_or(AgentProviderProtocol::OpenAi);
+    let base_url = normalize_provider_base_url(protocol, payload.base_url.as_deref());
     let remote_models = unique_strings(payload.remote_models.unwrap_or_default());
     let custom_models = unique_strings(payload.custom_models.unwrap_or_default());
     let enabled_models = unique_strings(
@@ -2166,6 +2575,7 @@ pub async fn save_provider(
             .filter(|model| remote_models.contains(model) || custom_models.contains(model))
             .collect(),
     );
+    let model_configs = payload.model_configs.unwrap_or_default();
 
     let existing_active = list_user_providers(&db, user.id)
         .await?
@@ -2190,15 +2600,17 @@ pub async fn save_provider(
 
         sqlx::query(
             "UPDATE agent_providers
-             SET name = ?, base_url = ?, api_key_ciphertext = ?, remote_models = ?, enabled_models = ?, custom_models = ?, updated_at = datetime('now')
+             SET name = ?, provider_kind = ?, base_url = ?, api_key_ciphertext = ?, remote_models = ?, enabled_models = ?, custom_models = ?, model_configs = ?, updated_at = datetime('now')
              WHERE id = ? AND user_id = ?",
         )
         .bind(name)
+        .bind(&provider_kind)
         .bind(&base_url)
         .bind(api_key_ciphertext)
         .bind(serialize_json_string_array(&remote_models))
         .bind(serialize_json_string_array(&enabled_models))
         .bind(serialize_json_string_array(&custom_models))
+        .bind(serialize_model_configs(&model_configs))
         .bind(provider_id)
         .bind(user.id)
         .execute(&db.pool)
@@ -2231,16 +2643,18 @@ pub async fn save_provider(
         })?;
 
         sqlx::query(
-            "INSERT INTO agent_providers (user_id, name, base_url, api_key_ciphertext, remote_models, enabled_models, custom_models, is_active)
-             VALUES (?, ?, ?, ?, ?, ?, ?, 0)",
+            "INSERT INTO agent_providers (user_id, name, provider_kind, base_url, api_key_ciphertext, remote_models, enabled_models, custom_models, model_configs, is_active)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
         )
         .bind(user.id)
         .bind(name)
+        .bind(&provider_kind)
         .bind(&base_url)
         .bind(api_key_ciphertext)
         .bind(serialize_json_string_array(&remote_models))
         .bind(serialize_json_string_array(&enabled_models))
         .bind(serialize_json_string_array(&custom_models))
+        .bind(serialize_model_configs(&model_configs))
         .execute(&db.pool)
         .await
         .map_err(|err| {
@@ -2287,11 +2701,13 @@ pub async fn get_provider(
     Ok(Json(AgentProviderDetailResponse {
         id: provider.id,
         name: provider.name,
+        provider_kind: normalize_provider_kind(Some(&provider.provider_kind)),
         base_url: provider.base_url,
         api_key,
         remote_models: parse_json_string_array(&provider.remote_models),
         enabled_models: parse_json_string_array(&provider.enabled_models),
         custom_models: parse_json_string_array(&provider.custom_models),
+        model_configs: parse_model_configs(&provider.model_configs),
         is_active: provider.is_active == 1,
     }))
 }
@@ -2371,29 +2787,18 @@ pub async fn list_models(
         )
             .into_response()
     })?;
+    let protocol = detect_provider_protocol(&provider, "");
+    let base_url = normalize_provider_base_url(protocol, Some(&provider.base_url));
 
-    let config = OpenAIConfig::new()
-        .with_api_key(api_key)
-        .with_api_base(normalize_base_url(Some(&provider.base_url)));
-    let client = Client::with_config(config);
-
-    let response = client.models().list().await.map_err(|err| {
+    let mut models = fetch_models_via_http(protocol, &base_url, &api_key)
+        .await
+        .map_err(|err| {
         (
             StatusCode::BAD_GATEWAY,
             Json(json!({"error": format!("获取模型列表失败: {}", err)})),
         )
             .into_response()
     })?;
-
-    let mut models: Vec<AgentModelSummary> = response
-        .data
-        .into_iter()
-        .map(|model| AgentModelSummary {
-            id: model.id,
-            owned_by: model.owned_by,
-            created: model.created,
-        })
-        .collect();
     models.sort_by(|a, b| a.id.cmp(&b.id));
 
     Ok(Json(json!({ "models": models })))
@@ -2415,16 +2820,11 @@ pub async fn chat_stream(
     let has_messages = payload
         .messages
         .iter()
-        .any(|message| !message.content.trim().is_empty());
-    let has_tool_outputs = payload
-        .tool_outputs
-        .as_ref()
-        .map(|items| !items.is_empty())
-        .unwrap_or(false);
-    if !has_messages && !has_tool_outputs {
+        .any(|message| !message.content.trim().is_empty() || !message.attachments.is_empty());
+    if !has_messages {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(json!({"error": "消息或工具输出不能为空"})),
+            Json(json!({"error": "消息不能为空"})),
         )
             .into_response());
     }
@@ -2438,187 +2838,141 @@ pub async fn chat_stream(
         )
             .into_response()
     })?;
-    let config = OpenAIConfig::new()
-        .with_api_key(api_key)
-        .with_api_base(normalize_base_url(Some(&provider.base_url)));
-    let client = Client::with_config(config);
 
     let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(256);
     let model = payload.provider.model.clone();
-    let mode = normalize_agent_mode(payload.mode.as_deref());
-    let transport_mode = normalize_transport_mode(payload.transport_mode.as_deref());
-    let write_mode = normalize_write_mode(payload.write_mode.as_deref());
+    let protocol = detect_provider_protocol(&provider, &model);
+    let base_url = normalize_provider_base_url(protocol, Some(&provider.base_url));
+    let model_config = find_model_config(&provider, &model);
     let username = user.username.clone();
-    let task_analysis = analyze_task_request(&payload, &ctx);
-    let suggested_plan = build_runtime_plan(&task_analysis, &payload);
-    let latest_request = latest_user_message(&payload.messages);
-    let responses_prompt = build_system_prompt(&mode, &username, &ctx, Some(&task_analysis), suggested_plan.as_ref());
-    let fallback_prompt = build_system_prompt(&mode, &username, &ctx, Some(&task_analysis), suggested_plan.as_ref());
+    let user_id = user.id;
+    let db = db.clone();
 
     tokio::spawn(async move {
-        let _ = send_json_event(
-            &tx,
-            "message.started",
-            json!({
-                "model": model,
-                "mode": mode,
-                "transport_mode": transport_mode,
-                "write_mode": write_mode,
-                "user": username,
-            }),
-        )
-        .await;
-        let _ = send_json_event(&tx, "task_analysis", serde_json::to_value(&task_analysis).unwrap_or_else(|_| json!({}))).await;
-        let outcome = match transport_mode.as_str() {
-            "chat" => {
+        let conversation = match build_rig_conversation(&db, user_id, &payload).await {
+            Ok(conversation) => conversation,
+            Err(message) => {
                 let _ = send_json_event(
                     &tx,
-                    "agent.transport",
-                    json!({
-                        "mode": "chat",
-                        "tools_available": true,
-                        "requested_mode": transport_mode,
-                    }),
+                    "error_event",
+                    json!({ "scope": "attachments", "message": message.clone() }),
                 )
                 .await;
-                stream_via_chat_completions(&client, &payload, &fallback_prompt, &model, &tx)
-                    .await
-                    .map_err(|chat_error| match chat_error {
-                        AgentStreamError::Retryable(chat_message) | AgentStreamError::Fatal(chat_message) => chat_message,
-                    })
+                let _ = send_json_event(&tx, "error", json!({ "error": message })).await;
+                return;
             }
-            "responses" => match stream_via_responses(&client, &payload, &responses_prompt, &model, &tx)
-                .await
-            {
-                Ok(outcome) => {
-                    let _ = send_json_event(
-                        &tx,
-                        "agent.transport",
-                        json!({
-                            "mode": "responses",
-                            "tools_available": true,
-                            "requested_mode": transport_mode,
-                        }),
-                    )
-                    .await;
-                    Ok(outcome)
-                }
-                Err(AgentStreamError::Retryable(message)) | Err(AgentStreamError::Fatal(message)) => Err(message),
-            },
-            _ => match stream_via_responses(&client, &payload, &responses_prompt, &model, &tx)
-                .await
-            {
-                Ok(outcome) => {
-                    let _ = send_json_event(
-                        &tx,
-                        "agent.transport",
-                        json!({
-                            "mode": "responses",
-                            "tools_available": true,
-                            "requested_mode": transport_mode,
-                        }),
-                    )
-                    .await;
-                    Ok(outcome)
-                }
-                Err(AgentStreamError::Retryable(responses_error)) => {
-                    let _ = send_json_event(
-                        &tx,
-                        "agent.transport",
-                        json!({
-                            "mode": "chat_fallback",
-                            "tools_available": true,
-                            "reason": responses_error,
-                            "requested_mode": transport_mode,
-                        }),
-                    )
-                    .await;
-                    stream_via_chat_completions(&client, &payload, &fallback_prompt, &model, &tx)
-                        .await
-                        .map_err(|chat_error| match chat_error {
-                            AgentStreamError::Retryable(chat_message) | AgentStreamError::Fatal(chat_message) => {
-                                format!(
-                                    "Responses 接口不可用，且 Chat Completions 回退失败。responses: {}; chat: {}",
-                                    responses_error, chat_message
-                                )
-                            }
-                        })
-                }
-                Err(AgentStreamError::Fatal(message)) => Err(message),
-            },
         };
 
-        match outcome {
-            Ok(AgentStreamOutcome::Message { text, response_id }) => {
-                if let Some(plan_text) = extract_plan_block_text(&text) {
-                    let structured_plan = structured_plan_from_text(&plan_text, &latest_request);
-                    let _ = send_json_event(
-                        &tx,
-                        "plan_event",
-                        json!({
-                            "plan": structured_plan,
-                            "status": "pending",
-                        }),
-                    )
-                    .await;
+        let outcome = match protocol {
+            AgentProviderProtocol::OpenAi => {
+                let client = match openai::Client::builder()
+                    .api_key(api_key.clone())
+                    .base_url(&base_url)
+                    .build()
+                {
+                    Ok(client) => client,
+                    Err(err) => {
+                        let message = format!("初始化 OpenAI provider 失败: {err}");
+                        let _ = send_json_event(&tx, "error_event", json!({ "scope": "runtime", "message": message.clone() })).await;
+                        let _ = send_json_event(&tx, "error", json!({ "error": message.clone() })).await;
+                        return;
+                    }
+                };
+                match resolve_openai_transport_mode(payload.transport_mode.as_deref(), &base_url) {
+                    "chat" => {
+                        let model_handle = client
+                            .clone()
+                            .completions_api()
+                            .completion_model(model.clone());
+                        let additional_params =
+                            build_openai_additional_params(&payload, model_config.as_ref(), false);
+                        stream_rig_agent_loop(
+                            model_handle,
+                            conversation,
+                            &ctx,
+                            &payload.tool_outputs,
+                            &username,
+                            &model,
+                            &tx,
+                            model_config.as_ref(),
+                            additional_params,
+                        )
+                        .await
+                    }
+                    _ => {
+                        let model_handle = client.completion_model(model.clone());
+                        let additional_params =
+                            build_openai_additional_params(&payload, model_config.as_ref(), true);
+                        stream_rig_agent_loop(
+                            model_handle,
+                            conversation,
+                            &ctx,
+                            &payload.tool_outputs,
+                            &username,
+                            &model,
+                            &tx,
+                            model_config.as_ref(),
+                            additional_params,
+                        )
+                        .await
+                    }
                 }
-                let _ = send_json_event(
-                    &tx,
-                    "message.completed",
-                    json!({
-                        "content": text,
-                        "response_id": response_id,
-                    }),
-                )
-                .await;
-                let _ = send_json_event(&tx, "done", json!({})).await;
             }
-            Ok(AgentStreamOutcome::ToolCalls {
-                response_id,
-                text,
-                calls,
-            }) => {
-                if let Some(plan_text) = extract_plan_block_text(&text) {
-                    let structured_plan = structured_plan_from_text(&plan_text, &latest_request);
-                    let _ = send_json_event(
-                        &tx,
-                        "plan_event",
-                        json!({
-                            "plan": structured_plan,
-                            "status": "pending",
-                        }),
-                    )
-                    .await;
+            AgentProviderProtocol::Anthropic => {
+                match anthropic::Client::builder()
+                    .api_key(api_key.clone())
+                    .base_url(&base_url)
+                    .build()
+                {
+                    Ok(client) => {
+                        let model_handle: anthropic::completion::CompletionModel<reqwest::Client> =
+                            client.completion_model(model.clone());
+                        stream_rig_agent_loop(
+                            model_handle,
+                            conversation,
+                            &ctx,
+                            &payload.tool_outputs,
+                            &username,
+                            &model,
+                            &tx,
+                            model_config.as_ref(),
+                            build_anthropic_additional_params(model_config.as_ref()),
+                        )
+                        .await
+                    }
+                    Err(err) => Err(format!("初始化 Anthropic provider 失败: {err}")),
                 }
-                for call in &calls {
-                    let _ = send_json_event(
-                        &tx,
-                        "tool_event",
-                        json!({
-                            "tool": call.name,
-                            "status": "requested",
-                            "summary": format!("已请求工具 {}", call.name),
-                            "call_id": call.call_id,
-                        }),
-                    )
-                    .await;
-                }
-                let _ = send_json_event(
-                    &tx,
-                    "tool.calls.required",
-                    json!({
-                        "response_id": response_id,
-                        "content": text,
-                        "calls": calls,
-                    }),
-                )
-                .await;
-                let _ = send_json_event(&tx, "done", json!({})).await;
             }
-            Err(message) => {
+            AgentProviderProtocol::Gemini => {
+                match gemini::Client::builder()
+                    .api_key(api_key.clone())
+                    .base_url(&base_url)
+                    .build()
+                {
+                    Ok(client) => {
+                        let model_handle: gemini::completion::CompletionModel<reqwest::Client> =
+                            client.completion_model(model.clone());
+                        stream_rig_agent_loop(
+                            model_handle,
+                            conversation,
+                            &ctx,
+                            &payload.tool_outputs,
+                            &username,
+                            &model,
+                            &tx,
+                            model_config.as_ref(),
+                            build_gemini_additional_params(model_config.as_ref()),
+                        )
+                        .await
+                    }
+                    Err(err) => Err(format!("初始化 Gemini provider 失败: {err}")),
+                }
+            }
+        };
+
+        if let Err(message) = outcome {
                 let _ = send_json_event(&tx, "error_event", json!({ "scope": "runtime", "message": message.clone() })).await;
                 let _ = send_json_event(&tx, "error", json!({ "error": message })).await;
-            }
         }
     });
 
@@ -2627,4 +2981,333 @@ pub async fn chat_stream(
             .interval(Duration::from_secs(15))
             .text("keep-alive"),
     ))
+}
+
+pub async fn submit_tool_callback(
+    Extension(db): Extension<Arc<Database>>,
+    headers: HeaderMap,
+    Json(payload): Json<AgentToolCallbackRequest>,
+) -> Result<Json<Value>, Response> {
+    let _user = auth::require_user(&db, &headers).await?;
+    if payload.run_id.trim().is_empty() || payload.call_id.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "run_id 和 call_id 不能为空"})),
+        )
+            .into_response());
+    }
+
+    if frontend_tool_broker()
+        .resolve(payload.run_id.trim(), payload.call_id.trim(), payload.output)
+        .await
+    {
+        Ok(Json(json!({ "ok": true })))
+    } else {
+        Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "未找到对应的前端工具请求或请求已过期"})),
+        )
+            .into_response())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chat_stream_request_deserializes_execution_context_and_tool_outputs() {
+        let payload = serde_json::json!({
+            "provider": {
+                "provider_id": 1,
+                "model": "qwen3.5-plus"
+            },
+            "messages": [
+                { "role": "assistant", "content": "上一轮已经写入文档。" }
+            ],
+            "context": {
+                "page_scope": "home.doc",
+                "doc_id": 12,
+                "doc_name": "测试文档",
+                "agent_execution": {
+                    "current_mode": "plan",
+                    "plan_step_index": 2,
+                    "plan_current_step": "补充总结",
+                    "write_completed": true,
+                    "document_write_observed": true
+                },
+                "last_execution": {
+                    "assistant_summary": "已经完成正文写入",
+                    "plan_current_step": "补充总结",
+                    "write_completed": true,
+                    "document_write_observed": true
+                },
+                "session_memory": {
+                    "summary": "用户正在完善当前文档",
+                    "completed_facts": ["已完成正文写入"],
+                    "open_loops": ["保存当前文档"]
+                }
+            },
+            "tool_outputs": [
+                {
+                    "call_id": "call_action",
+                    "name": "action_protocol_write",
+                    "arguments": "{\"mode\":\"append\"}",
+                    "output": {
+                        "ok": true,
+                        "tool": "action_protocol_write",
+                        "result": {
+                            "wrote_document": true,
+                            "write_completed": true
+                        }
+                    }
+                }
+            ]
+        });
+
+        let request: AgentChatStreamRequest =
+            serde_json::from_value(payload).expect("payload should deserialize");
+
+        let ctx = request.context.expect("context should exist");
+        assert_eq!(
+            ctx.agent_execution
+                .as_ref()
+                .and_then(|state| state.plan_current_step.as_deref()),
+            Some("补充总结")
+        );
+        assert_eq!(
+            ctx.last_execution
+                .as_ref()
+                .and_then(|state| state.assistant_summary.as_deref()),
+            Some("已经完成正文写入")
+        );
+        assert_eq!(
+            ctx.session_memory
+                .as_ref()
+                .map(|memory| memory.completed_facts.clone()),
+            Some(vec!["已完成正文写入".to_string()])
+        );
+        assert_eq!(request.tool_outputs.len(), 1);
+        assert_eq!(
+            request.tool_outputs[0].name.as_deref(),
+            Some("action_protocol_write")
+        );
+    }
+
+    #[test]
+    fn chat_stream_request_treats_null_tool_outputs_as_empty_vec() {
+        let payload = serde_json::json!({
+            "provider": {
+                "provider_id": 1,
+                "model": "qwen3.5-plus"
+            },
+            "messages": [
+                { "role": "user", "content": "继续" }
+            ],
+            "tool_outputs": null
+        });
+
+        let request: AgentChatStreamRequest =
+            serde_json::from_value(payload).expect("payload should deserialize");
+
+        assert!(request.tool_outputs.is_empty());
+    }
+
+    #[test]
+    fn loop_system_prompt_mentions_completed_action_write_and_plan_progress() {
+        let ctx = AgentContextPayload {
+            page_scope: Some("home.doc".to_string()),
+            doc_name: Some("测试文档".to_string()),
+            agent_execution: Some(AgentExecutionContextPayload {
+                current_mode: Some("plan".to_string()),
+                plan_step_index: Some(2),
+                plan_total_steps: Some(3),
+                plan_current_step: Some("补充总结".to_string()),
+                write_completed: Some(true),
+                document_write_observed: Some(true),
+                ..Default::default()
+            }),
+            last_execution: Some(AgentExecutionMemoryPayload {
+                assistant_summary: Some("已经完成正文写入".to_string()),
+                plan_completed_steps: vec!["完成正文首稿".to_string()],
+                ..Default::default()
+            }),
+            session_memory: Some(AgentSessionMemoryPayload {
+                completed_facts: vec!["已完成正文写入".to_string()],
+                open_loops: vec!["保存当前文档".to_string()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let tool_outputs = vec![AgentToolOutputPayload {
+            call_id: "call_action".to_string(),
+            name: Some("action_protocol_write".to_string()),
+            arguments: Some("{\"mode\":\"append\"}".to_string()),
+            output: serde_json::json!({
+                "ok": true,
+                "tool": "action_protocol_write",
+                "result": {
+                    "wrote_document": true,
+                    "write_completed": true
+                }
+            }),
+        }];
+
+        let prompt = build_loop_system_prompt("tester", &ctx, &tool_outputs);
+
+        assert!(prompt.contains("已经完成正文写入"));
+        assert!(prompt.contains("不要把文档写入步骤当成未执行"));
+        assert!(prompt.contains("action_protocol_write: 成功，已完成正文写入"));
+        assert!(prompt.contains("当前计划步骤: 第 2/3 步 - 补充总结"));
+    }
+
+    #[test]
+    fn detect_completed_action_block_for_backend_loop() {
+        let action = detect_completed_action_block(
+            "前言\n[[ACTION:append]]## 总结\n内容\n[[/ACTION]]\n后记",
+        )
+        .expect("action block should be detected");
+
+        assert_eq!(action.mode, "append");
+        assert!(action.body.contains("## 总结"));
+    }
+
+    #[test]
+    fn append_action_tool_result_history_replays_as_tool_round() {
+        let mut messages = vec![RigMessage::user("请继续")];
+        append_action_tool_result_history(
+            &mut messages,
+            "append",
+            serde_json::json!({
+                "ok": true,
+                "tool": "action_protocol_write",
+                "result": {
+                    "wrote_document": true,
+                    "write_completed": true
+                }
+            }),
+        )
+        .expect("action history should append");
+
+        assert_eq!(messages.len(), 3);
+        match &messages[1] {
+            RigMessage::Assistant { .. } => {}
+            other => panic!("expected assistant tool call message, got {:?}", other),
+        }
+        match &messages[2] {
+            RigMessage::User { .. } => {}
+            other => panic!("expected tool result user message, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn action_protocol_tool_call_arguments_do_not_repeat_document_body() {
+        let call = build_action_protocol_tool_call(7, "append");
+
+        assert_eq!(call.name, ACTION_PROTOCOL_TOOL_NAME);
+        assert_eq!(call.arguments.get("mode").and_then(Value::as_str), Some("append"));
+        assert!(call.arguments.get("body").is_none());
+    }
+
+    #[test]
+    fn action_completion_round_preserves_assistant_action_text_before_tool_result() {
+        let mut messages = vec![RigMessage::user("请继续")];
+        let assistant_text = "[[ACTION:append]]## 总结\n内容\n[[/ACTION]]";
+        messages.push(RigMessage::assistant(assistant_text));
+        append_action_tool_result_history(
+            &mut messages,
+            "append",
+            serde_json::json!({
+                "ok": true,
+                "tool": "action_protocol_write",
+                "result": {
+                    "wrote_document": true,
+                    "write_completed": true,
+                    "doc_id": 250,
+                    "doc_name": "变量与数据类型"
+                }
+            }),
+        )
+        .expect("action history should append");
+
+        assert_eq!(messages.len(), 4);
+        match &messages[1] {
+            RigMessage::Assistant { .. } => {}
+            other => panic!("expected preserved assistant action text, got {:?}", other),
+        }
+        match &messages[2] {
+            RigMessage::Assistant { .. } => {}
+            other => panic!("expected assistant tool call message, got {:?}", other),
+        }
+        match &messages[3] {
+            RigMessage::User { .. } => {}
+            other => panic!("expected tool result user message, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn extend_loop_visible_text_preserves_prior_turns() {
+        let mut accumulated = String::new();
+        extend_loop_visible_text(&mut accumulated, "第一轮：先删除旧项目。");
+        extend_loop_visible_text(&mut accumulated, "\n第二轮：已创建新项目。");
+
+        assert_eq!(accumulated, "第一轮：先删除旧项目。\n第二轮：已创建新项目。");
+    }
+
+    #[test]
+    fn extend_loop_visible_text_strips_completed_action_blocks() {
+        let mut accumulated = String::new();
+        extend_loop_visible_text(
+            &mut accumulated,
+            "先打开文档。\n[[ACTION:append]]# 标题\n正文\n[[/ACTION]]\n然后继续下一步。",
+        );
+
+        assert_eq!(accumulated, "先打开文档。\n\n然后继续下一步。");
+    }
+
+    #[test]
+    fn summarize_frontend_tool_output_uses_document_write_summary_for_action_protocol() {
+        let call = PendingFrontendToolCall {
+            id: "tool_1".to_string(),
+            call_id: "call_1".to_string(),
+            name: ACTION_PROTOCOL_TOOL_NAME.to_string(),
+            arguments: serde_json::json!({ "mode": "append" }),
+        };
+
+        let summary = summarize_frontend_tool_output(
+            &call,
+            &serde_json::json!({
+                "ok": true,
+                "tool": "action_protocol_write",
+                "result": {
+                    "wrote_document": true,
+                    "write_completed": true,
+                    "doc_name": "变量与数据类型"
+                }
+            }),
+        );
+
+        assert_eq!(summary, "已写入《变量与数据类型》正文");
+    }
+
+    #[test]
+    fn with_frontend_tool_summary_injects_summary_into_action_output() {
+        let output = with_frontend_tool_summary(
+            serde_json::json!({
+                "ok": true,
+                "tool": "action_protocol_write",
+                "result": {
+                    "wrote_document": true,
+                    "write_completed": true,
+                    "doc_name": "变量与数据类型"
+                }
+            }),
+            "已写入《变量与数据类型》正文",
+        );
+
+        assert_eq!(
+            output.get("summary").and_then(Value::as_str),
+            Some("已写入《变量与数据类型》正文")
+        );
+    }
 }

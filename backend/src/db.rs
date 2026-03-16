@@ -83,6 +83,7 @@ impl Database {
         }
 
         self.ensure_user_columns().await?;
+        self.ensure_agent_provider_columns().await?;
         self.ensure_doc_nodes_project_column().await?;
         self.backfill_existing_doc_project_ids().await?;
         self.create_indexes().await?;
@@ -208,11 +209,13 @@ impl Database {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
                 name TEXT NOT NULL,
+                provider_kind TEXT NOT NULL DEFAULT 'openai',
                 base_url TEXT NOT NULL,
                 api_key_ciphertext TEXT NOT NULL,
                 remote_models TEXT NOT NULL DEFAULT '[]',
                 enabled_models TEXT NOT NULL DEFAULT '[]',
                 custom_models TEXT NOT NULL DEFAULT '[]',
+                model_configs TEXT NOT NULL DEFAULT '{}',
                 is_active INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 updated_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -266,6 +269,67 @@ impl Database {
             .execute(&self.pool)
             .await?;
         }
+
+        Ok(())
+    }
+
+    async fn ensure_agent_provider_columns(&self) -> Result<()> {
+        let columns = sqlx::query("PRAGMA table_info(agent_providers)")
+            .fetch_all(&self.pool)
+            .await?;
+
+        let has_provider_kind = columns.iter().any(|col| {
+            col.try_get::<String, _>("name")
+                .map(|name| name == "provider_kind")
+                .unwrap_or(false)
+        });
+        let has_model_configs = columns.iter().any(|col| {
+            col.try_get::<String, _>("name")
+                .map(|name| name == "model_configs")
+                .unwrap_or(false)
+        });
+
+        if !has_provider_kind {
+            sqlx::query(
+                "ALTER TABLE agent_providers ADD COLUMN provider_kind TEXT NOT NULL DEFAULT 'openai'",
+            )
+            .execute(&self.pool)
+            .await?;
+        }
+
+        if !has_model_configs {
+            sqlx::query(
+                "ALTER TABLE agent_providers ADD COLUMN model_configs TEXT NOT NULL DEFAULT '{}'",
+            )
+            .execute(&self.pool)
+            .await?;
+        }
+
+        sqlx::query(
+            r#"
+            UPDATE agent_providers
+               SET provider_kind = CASE
+                   WHEN instr(lower(name || ' ' || base_url), 'anthropic') > 0
+                     OR instr(lower(name || ' ' || base_url), 'claude') > 0
+                     THEN 'anthropic'
+                   WHEN instr(lower(name || ' ' || base_url), 'google') > 0
+                     OR instr(lower(name || ' ' || base_url), 'gemini') > 0
+                     OR instr(lower(name || ' ' || base_url), 'generativelanguage') > 0
+                     THEN 'gemini'
+                   WHEN lower(trim(provider_kind)) IN ('openai', 'anthropic', 'gemini')
+                     THEN lower(trim(provider_kind))
+                   ELSE 'openai'
+               END
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            "UPDATE agent_providers SET model_configs = '{}' WHERE trim(model_configs) = ''",
+        )
+        .execute(&self.pool)
+        .await?;
 
         Ok(())
     }

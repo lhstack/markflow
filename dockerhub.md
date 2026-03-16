@@ -36,7 +36,7 @@ docker pull lhstack/markflow:latest
 
 - 镜像仅在发布 `v*` 版本标签时构建并推送
 - `latest` 始终指向最近一次正式版本发布
-- 同时也会发布对应版本标签，例如 `lhstack/markflow:v1.0.6`
+- 同时也会发布对应版本标签，例如 `lhstack/markflow:v1.0.7`
 
 运行容器：
 
@@ -151,6 +151,32 @@ docker logs --tail 200 markflow
 ```
 
 建议首次登录后立即修改管理员密码。
+
+## 1.0.7 工作区待发布更新
+
+以下内容基于 `v1.0.6..当前工作区` 的实际改动整理，描述的是下一次正式发布准备包含的能力，并不代表镜像已经推送：
+
+- 智能体主循环调整为后端主导的 rig 风格 loop，由后端统一管理多轮消息历史、工具结果回灌、continuation 与终止条件
+- 新增前端工具回调桥，后端可通过 `tool.request` 请求前端执行工具，再经 `/api/agent/tool-callback` 回传结果继续执行
+- `[[ACTION:append]] / [[ACTION:replace]]` 现在被纳入 loop 语义，ACTION 写入完成后会作为 synthetic tool result 回灌模型上下文
+- 长文写作时，如果 ACTION 块未完整闭合，系统会自动续一轮补齐正文和 `[[/ACTION]]`，降低流式写作中途中断的概率
+- 多文档连续写入链路已收敛，ACTION 与保存/打开下一篇文档出现在同一轮时，也会正确记录写入完成状态并继续执行
+- 对话写作体验优化：协议标记不再直接显示到聊天记录中；每轮保留最新执行结果摘要；loop 完成时单独输出最终总结块
+- 聊天窗口调整为单栏布局，隐藏运行状态/工具状态侧栏，强化消息自动滚动与写作过程可读性
+- 新增 `AgentWorkbench`，支持管理 `openai / anthropic / gemini` 三类 provider，并为模型配置 `modalities / thinking / tools / reasoning effort / additional params`
+- 补充 `provider_kind`、`model_configs` 等数据库字段与后端存储逻辑，适配更多 OpenAI 兼容或多 provider 场景
+- 扩展聊天附件能力，支持更多文本型附件；未知后缀但可解析为 UTF-8 文本的文件也能作为聊天附件提交给模型
+- 附件工具增强：支持筛选、批量删除、未引用附件清理，以及通过已有图片附件设置头像
+
+如果你准备基于 `v1.0.7` 发布镜像，建议在发布说明中额外强调两点：
+
+- 这是一次智能体执行链路与文档写作体验的收敛版升级，重点在稳定性与多轮一致性，而不是单纯新增 UI 功能
+- 工作区当前文案对应的是“待发布内容”，只有打出正式 `v1.0.7` 标签并推送后，Docker Hub 才会出现对应镜像
+
+计划发布后，Docker Hub 将新增：
+
+- `lhstack/markflow:v1.0.7`
+- `lhstack/markflow:latest`
 
 ## 1.0.6 版本更新
 

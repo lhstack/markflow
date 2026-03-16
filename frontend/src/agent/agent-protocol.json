@@ -4,39 +4,16 @@
     {
       "mode": "append",
       "marker": "[[ACTION:append]]",
-      "payloadFormat": "直接输出要追加到文档末尾的 Markdown 内容。",
+      "payloadFormat": "直接输出要写入空文档首稿或追加到文档末尾的 Markdown 内容。",
       "example": "[[ACTION:append]]\n新增的一段 Markdown 内容\n[[/ACTION]]"
     },
     {
       "mode": "replace",
       "marker": "[[ACTION:replace]]",
-      "payloadFormat": "直接输出整篇替换后的完整 Markdown 正文。",
+      "payloadFormat": "直接输出整篇替换后的完整 Markdown 正文，仅在确实需要整体覆盖全文时使用。",
       "example": "[[ACTION:replace]]\n# 新正文标题\n...\n[[/ACTION]]"
-    },
-    {
-      "mode": "rewrite_section",
-      "marker": "[[ACTION:rewrite_section]]",
-      "payloadFormat": "必须包含 [[TARGET]]章节标题[[/TARGET]] 和 [[CONTENT]]整节替换内容[[/CONTENT]]。",
-      "example": "[[ACTION:rewrite_section]]\n[[TARGET]]## 任务团队[[/TARGET]]\n[[CONTENT]]## 任务团队\n新的章节内容\n[[/CONTENT]]\n[[/ACTION]]"
-    },
-    {
-      "mode": "replace_block",
-      "marker": "[[ACTION:replace_block]]",
-      "payloadFormat": "必须包含 [[FIND]]原文片段[[/FIND]] 和 [[REPLACE]]替换片段[[/REPLACE]]，两者都不能省略。",
-      "example": "[[ACTION:replace_block]]\n[[FIND]]旧片段[[/FIND]]\n[[REPLACE]]新片段[[/REPLACE]]\n[[/ACTION]]"
     }
   ],
-  "control": {
-    "openMarker": "[[CONTROL]]",
-    "closeMarker": "[[/CONTROL]]",
-    "phases": [
-      "await_user_confirmation",
-      "auto_continue",
-      "needs_save",
-      "completed",
-      "in_progress"
-    ]
-  },
   "taskAnalysis": {
     "modes": ["chat", "plan"],
     "complexities": ["low", "medium", "high"],
@@ -102,5 +79,34 @@
       "description": "分享文档页。",
       "params": ["share_token"]
     }
+  ],
+  "toolPolicies": [
+    { "name": "get_current_page_state", "stagePolicy": "observation", "capabilities": ["read"] },
+    { "name": "list_page_routes", "stagePolicy": "observation", "capabilities": ["read"] },
+    { "name": "navigate_to_page", "stagePolicy": "mutation", "capabilities": ["navigate"] },
+    { "name": "update_profile", "stagePolicy": "mutation", "capabilities": ["update"] },
+    { "name": "list_uploads", "stagePolicy": "observation", "capabilities": ["read"] },
+    { "name": "delete_uploads", "stagePolicy": "mutation", "capabilities": ["delete"] },
+    { "name": "list_projects", "stagePolicy": "observation", "capabilities": ["read"] },
+    { "name": "open_project", "stagePolicy": "observation", "capabilities": ["read", "navigate"] },
+    { "name": "create_project", "stagePolicy": "mutation", "capabilities": ["create"] },
+    { "name": "update_project", "stagePolicy": "mutation", "capabilities": ["update"] },
+    { "name": "delete_projects", "stagePolicy": "mutation", "capabilities": ["delete"] },
+    { "name": "execute_browser_javascript", "stagePolicy": "mutation", "capabilities": ["execute"] },
+    { "name": "get_project_tree", "stagePolicy": "observation", "capabilities": ["read"] },
+    { "name": "create_tree_node", "stagePolicy": "mutation", "capabilities": ["create"] },
+    { "name": "move_tree_node", "stagePolicy": "mutation", "capabilities": ["move"] },
+    { "name": "open_tree_node", "stagePolicy": "observation", "capabilities": ["read", "navigate"] },
+    { "name": "read_document", "stagePolicy": "observation", "capabilities": ["read"] },
+    { "name": "read_editor_snapshot", "stagePolicy": "observation", "capabilities": ["read"] },
+    { "name": "rewrite_document_section", "stagePolicy": "mutation", "capabilities": ["update"] },
+    { "name": "replace_document_block", "stagePolicy": "mutation", "capabilities": ["update"] },
+    { "name": "replace_document_blocks", "stagePolicy": "mutation", "capabilities": ["update"] },
+    { "name": "swap_document_sections", "stagePolicy": "mutation", "capabilities": ["update"] },
+    { "name": "save_current_document", "stagePolicy": "mutation", "capabilities": ["save"] },
+    { "name": "update_tree_node_meta", "stagePolicy": "mutation", "capabilities": ["update"] },
+    { "name": "delete_tree_nodes", "stagePolicy": "mutation", "capabilities": ["delete"] },
+    { "name": "get_markdown_editor_runtime", "stagePolicy": "observation", "capabilities": ["read"] },
+    { "name": "get_browser_runtime", "stagePolicy": "observation", "capabilities": ["read"] }
   ]
 }

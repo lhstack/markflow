@@ -169,8 +169,11 @@ let writerTargetDocId: number | null = null
 let writerShouldSave = false
 let writerMode: AgentWriterMode | null = null
 let writerRenderFrame: number | null = null
+let writerRenderTimeout: number | null = null
 let writerRenderedValue = ''
+let writerLastRenderAt = 0
 let activeSavePromise: Promise<AgentEditorSaveResult> | null = null
+const WRITER_RENDER_INTERVAL_MS = 48
 
 const wordCount = computed(() => {
   const text = draft.value
@@ -358,171 +361,39 @@ function applyWriterValue(value: string) {
   syncAgentEditorBridge()
 }
 
-function isPartialWriterMode(mode: AgentWriterMode | null) {
-  return mode === 'rewrite_section' || mode === 'replace_block'
-}
-
-function extractTaggedContent(source: string, tag: string) {
-  const pattern = new RegExp(`\\[\\[${tag}\\]\\]([\\s\\S]*?)\\[\\[\\/${tag}\\]\\]`, 'i')
-  const match = source.match(pattern)
-  return match?.[1]?.trim() || ''
-}
-
-function normalizeHeadingText(value: string) {
-  return value.replace(/^#{1,6}\s*/, '').trim()
-}
-
-interface PartialWriterApplyResult {
-  ok: boolean
-  value: string
-  reason?: string
-  target?: string | null
-  replacementPreview?: string
-}
-
-function applyRewriteSection(original: string, payload: string): PartialWriterApplyResult {
-  const targetRaw = extractTaggedContent(payload, 'TARGET')
-  const contentRaw = extractTaggedContent(payload, 'CONTENT')
-  const target = normalizeHeadingText(targetRaw)
-  const sectionContent = (contentRaw || payload).trim()
-  if (!target || !sectionContent) {
-    return {
-      ok: false,
-      value: original,
-      reason: 'rewrite_section 缺少 [[TARGET]] 或 [[CONTENT]]，无法定位目标章节并应用替换。',
-      target: target || null,
-      replacementPreview: sectionContent || payload.trim(),
-    }
-  }
-
-  const lines = original.split(/\r?\n/)
-  const headingPattern = /^(#{1,6})\s+(.+)$/
-  let start = -1
-  let level = 0
-
-  for (let index = 0; index < lines.length; index += 1) {
-    const match = lines[index].match(headingPattern)
-    if (!match) continue
-    const headingText = normalizeHeadingText(match[2] || '')
-    if (headingText === target) {
-      start = index
-      level = (match[1] || '').length
-      break
-    }
-  }
-
-  if (start === -1) {
-    return {
-      ok: false,
-      value: original,
-      reason: `未找到标题为“${target}”的章节，rewrite_section 未应用。`,
-      target,
-      replacementPreview: sectionContent,
-    }
-  }
-
-  let end = lines.length
-  for (let index = start + 1; index < lines.length; index += 1) {
-    const match = lines[index].match(headingPattern)
-    if (!match) continue
-    const nextLevel = (match[1] || '').length
-    if (nextLevel <= level) {
-      end = index
-      break
-    }
-  }
-
-  const replacementLines = sectionContent.split(/\r?\n/)
-  return {
-    ok: true,
-    value: [...lines.slice(0, start), ...replacementLines, ...lines.slice(end)]
-      .join('\n')
-      .replace(/\n{3,}/g, '\n\n'),
-    target,
-    replacementPreview: sectionContent,
-  }
-}
-
-function applyReplaceBlock(original: string, payload: string): PartialWriterApplyResult {
-  const find = extractTaggedContent(payload, 'FIND')
-  const replacement = extractTaggedContent(payload, 'REPLACE')
-  if (!find) {
-    return {
-      ok: false,
-      value: original,
-      reason: 'replace_block 缺少 [[FIND]]，无法定位要替换的原文片段。',
-      replacementPreview: replacement || payload.trim(),
-    }
-  }
-  const index = original.indexOf(find)
-  if (index === -1) {
-    return {
-      ok: false,
-      value: original,
-      reason: 'replace_block 未在当前文档中找到完全匹配的 [[FIND]] 片段，局部替换未应用。',
-      target: find,
-      replacementPreview: replacement,
-    }
-  }
-  return {
-    ok: true,
-    value: `${original.slice(0, index)}${replacement}${original.slice(index + find.length)}`,
-    target: find,
-    replacementPreview: replacement,
-  }
-}
-
-function applyPartialWriterAction(mode: AgentWriterMode, original: string, payload: string): PartialWriterApplyResult {
-  if (mode === 'rewrite_section') {
-    return applyRewriteSection(original, payload)
-  }
-  if (mode === 'replace_block') {
-    return applyReplaceBlock(original, payload)
-  }
-  return {
-    ok: false,
-    value: original,
-    reason: `不支持的局部写入模式：${mode}`,
-    replacementPreview: payload.trim(),
-  }
-}
-
 function dispatchWriterResult(detail: AgentWriterResultDetail) {
   dispatchAgentWriterResult(detail)
 }
 
-function failPartialWriter(mode: AgentWriterMode, original: string, payload: string, result: PartialWriterApplyResult) {
-  const detail: AgentWriterResultDetail = {
-    docId: props.node.id,
-    mode,
-    ok: false,
-    reason: result.reason || '局部写入失败',
-    payload,
-    replacementPreview: result.replacementPreview,
-    target: result.target || null,
-  }
-  console.error('agent partial write failed', {
-    ...detail,
-    docName: props.node.name,
-    originalPreview: original.slice(0, 500),
-  })
-  dispatchWriterResult(detail)
-  ElMessage.error(detail.reason || '局部写入失败')
-  throw new Error(detail.reason || '局部写入失败')
-}
-
 function flushWriterRender() {
   writerRenderFrame = null
+  writerRenderTimeout = null
   if (!editor || writerTargetDocId !== props.node.id) return
   if (writerRenderedValue === writerBuffer) return
+  writerLastRenderAt = performance.now()
   applyWriterValue(writerBuffer)
 }
 
 function scheduleWriterRender() {
-  if (writerRenderFrame !== null) return
-  writerRenderFrame = window.requestAnimationFrame(() => {
-    flushWriterRender()
-  })
+  if (writerRenderFrame !== null || writerRenderTimeout !== null) return
+
+  const now = performance.now()
+  const elapsed = now - writerLastRenderAt
+
+  if (elapsed >= WRITER_RENDER_INTERVAL_MS) {
+    writerRenderFrame = window.requestAnimationFrame(() => {
+      flushWriterRender()
+    })
+    return
+  }
+
+  writerRenderTimeout = window.setTimeout(() => {
+    writerRenderTimeout = null
+    if (writerRenderFrame !== null) return
+    writerRenderFrame = window.requestAnimationFrame(() => {
+      flushWriterRender()
+    })
+  }, Math.max(0, WRITER_RENDER_INTERVAL_MS - elapsed))
 }
 
 function resetWriterState() {
@@ -531,9 +402,14 @@ function resetWriterState() {
   writerShouldSave = false
   writerMode = null
   writerRenderedValue = ''
+  writerLastRenderAt = 0
   if (writerRenderFrame !== null) {
     window.cancelAnimationFrame(writerRenderFrame)
     writerRenderFrame = null
+  }
+  if (writerRenderTimeout !== null) {
+    window.clearTimeout(writerRenderTimeout)
+    writerRenderTimeout = null
   }
 }
 
@@ -573,30 +449,14 @@ function handleAgentWriterChunk(event: Event) {
   const detail = (event as CustomEvent<AgentWriterChunkDetail>).detail
   if (!detail || detail.docId !== props.node.id || writerTargetDocId !== detail.docId) return
   writerBuffer += detail.chunk
-  if (isPartialWriterMode(writerMode)) return
   scheduleWriterRender()
 }
 
 function handleAgentWriterComplete(event: Event) {
   const detail = (event as CustomEvent<AgentWriterCompleteDetail>).detail
   if (!detail || detail.docId !== props.node.id || writerTargetDocId !== detail.docId) return
-  let finalValue = writerBuffer
-  if (writerMode && isPartialWriterMode(writerMode)) {
-    const currentValue = editor?.getValue() || draft.value
-    const result = applyPartialWriterAction(writerMode, currentValue, writerBuffer)
-    if (!result.ok || result.value === currentValue) {
-      const failedMode = writerMode
-      const failedPayload = writerBuffer
-      resetWriterState()
-      failPartialWriter(failedMode, currentValue, failedPayload, result)
-      return
-    }
-    finalValue = result.value
-    applyWriterValue(finalValue)
-  } else {
-    flushWriterRender()
-    finalValue = writerBuffer
-  }
+  flushWriterRender()
+  const finalValue = writerBuffer
   const shouldSave = writerShouldSave
   const completedMode = writerMode
   resetWriterState()

@@ -1,4 +1,4 @@
-export type AgentWriterMode = 'append' | 'replace' | 'rewrite_section' | 'replace_block'
+export type AgentWriterMode = 'append' | 'replace'
 
 export interface AgentWriterStartDetail {
   docId: number
@@ -13,6 +13,7 @@ export interface AgentWriterChunkDetail {
 
 export interface AgentWriterCompleteDetail {
   docId: number
+  payload?: unknown
 }
 
 export interface AgentWriterResultDetail {
