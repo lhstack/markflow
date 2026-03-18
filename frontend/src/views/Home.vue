@@ -1073,20 +1073,27 @@ async function createTreeNodeTool(rawArgs: Record<string, any>) {
     throw new Error('create_tree_node 缺少 name 参数')
   }
 
+  const rawParentId = normalizeToolInteger(args.parent_id ?? args.parentId)
+  const rawParentPath = normalizeToolString(args.parent_path ?? args.parentPath)
+  const rawParentName = normalizeToolString(args.parent_name ?? args.parentName)
+  const rootAliasRequested = rawParentId === 0 && !rawParentPath && !rawParentName
+
   let parentId: number | undefined
-  const hasParentLocator = args.parent_id !== undefined
+  const hasParentLocator = !rootAliasRequested && (
+    args.parent_id !== undefined
     || args.parent_path !== undefined
     || args.parent_name !== undefined
     || args.parentId !== undefined
     || args.parentPath !== undefined
     || args.parentName !== undefined
+  )
 
   if (hasParentLocator) {
     const parentTarget = await resolveNodeTarget({
       ...args,
-      node_id: args.parent_id ?? args.parentId,
-      node_path: args.parent_path ?? args.parentPath,
-      node_name: args.parent_name ?? args.parentName,
+      node_id: rawParentId,
+      node_path: rawParentPath,
+      node_name: rawParentName,
     })
     if (!parentTarget) {
       throw new Error('未找到目标父目录')
@@ -1151,7 +1158,17 @@ async function moveTreeNodeTool(rawArgs: Record<string, any>) {
     throw new Error('未找到要移动的节点')
   }
 
-  const moveToRoot = args.to_root === true
+  const rawTargetParentId = normalizeToolInteger(
+    args.target_parent_id ?? args.parent_id ?? args.targetParentId ?? args.parentId,
+  )
+  const rawTargetParentPath = normalizeToolString(
+    args.target_parent_path ?? args.parent_path ?? args.targetParentPath ?? args.parentPath,
+  )
+  const rawTargetParentName = normalizeToolString(
+    args.target_parent_name ?? args.parent_name ?? args.targetParentName ?? args.parentName,
+  )
+  const rootAliasRequested = rawTargetParentId === 0 && !rawTargetParentPath && !rawTargetParentName
+  const moveToRoot = args.to_root === true || rootAliasRequested
   let parentId: number | null = null
 
   if (!moveToRoot) {
@@ -1159,9 +1176,9 @@ async function moveTreeNodeTool(rawArgs: Record<string, any>) {
       ...args,
       project_id: args.target_project_id ?? args.project_id ?? args.targetProjectId ?? args.projectId,
       project_name: args.target_project_name ?? args.project_name ?? args.targetProjectName ?? args.projectName,
-      node_id: args.target_parent_id ?? args.parent_id ?? args.targetParentId ?? args.parentId,
-      node_path: args.target_parent_path ?? args.parent_path ?? args.targetParentPath ?? args.parentPath,
-      node_name: args.target_parent_name ?? args.parent_name ?? args.targetParentName ?? args.parentName,
+      node_id: rawTargetParentId,
+      node_path: rawTargetParentPath,
+      node_name: rawTargetParentName,
     }, {
       required: false,
     })

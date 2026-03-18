@@ -3552,7 +3552,6 @@ function summarizeRoundActions(roundToolCalls: AgentExecutionToolCallSummary[]) 
 
   const createdDirs: string[] = []
   const createdDocs: string[] = []
-  const openedTargets: string[] = []
   const writtenDocs: string[] = []
   let genericWriteCount = 0
   let actionWriteFailed = false
@@ -3581,11 +3580,6 @@ function summarizeRoundActions(roundToolCalls: AgentExecutionToolCallSummary[]) 
         break
       }
       case 'open_tree_node': {
-        const target = [args?.doc_name, args?.node_name, args?.doc_path, args?.node_path]
-          .find((item) => typeof item === 'string' && item.trim())
-        if (typeof target === 'string' && target.trim()) {
-          openedTargets.push(target.trim())
-        }
         break
       }
       case 'action_protocol_write': {
@@ -3632,10 +3626,6 @@ function summarizeRoundActions(roundToolCalls: AgentExecutionToolCallSummary[]) 
         ? `已创建文档：${createdDocs.map((name) => `《${name}》`).join('、')}。`
         : `已创建 ${createdDocs.length} 篇文档。`,
     )
-  }
-  if (openedTargets.length) {
-    const latestTarget = openedTargets[openedTargets.length - 1]
-    parts.push(`已打开《${latestTarget}》。`)
   }
   const uniqueWrittenDocs = [...new Set(writtenDocs)]
   if (uniqueWrittenDocs.length) {
@@ -5257,8 +5247,11 @@ async function sendMessage() {
       const normalized = stripProtocolContent(resultContent).trim()
       if (!normalized) return
       if (!runtimeSummaryAppendedThisRequest && requestRound <= 1) return
-      const currentVisibleBody = buildVisibleAssistantContent(
-        completedAssistantContent || rawAssistantContent || assistantMessage.content || '',
+      const currentVisibleBody = stripProtocolContent(
+        assistantMessage.content
+        || liveAssistantContent.value
+        || buildVisibleAssistantContent(rawAssistantContent || completedAssistantContent || '')
+        || '',
       ).trim()
       if (!latestStructuredResponse?.message?.trim() && currentVisibleBody && normalized === currentVisibleBody) {
         return
@@ -5595,6 +5588,29 @@ async function sendMessage() {
 
     const startContinuationAssistantMessage = (finalContent: string) => {
       finalizeAssistantMessageForDisplay(finalContent)
+
+      assistantMessage = {
+        id: genId(),
+        role: 'assistant',
+        content: '',
+        reasoning: '',
+      }
+      session.messages.push(assistantMessage)
+      session.updatedAt = Date.now()
+      sessions.value = [...sessions.value]
+      streamingAssistantId.value = assistantMessage.id
+      resetStreamingRoundState()
+      scrollMessagesToBottom()
+    }
+
+    const startFollowupAssistantMessageForCompleted = (finalContent: string) => {
+      finalizeAssistantMessageForDisplay(finalContent)
+
+      const currentContent = (assistantMessage.content || liveAssistantContent.value || '').trim()
+      const currentReasoning = (assistantMessage.reasoning || liveAssistantReasoning.value || '').trim()
+      if (!currentContent && !currentReasoning) {
+        return
+      }
 
       assistantMessage = {
         id: genId(),
@@ -5956,9 +5972,20 @@ async function sendMessage() {
           if (responseId) {
             previousResponseId = responseId
           }
-          appendCompletedTail(completedContent)
-          const completedVisibleContent = buildVisibleAssistantContent(completedAssistantContent || rawAssistantContent)
-          syncLiveAssistantDisplay(completedVisibleContent)
+          const normalizedCompleted = stripProtocolContent(completedContent).trim()
+          const shouldDeferCompletedIntoFinalBlock = Boolean(
+            normalizedCompleted
+            && runtimeSummaryAppendedThisRequest
+            && (roundToolCalls.length || roundDocumentWriteObserved || executionState.documentWriteObserved)
+          )
+          if (!shouldDeferCompletedIntoFinalBlock) {
+            appendCompletedTail(completedContent)
+            const completedVisibleContent = buildVisibleAssistantContent(completedAssistantContent || rawAssistantContent)
+            syncLiveAssistantDisplay(completedVisibleContent)
+          } else {
+            const currentVisibleContent = buildVisibleAssistantContent(rawAssistantContent)
+            syncLiveAssistantDisplay(currentVisibleContent)
+          }
           syncPendingPlanPreviewFromStream()
           streamDone = true
         } else if (parsed.event === 'agent.transport') {
@@ -6218,6 +6245,9 @@ async function sendMessage() {
       }
       if (saveNoopDetected && nonWritingPlanRounds >= 3) {
         throw new Error('计划执行停滞：连续多轮只读取或保存当前文档，但没有真正写入正文。请重新规划当前步骤后再继续执行。')
+      }
+      if (runtimeSummaryAppendedThisRequest || liveAssistantRoundSummary.trim()) {
+        startFollowupAssistantMessageForCompleted(completedAssistantContent || rawAssistantContent)
       }
     }
   } catch (error: any) {
@@ -6575,7 +6605,7 @@ onUnmounted(() => {
   top: 0;
   left: 0;
   z-index: 1800;
-  width: 680px;
+  width: 460px;
   max-width: calc(100vw - 32px);
 }
 
@@ -6598,9 +6628,9 @@ onUnmounted(() => {
 .agent-shell {
   display: flex;
   flex-direction: column;
-  height: min(720px, calc(100vh - 96px));
+  height: min(760px, calc(100vh - 64px));
   min-height: 460px;
-  max-height: calc(100vh - 96px);
+  max-height: calc(100vh - 64px);
   border-radius: 20px;
   overflow: hidden;
   border: 1px solid rgba(122, 147, 91, 0.22);
@@ -7090,7 +7120,7 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  width: min(100%, 620px);
+  width: min(100%, 400px);
   align-self: center;
 }
 
@@ -7213,7 +7243,7 @@ onUnmounted(() => {
 }
 
 .agent-mode-tip {
-  width: min(100%, 620px);
+  width: min(100%, 400px);
   margin: 0 auto;
   font-size: 11px;
   color: #7b8771;
@@ -7221,7 +7251,7 @@ onUnmounted(() => {
 }
 
 .agent-textarea {
-  width: min(100%, 620px);
+  width: min(100%, 400px);
   margin: 10px auto 0;
   min-height: 112px;
   resize: none;
@@ -7250,7 +7280,7 @@ onUnmounted(() => {
 }
 
 .agent-attachment-panel {
-  width: min(100%, 620px);
+  width: min(100%, 400px);
   margin: 10px auto 0;
   display: flex;
   flex-direction: column;
@@ -7372,7 +7402,7 @@ onUnmounted(() => {
 }
 
 .agent-composer-footer {
-  width: min(100%, 620px);
+  width: min(100%, 400px);
   display: flex;
   flex-direction: column;
   align-items: stretch;
@@ -7940,7 +7970,7 @@ onUnmounted(() => {
 
 @media (max-width: 1200px) {
   .agent-panel {
-    width: min(680px, calc(100vw - 32px));
+    width: min(460px, calc(100vw - 32px));
   }
 
   .model-config-toolbar {
@@ -7968,9 +7998,9 @@ onUnmounted(() => {
   }
 
   .agent-shell {
-    height: min(640px, calc(100vh - 84px));
+    height: min(760px, calc(100vh - 40px));
     min-height: 420px;
-    max-height: calc(100vh - 84px);
+    max-height: calc(100vh - 40px);
   }
 
   .agent-main {

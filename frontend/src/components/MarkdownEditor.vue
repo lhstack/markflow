@@ -100,7 +100,7 @@
           </section>
           <aside class="sy-preview-pane">
             <div ref="previewBodyRef" class="sy-preview-body">
-              <VditorPreview :markdown="draft" @rendered="syncPreviewScrollFromEditor" />
+              <VditorPreview :markdown="previewDraft" @rendered="syncPreviewScrollFromEditor" />
             </div>
           </aside>
         </div>
@@ -156,6 +156,7 @@ const previewBodyRef = ref<HTMLDivElement | null>(null)
 const saving = ref(false)
 const isDirty = ref(false)
 const draft = ref(props.node.content || '')
+const previewDraft = ref(props.node.content || '')
 const assetUploadTask = ref<ManagedUploadTask | null>(null)
 const viewMode = ref<'source' | 'preview' | 'split'>('split')
 const isFullscreen = ref(false)
@@ -174,6 +175,8 @@ let writerRenderedValue = ''
 let writerLastRenderAt = 0
 let activeSavePromise: Promise<AgentEditorSaveResult> | null = null
 const WRITER_RENDER_INTERVAL_MS = 48
+const PREVIEW_SYNC_INTERVAL_MS = 220
+let previewSyncTimer: number | null = null
 
 const wordCount = computed(() => {
   const text = draft.value
@@ -205,6 +208,7 @@ function syncDraftFromEditor() {
   isDirty.value = value !== originalContent
   syncDocDraftCache(props.node.id, value, originalContent)
   setAgentEditorSnapshot(props.node.id, value)
+  queuePreviewDraftSync()
 }
 
 function resolveInitialContent(docId: number, savedContent: string) {
@@ -352,6 +356,7 @@ function syncFullscreenToolbarButton() {
 function applyWriterValue(value: string) {
   if (!editor) return
   draft.value = value
+  previewDraft.value = value
   isDirty.value = value !== originalContent
   syncDocDraftCache(props.node.id, value, originalContent)
   editor.setValue(value, true)
@@ -413,6 +418,34 @@ function resetWriterState() {
   }
 }
 
+function flushPreviewDraftSync() {
+  if (previewSyncTimer !== null) {
+    window.clearTimeout(previewSyncTimer)
+    previewSyncTimer = null
+  }
+  if (previewDraft.value !== draft.value) {
+    previewDraft.value = draft.value
+  }
+}
+
+function queuePreviewDraftSync(immediate = false) {
+  if (viewMode.value === 'source' && !immediate) return
+  if (immediate) {
+    flushPreviewDraftSync()
+    return
+  }
+  if (previewSyncTimer !== null) {
+    window.clearTimeout(previewSyncTimer)
+  }
+  previewSyncTimer = window.setTimeout(() => {
+    previewSyncTimer = null
+    if (viewMode.value === 'source') return
+    if (previewDraft.value !== draft.value) {
+      previewDraft.value = draft.value
+    }
+  }, PREVIEW_SYNC_INTERVAL_MS)
+}
+
 function handleAgentWriterStart(event: Event) {
   const detail = (event as CustomEvent<AgentWriterStartDetail>).detail
   if (!detail || detail.docId !== props.node.id || !editor) return
@@ -461,6 +494,7 @@ function handleAgentWriterComplete(event: Event) {
   const completedMode = writerMode
   resetWriterState()
   draft.value = finalValue
+  previewDraft.value = finalValue
   isDirty.value = finalValue !== originalContent
   setAgentEditorSnapshot(props.node.id, finalValue)
   if (completedMode) {
@@ -564,6 +598,7 @@ async function initEditor() {
 
   const initialValue = resolveInitialContent(props.node.id, draft.value)
   draft.value = initialValue
+  previewDraft.value = initialValue
   isDirty.value = initialValue !== originalContent
 
   editor = new Vditor(editorRef.value, {
@@ -635,6 +670,7 @@ async function initEditor() {
       syncDocDraftCache(props.node.id, value, originalContent)
       setAgentEditorSnapshot(props.node.id, value)
       syncAgentEditorBridge()
+      queuePreviewDraftSync()
     },
   })
 }
@@ -661,6 +697,7 @@ async function save(): Promise<AgentEditorSaveResult> {
       const value = editor.getValue()
       await docs.updateNode(props.node.id, { content: value })
       draft.value = value
+      previewDraft.value = value
       originalContent = value
       isDirty.value = false
       clearDocDraftContent(props.node.id)
@@ -712,6 +749,7 @@ async function discardChanges() {
 
   resetWriterState()
   draft.value = originalContent
+  previewDraft.value = originalContent
   isDirty.value = false
   editor.setValue(originalContent, true)
   clearDocDraftContent(props.node.id)
@@ -754,6 +792,7 @@ watch(
     resetWriterState()
     const next = resolveInitialContent(nextId, props.node.content || '')
     draft.value = next
+    previewDraft.value = next
     originalContent = props.node.content || ''
     isDirty.value = next !== originalContent
     if (!editor) {
@@ -773,6 +812,7 @@ watch(
     if (isDirty.value || !editor) return
     const restored = resolveInitialContent(props.node.id, next)
     draft.value = restored
+    previewDraft.value = restored
     originalContent = next
     isDirty.value = restored !== originalContent
     if (editor.getValue() !== restored) {
@@ -784,6 +824,9 @@ watch(
 )
 
 watch(viewMode, async (mode) => {
+  if (mode === 'preview' || mode === 'split') {
+    queuePreviewDraftSync(true)
+  }
   if (mode !== 'split') return
   await nextTick()
   bindScrollSync()
@@ -823,6 +866,9 @@ onUnmounted(() => {
   previewBodyRef.value?.removeEventListener('scroll', syncEditorScrollFromPreview)
   if (scrollUnlockFrame) {
     cancelAnimationFrame(scrollUnlockFrame)
+  }
+  if (previewSyncTimer !== null) {
+    window.clearTimeout(previewSyncTimer)
   }
   clearAssetUploadTask()
   if (editor) {
