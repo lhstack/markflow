@@ -99,9 +99,64 @@
             <div ref="editorRef" class="sy-editor-host"></div>
           </section>
           <aside class="sy-preview-pane">
-            <div ref="previewBodyRef" class="sy-preview-body">
-              <VditorPreview :markdown="previewDraft" @rendered="syncPreviewScrollFromEditor" />
+            <div
+              ref="previewBodyRef"
+              class="sy-preview-body"
+            >
+              <VditorPreview :markdown="previewDraft" :clear-before-render="true" @rendered="handlePreviewRendered" />
             </div>
+            <aside
+              v-if="showEditorToc"
+              class="sy-editor-toc"
+              :class="{ collapsed: !tocPanelOpen }"
+              data-testid="editor-toc"
+            >
+              <button
+                v-if="!tocPanelOpen"
+                class="sy-editor-toc-tab"
+                title="展开目录"
+                aria-label="展开目录"
+                @click="toggleTocPanel"
+              >
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                  <path d="M2 3.25c0-.414.336-.75.75-.75h10.5a.75.75 0 0 1 0 1.5H2.75A.75.75 0 0 1 2 3.25Zm0 4c0-.414.336-.75.75-.75h7.5a.75.75 0 0 1 0 1.5h-7.5A.75.75 0 0 1 2 7.25Zm0 4c0-.414.336-.75.75-.75h5.5a.75.75 0 0 1 0 1.5h-5.5A.75.75 0 0 1 2 11.25Zm10.47-2.78a.75.75 0 0 1 1.06 0l1.72 1.72a.75.75 0 0 1 0 1.06l-1.72 1.72a.75.75 0 1 1-1.06-1.06l.44-.44H10.5a.75.75 0 0 1 0-1.5h2.41l-.44-.44a.75.75 0 0 1 0-1.06Z"/>
+                </svg>
+                <span>目录</span>
+              </button>
+              <template v-else>
+                <div class="sy-editor-toc-head">
+                  <div>
+                    <div class="sy-editor-toc-kicker">Outline</div>
+                    <div class="sy-editor-toc-title">文档目录</div>
+                  </div>
+                  <button
+                    class="sy-editor-toc-toggle"
+                    title="收起目录"
+                    aria-label="收起目录"
+                    @click="toggleTocPanel"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                      <path d="M9.78 3.22a.75.75 0 0 1 0 1.06L6.06 8l3.72 3.72a.75.75 0 1 1-1.06 1.06L4.47 8.53a.75.75 0 0 1 0-1.06l4.25-4.25a.75.75 0 0 1 1.06 0Z"/>
+                    </svg>
+                  </button>
+                </div>
+                <div v-if="tocItems.length" class="sy-editor-toc-list">
+                  <button
+                    v-for="item in tocItems"
+                    :key="item.id"
+                    class="sy-editor-toc-item"
+                    :class="[`level-${item.level}`, { active: item.id === activeTocId || item.id === selectedTocId }]"
+                    @click="scrollToHeading(item)"
+                  >
+                    <span class="sy-editor-toc-bullet"></span>
+                    <span class="sy-editor-toc-text">{{ item.text }}</span>
+                  </button>
+                </div>
+                <div v-else class="sy-editor-toc-empty">
+                  {{ tocReady ? '当前预览内容里没有可识别的标题' : '正在识别目录...' }}
+                </div>
+              </template>
+            </aside>
           </aside>
         </div>
       </div>
@@ -146,6 +201,18 @@ import VditorPreview from '@/components/VditorPreview.vue'
 import { createManagedUploadTask, removeManagedUpload, type ManagedUploadTask } from '@/utils/managedUploads'
 import { uploadFile, uploadImage } from '@/utils/uploads'
 
+interface TocItem {
+  id: string
+  text: string
+  level: number
+  order: number
+}
+
+interface PreviewRenderedPayload {
+  key?: string | number
+  headings: Array<{ text: string; level: number }>
+}
+
 const props = defineProps<{ node: DocNode }>()
 const emit = defineEmits<{ share: [node: DocNode] }>()
 
@@ -160,6 +227,11 @@ const previewDraft = ref(props.node.content || '')
 const assetUploadTask = ref<ManagedUploadTask | null>(null)
 const viewMode = ref<'source' | 'preview' | 'split'>('split')
 const isFullscreen = ref(false)
+const tocPanelOpen = ref(true)
+const tocItems = ref<TocItem[]>([])
+const activeTocId = ref('')
+const selectedTocId = ref('')
+const tocReady = ref(false)
 let originalContent = props.node.content || ''
 let editor: Vditor | null = null
 let editorScrollEl: HTMLElement | null = null
@@ -177,6 +249,7 @@ let activeSavePromise: Promise<AgentEditorSaveResult> | null = null
 const WRITER_RENDER_INTERVAL_MS = 48
 const PREVIEW_SYNC_INTERVAL_MS = 220
 let previewSyncTimer: number | null = null
+let tocRetryTimer: number | null = null
 
 const wordCount = computed(() => {
   const text = draft.value
@@ -191,6 +264,10 @@ const uploadBannerTitle = computed(() => {
   if (assetUploadTask.value.status === 'error') return '附件上传失败'
   return '附件上传完成'
 })
+
+const showEditorToc = computed(() =>
+  viewMode.value !== 'source' && previewDraft.value.trim().length > 0
+)
 
 function fmtDate(dateString: string) {
   const date = new Date(dateString.endsWith('Z') ? dateString : `${dateString}Z`)
@@ -277,10 +354,12 @@ function syncEditorScrollFromPreview() {
 function bindScrollSync() {
   editorScrollEl?.removeEventListener('scroll', syncPreviewScrollFromEditor)
   previewBodyRef.value?.removeEventListener('scroll', syncEditorScrollFromPreview)
+  previewBodyRef.value?.removeEventListener('scroll', updateActiveTocByScroll)
 
   editorScrollEl = getEditorScrollElement()
   editorScrollEl?.addEventListener('scroll', syncPreviewScrollFromEditor, { passive: true })
   previewBodyRef.value?.addEventListener('scroll', syncEditorScrollFromPreview, { passive: true })
+  previewBodyRef.value?.addEventListener('scroll', updateActiveTocByScroll, { passive: true })
 }
 
 function scrollEditorToBottom() {
@@ -318,6 +397,171 @@ function syncAgentEditorBridge() {
     },
     save,
   })
+}
+
+function slugifyHeading(text: string) {
+  return text
+    .trim()
+    .toLowerCase()
+    .replace(/[\s\W-]+/g, '-')
+    .replace(/^-+|-+$/g, '') || 'section'
+}
+
+function clearTocRetryTimer() {
+  if (tocRetryTimer !== null) {
+    window.clearTimeout(tocRetryTimer)
+    tocRetryTimer = null
+  }
+}
+
+function resetTocState() {
+  tocItems.value = []
+  activeTocId.value = ''
+  selectedTocId.value = ''
+  tocReady.value = false
+  clearTocRetryTimer()
+}
+
+function getPreviewHeadings() {
+  const container = previewBodyRef.value
+  if (!container) return [] as HTMLElement[]
+  return Array.from(
+    container.querySelectorAll<HTMLElement>('.vditor-reset h1, .vditor-reset h2, .vditor-reset h3, .vditor-reset h4, .vditor-reset h5, .vditor-reset h6')
+  )
+}
+
+function updateActiveTocByScroll() {
+  const container = previewBodyRef.value
+  const headings = getPreviewHeadings()
+  if (!container || !headings.length || !tocItems.value.length) {
+    activeTocId.value = ''
+    return
+  }
+
+  const containerTop = container.getBoundingClientRect().top
+  let current = headings[0]
+  for (const heading of headings) {
+    if (heading.getBoundingClientRect().top - containerTop <= 96) current = heading
+    else break
+  }
+  activeTocId.value = current.id
+  selectedTocId.value = current.id
+}
+
+function refreshTocFromPreview(options: { preserveExisting?: boolean } = {}) {
+  const preserveExisting = options.preserveExisting === true
+  const headings = getPreviewHeadings()
+  if (!headings.length) {
+    if (!preserveExisting) {
+      tocItems.value = []
+      activeTocId.value = ''
+      selectedTocId.value = ''
+    }
+    return false
+  }
+
+  const counts = new Map<string, number>()
+  tocItems.value = headings.map((heading, index) => {
+    const text = heading.textContent?.trim() || `标题 ${index + 1}`
+    const level = Number(heading.tagName.slice(1)) || 1
+    const baseId = slugifyHeading(text)
+    const count = counts.get(baseId) || 0
+    counts.set(baseId, count + 1)
+    const nextId = count === 0 ? baseId : `${baseId}-${count + 1}`
+    heading.id = nextId
+    return { id: nextId, text, level, order: index }
+  })
+
+  if (!selectedTocId.value || !tocItems.value.some((item) => item.id === selectedTocId.value)) {
+    selectedTocId.value = tocItems.value[0]?.id || ''
+  }
+
+  updateActiveTocByScroll()
+  return true
+}
+
+function scheduleTocRefresh(attempt = 0, preserveExisting = false) {
+  clearTocRetryTimer()
+  tocRetryTimer = window.setTimeout(() => {
+    const found = refreshTocFromPreview({ preserveExisting: preserveExisting && attempt < 8 })
+    if (found) {
+      tocReady.value = true
+      return
+    }
+    if (attempt >= 8) {
+      if (preserveExisting) {
+        refreshTocFromPreview()
+      }
+      tocReady.value = true
+      return
+    }
+    scheduleTocRefresh(attempt + 1, preserveExisting)
+  }, 80)
+}
+
+function handlePreviewRendered(payload?: PreviewRenderedPayload) {
+  syncPreviewScrollFromEditor()
+  void nextTick().then(() => {
+    if (payload?.headings?.length) {
+      const headings = getPreviewHeadings()
+      const counts = new Map<string, number>()
+      tocItems.value = headings.map((heading, index) => {
+        const source = payload.headings[index]
+        const text = source?.text || heading.textContent?.trim() || `标题 ${index + 1}`
+        const level = source?.level || Number(heading.tagName.slice(1)) || 1
+        const baseId = slugifyHeading(text)
+        const count = counts.get(baseId) || 0
+        counts.set(baseId, count + 1)
+        const nextId = count === 0 ? baseId : `${baseId}-${count + 1}`
+        heading.id = nextId
+        return { id: nextId, text, level, order: index }
+      })
+
+      if (!selectedTocId.value || !tocItems.value.some((item) => item.id === selectedTocId.value)) {
+        selectedTocId.value = tocItems.value[0]?.id || ''
+      }
+
+      tocReady.value = true
+      clearTocRetryTimer()
+      updateActiveTocByScroll()
+      if (tocItems.value.length) return
+    }
+
+    const hadExistingToc = tocItems.value.length > 0
+    const found = refreshTocFromPreview({ preserveExisting: hadExistingToc })
+    if (found) {
+      tocReady.value = true
+      clearTocRetryTimer()
+      return
+    }
+
+    if (hadExistingToc) {
+      clearTocRetryTimer()
+      scheduleTocRefresh(0, true)
+      return
+    }
+
+    tocReady.value = false
+    scheduleTocRefresh()
+  })
+}
+
+function scrollToHeading(item: TocItem) {
+  const container = previewBodyRef.value
+  const headings = getPreviewHeadings()
+  const target = headings[item.order]
+  if (!container || !target) return
+  selectedTocId.value = item.id
+  const nextTop = container.scrollTop + target.getBoundingClientRect().top - container.getBoundingClientRect().top - 24
+  container.scrollTo({
+    top: Math.max(0, nextTop),
+    behavior: 'smooth',
+  })
+  activeTocId.value = item.id
+}
+
+function toggleTocPanel() {
+  tocPanelOpen.value = !tocPanelOpen.value
 }
 
 function beginAssetUpload(kind: 'doc-image' | 'doc-file', file: File) {
@@ -795,6 +1039,7 @@ watch(
     previewDraft.value = next
     originalContent = props.node.content || ''
     isDirty.value = next !== originalContent
+    resetTocState()
     if (!editor) {
       await initEditor()
       return
@@ -815,6 +1060,7 @@ watch(
     previewDraft.value = restored
     originalContent = next
     isDirty.value = restored !== originalContent
+    resetTocState()
     if (editor.getValue() !== restored) {
       editor.setValue(restored, true)
     }
@@ -827,10 +1073,12 @@ watch(viewMode, async (mode) => {
   if (mode === 'preview' || mode === 'split') {
     queuePreviewDraftSync(true)
   }
-  if (mode !== 'split') return
   await nextTick()
   bindScrollSync()
-  syncPreviewScrollFromEditor()
+  if (mode === 'split') {
+    syncPreviewScrollFromEditor()
+  }
+  updateActiveTocByScroll()
 })
 
 watch(isFullscreen, async () => {
@@ -864,12 +1112,14 @@ onUnmounted(() => {
   clearAgentEditorSnapshot(props.node.id)
   editorScrollEl?.removeEventListener('scroll', syncPreviewScrollFromEditor)
   previewBodyRef.value?.removeEventListener('scroll', syncEditorScrollFromPreview)
+  previewBodyRef.value?.removeEventListener('scroll', updateActiveTocByScroll)
   if (scrollUnlockFrame) {
     cancelAnimationFrame(scrollUnlockFrame)
   }
   if (previewSyncTimer !== null) {
     window.clearTimeout(previewSyncTimer)
   }
+  clearTocRetryTimer()
   clearAssetUploadTask()
   if (editor) {
     editor.destroy()
@@ -1256,6 +1506,178 @@ onUnmounted(() => {
   padding: 20px 24px 30px;
 }
 
+.sy-editor-toc {
+  position: absolute;
+  top: 68px;
+  right: 18px;
+  bottom: 18px;
+  width: 270px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border: 1px solid rgba(50, 64, 38, 0.08);
+  border-radius: 22px;
+  background: rgba(252, 253, 248, 0.92);
+  box-shadow:
+    0 20px 44px rgba(49, 64, 39, 0.14),
+    inset 0 1px 0 rgba(255, 255, 255, 0.7);
+  backdrop-filter: blur(16px);
+  color: var(--sy-text);
+  overflow: hidden;
+  z-index: 3;
+}
+
+.sy-editor-toc.collapsed {
+  width: auto;
+  padding: 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+}
+
+.sy-editor-toc-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  align-self: flex-end;
+  height: 42px;
+  padding: 0 12px;
+  border: 1px solid rgba(82, 110, 60, 0.16);
+  border-radius: 999px;
+  background: rgba(250, 252, 246, 0.96);
+  color: #4b6135;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  box-shadow: 0 16px 34px rgba(49, 64, 39, 0.16);
+}
+
+.sy-editor-toc-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 16px 16px 12px;
+  border-bottom: 1px solid rgba(53, 67, 40, 0.08);
+}
+
+.sy-editor-toc-kicker {
+  font-size: 10px;
+  line-height: 1;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: #8b9784;
+}
+
+.sy-editor-toc-title {
+  margin-top: 6px;
+  font-size: 15px;
+  font-weight: 700;
+  color: #1f2819;
+}
+
+.sy-editor-toc-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid rgba(82, 110, 60, 0.14);
+  border-radius: 10px;
+  background: rgba(247, 250, 242, 0.88);
+  color: #5c6d4f;
+  cursor: pointer;
+}
+
+.sy-editor-toc-tab:hover,
+.sy-editor-toc-toggle:hover {
+  background: rgba(237, 244, 228, 0.98);
+  color: #2f4a1a;
+}
+
+.sy-editor-toc-list {
+  max-height: calc(100% - 68px);
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 10px 10px 14px;
+}
+
+.sy-editor-toc-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 34px;
+  border: 0;
+  border-radius: 12px;
+  padding: 7px 10px;
+  background: transparent;
+  color: #53614a;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color 0.15s ease,
+    color 0.15s ease,
+    transform 0.15s ease;
+}
+
+.sy-editor-toc-item:hover {
+  background: rgba(111, 154, 79, 0.1);
+  color: #2f4a1a;
+}
+
+.sy-editor-toc-item.active {
+  background: rgba(111, 154, 79, 0.14);
+  color: #274412;
+}
+
+.sy-editor-toc-item.level-2 {
+  padding-left: 22px;
+}
+
+.sy-editor-toc-item.level-3 {
+  padding-left: 34px;
+}
+
+.sy-editor-toc-item.level-4,
+.sy-editor-toc-item.level-5,
+.sy-editor-toc-item.level-6 {
+  padding-left: 46px;
+}
+
+.sy-editor-toc-bullet {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  flex: 0 0 auto;
+  background: rgba(113, 145, 86, 0.44);
+}
+
+.sy-editor-toc-item.active .sy-editor-toc-bullet {
+  background: #5d8c37;
+  box-shadow: 0 0 0 4px rgba(111, 154, 79, 0.14);
+}
+
+.sy-editor-toc-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.sy-editor-toc-empty {
+  padding: 18px 16px 20px;
+  font-size: 12px;
+  color: var(--sy-text-faint);
+}
+
 :deep(.vditor) {
   height: 100%;
   border: none;
@@ -1542,6 +1964,10 @@ onUnmounted(() => {
 
   .sy-preview-body {
     padding: 16px 14px 18px;
+  }
+
+  .sy-editor-toc {
+    display: none;
   }
 
   .sy-view-switch {

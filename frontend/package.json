@@ -7,7 +7,8 @@
     "prepare:assets": "node ./scripts/prepare-offline-assets.mjs",
     "dev": "node ./scripts/prepare-offline-assets.mjs && vite",
     "build": "node ./scripts/prepare-offline-assets.mjs && vue-tsc && vite build",
-    "preview": "node ./scripts/prepare-offline-assets.mjs && vite preview"
+    "preview": "node ./scripts/prepare-offline-assets.mjs && vite preview",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@codemirror/commands": "^6.0.0",
@@ -28,10 +29,11 @@
     "vue-router": "^4.3.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "@types/node": "^20.0.0",
     "@vitejs/plugin-vue": "^5.0.0",
     "typescript": "^5.2.0",
     "vite": "^5.1.0",
-    "vue-tsc": "^2.0.0",
-    "@types/node": "^20.0.0"
+    "vue-tsc": "^2.0.0"
   }
 }
