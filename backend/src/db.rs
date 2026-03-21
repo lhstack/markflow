@@ -84,11 +84,299 @@ impl Database {
 
         self.ensure_user_columns().await?;
         self.ensure_agent_provider_columns().await?;
+        self.ensure_agent_mcp_schema().await?;
         self.ensure_doc_nodes_project_column().await?;
         self.backfill_existing_doc_project_ids().await?;
         self.create_indexes().await?;
 
         Ok(())
+    }
+
+    async fn ensure_agent_mcp_schema(&self) -> Result<()> {
+        self.ensure_agent_mcp_settings_schema().await?;
+        self.ensure_agent_mcp_servers_schema().await?;
+        self.repair_agent_mcp_settings_rows().await?;
+        self.repair_agent_mcp_servers_rows().await?;
+
+        sqlx::query(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_mcp_settings_user_id ON agent_mcp_settings(user_id)",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_agent_mcp_servers_user_id ON agent_mcp_servers(user_id)",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_agent_mcp_servers_enabled ON agent_mcp_servers(enabled)",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_agent_mcp_servers_updated_at ON agent_mcp_servers(updated_at)",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn ensure_agent_mcp_settings_schema(&self) -> Result<()> {
+        const CREATE_SQL: &str = r#"
+            CREATE TABLE IF NOT EXISTS agent_mcp_settings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+        "#;
+
+        if !self.table_exists("agent_mcp_settings").await? {
+            sqlx::query(CREATE_SQL).execute(&self.pool).await?;
+            return Ok(());
+        }
+
+        if self
+            .agent_mcp_settings_needs_rebuild()
+            .await?
+        {
+            self.rebuild_agent_mcp_table(
+                "agent_mcp_settings",
+                CREATE_SQL,
+                &["id", "user_id", "enabled", "created_at", "updated_at"],
+            )
+            .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn ensure_agent_mcp_servers_schema(&self) -> Result<()> {
+        const CREATE_SQL: &str = r#"
+            CREATE TABLE IF NOT EXISTS agent_mcp_servers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                transport TEXT NOT NULL CHECK(transport IN ('sse', 'streamable-http', 'stdio')),
+                url TEXT,
+                command TEXT,
+                args_json TEXT NOT NULL DEFAULT '[]',
+                env_ciphertext TEXT,
+                auth_type TEXT NOT NULL DEFAULT 'none',
+                auth_config_ciphertext TEXT,
+                custom_headers_ciphertext TEXT,
+                last_status TEXT,
+                last_error TEXT,
+                tools_snapshot TEXT NOT NULL DEFAULT '[]',
+                resources_snapshot TEXT NOT NULL DEFAULT '[]',
+                prompts_snapshot TEXT NOT NULL DEFAULT '[]',
+                last_sync_at TEXT,
+                config_version INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+        "#;
+
+        if !self.table_exists("agent_mcp_servers").await? {
+            sqlx::query(CREATE_SQL).execute(&self.pool).await?;
+            return Ok(());
+        }
+
+        if self.agent_mcp_servers_needs_rebuild().await? {
+            self.rebuild_agent_mcp_table(
+                "agent_mcp_servers",
+                CREATE_SQL,
+                &[
+                    "id",
+                    "user_id",
+                    "name",
+                    "enabled",
+                    "transport",
+                    "url",
+                    "command",
+                    "args_json",
+                    "env_ciphertext",
+                    "auth_type",
+                    "auth_config_ciphertext",
+                    "custom_headers_ciphertext",
+                    "last_status",
+                    "last_error",
+                    "tools_snapshot",
+                    "resources_snapshot",
+                    "prompts_snapshot",
+                    "last_sync_at",
+                    "config_version",
+                    "created_at",
+                    "updated_at",
+                ],
+            )
+            .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn agent_mcp_settings_needs_rebuild(&self) -> Result<bool> {
+        let required_columns = ["id", "user_id", "enabled", "created_at", "updated_at"];
+        let columns = self.table_columns("agent_mcp_settings").await?;
+        if required_columns
+            .iter()
+            .any(|column| !columns.iter().any(|existing| existing == column))
+        {
+            return Ok(true);
+        }
+
+        let sql = self.table_sql("agent_mcp_settings").await?.unwrap_or_default();
+        Ok(!sql.contains("enabled INTEGER NOT NULL DEFAULT 0")
+            || !sql.contains("created_at TEXT NOT NULL DEFAULT (datetime('now'))")
+            || !sql.contains("updated_at TEXT NOT NULL DEFAULT (datetime('now'))")
+            || !sql.contains("FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE"))
+    }
+
+    async fn agent_mcp_servers_needs_rebuild(&self) -> Result<bool> {
+        let required_columns = [
+            "id",
+            "user_id",
+            "name",
+            "enabled",
+            "transport",
+            "url",
+            "command",
+            "args_json",
+            "env_ciphertext",
+            "auth_type",
+            "auth_config_ciphertext",
+            "custom_headers_ciphertext",
+            "last_status",
+            "last_error",
+            "tools_snapshot",
+            "resources_snapshot",
+            "prompts_snapshot",
+            "last_sync_at",
+            "config_version",
+            "created_at",
+            "updated_at",
+        ];
+        let columns = self.table_columns("agent_mcp_servers").await?;
+        if required_columns
+            .iter()
+            .any(|column| !columns.iter().any(|existing| existing == column))
+        {
+            return Ok(true);
+        }
+
+        let sql = self.table_sql("agent_mcp_servers").await?.unwrap_or_default();
+        Ok(!sql.contains("enabled INTEGER NOT NULL DEFAULT 1")
+            || !sql.contains("transport TEXT NOT NULL CHECK(transport IN ('sse', 'streamable-http', 'stdio'))")
+            || !sql.contains("args_json TEXT NOT NULL DEFAULT '[]'")
+            || !sql.contains("auth_type TEXT NOT NULL DEFAULT 'none'")
+            || !sql.contains("tools_snapshot TEXT NOT NULL DEFAULT '[]'")
+            || !sql.contains("resources_snapshot TEXT NOT NULL DEFAULT '[]'")
+            || !sql.contains("prompts_snapshot TEXT NOT NULL DEFAULT '[]'")
+            || !sql.contains("config_version INTEGER NOT NULL DEFAULT 1")
+            || !sql.contains("updated_at TEXT NOT NULL DEFAULT (datetime('now'))")
+            || !sql.contains("FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE"))
+    }
+
+    async fn rebuild_agent_mcp_table(
+        &self,
+        table: &str,
+        create_sql: &str,
+        copy_columns: &[&str],
+    ) -> Result<()> {
+        let existing_columns = self.table_columns(table).await?;
+        let copy_columns = copy_columns
+            .iter()
+            .copied()
+            .filter(|column| existing_columns.iter().any(|existing| existing == column))
+            .collect::<Vec<_>>();
+        let temp_table = format!("{table}_legacy_repair");
+
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(&format!("DROP TABLE IF EXISTS {temp_table}"))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(&format!("ALTER TABLE {table} RENAME TO {temp_table}"))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(create_sql).execute(&mut *tx).await?;
+
+        if !copy_columns.is_empty() && copy_columns.iter().any(|column| *column == "user_id") {
+            let columns = copy_columns.join(", ");
+            sqlx::query(&format!(
+                "INSERT INTO {table} ({columns}) SELECT {columns} FROM {temp_table} WHERE EXISTS (SELECT 1 FROM users WHERE users.id = {temp_table}.user_id)"
+            ))
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        sqlx::query(&format!("DROP TABLE {temp_table}"))
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn repair_agent_mcp_settings_rows(&self) -> Result<()> {
+        sqlx::query(
+            r#"
+            DELETE FROM agent_mcp_settings
+             WHERE NOT EXISTS (
+                 SELECT 1
+                   FROM users
+                  WHERE users.id = agent_mcp_settings.user_id
+             )
+                OR rowid NOT IN (
+                 SELECT MAX(rowid)
+                   FROM agent_mcp_settings
+                  GROUP BY user_id
+             )
+        "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn repair_agent_mcp_servers_rows(&self) -> Result<()> {
+        sqlx::query(
+            r#"
+            DELETE FROM agent_mcp_servers
+             WHERE NOT EXISTS (
+                 SELECT 1
+                   FROM users
+                  WHERE users.id = agent_mcp_servers.user_id
+             )
+        "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn table_columns(&self, table: &str) -> Result<Vec<String>> {
+        let rows = sqlx::query(&format!("PRAGMA table_info({table})"))
+            .fetch_all(&self.pool)
+            .await?;
+
+        rows.into_iter()
+            .map(|row| row.try_get::<String, _>("name").map_err(Into::into))
+            .collect()
+    }
+
+    async fn table_sql(&self, table: &str) -> Result<Option<String>> {
+        sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?")
+            .bind(table)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(Into::into)
     }
 
     async fn create_tables(&self) -> Result<()> {
@@ -907,6 +1195,349 @@ impl Database {
             .await?;
 
         tx.commit().await?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn table_columns(db: &Database, table: &str) -> Result<Vec<String>> {
+        let rows = sqlx::query(&format!("PRAGMA table_info({table})"))
+            .fetch_all(&db.pool)
+            .await?;
+
+        rows.into_iter()
+            .map(|row| row.try_get::<String, _>("name").map_err(Into::into))
+            .collect()
+    }
+
+    async fn index_names(db: &Database, table: &str) -> Result<Vec<(String, bool)>> {
+        let rows = sqlx::query(&format!("PRAGMA index_list({table})"))
+            .fetch_all(&db.pool)
+            .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                Ok((
+                    row.try_get::<String, _>("name")?,
+                    row.try_get::<i64, _>("unique")? == 1,
+                ))
+            })
+            .collect()
+    }
+
+    async fn table_sql(db: &Database, table: &str) -> Result<Option<String>> {
+        sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?")
+            .bind(table)
+            .fetch_optional(&db.pool)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn foreign_keys(db: &Database, table: &str) -> Result<Vec<(String, String, String)>> {
+        let rows = sqlx::query(&format!("PRAGMA foreign_key_list({table})"))
+            .fetch_all(&db.pool)
+            .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                Ok((
+                    row.try_get::<String, _>("table")?,
+                    row.try_get::<String, _>("from")?,
+                    row.try_get::<String, _>("on_delete")?,
+                ))
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn migrate_creates_mcp_tables_and_preserves_agent_provider_rows() -> Result<()> {
+        let db = Database::new("sqlite::memory:").await?;
+        db.migrate().await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO users (username, password_hash)
+            VALUES ('mcp-tester', 'hash')
+        "#,
+        )
+        .execute(&db.pool)
+        .await?;
+        let user_id = sqlx::query_scalar::<_, i64>(
+            "SELECT id FROM users WHERE username = 'mcp-tester' LIMIT 1",
+        )
+        .fetch_one(&db.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO agent_providers (
+                user_id, name, provider_kind, base_url, api_key_ciphertext,
+                remote_models, enabled_models, custom_models, model_configs, is_active
+            ) VALUES (?, 'primary', 'openai', 'https://api.openai.com/v1', 'ciphertext', '[]', '[]', '[]', '{}', 1)
+        "#,
+        )
+        .bind(user_id)
+        .execute(&db.pool)
+        .await?;
+
+        db.migrate().await?;
+
+        let provider_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM agent_providers WHERE user_id = ?")
+                .bind(user_id)
+                .fetch_one(&db.pool)
+                .await?;
+        assert_eq!(provider_count, 1);
+
+        let settings_columns = table_columns(&db, "agent_mcp_settings").await?;
+        assert!(settings_columns.contains(&"user_id".to_string()));
+        assert!(settings_columns.contains(&"enabled".to_string()));
+
+        let settings_indexes = index_names(&db, "agent_mcp_settings").await?;
+        assert!(settings_indexes.iter().any(|(name, unique)| {
+            name.contains("agent_mcp_settings") && *unique
+        }));
+
+        let server_columns = table_columns(&db, "agent_mcp_servers").await?;
+        assert!(server_columns.contains(&"config_version".to_string()));
+
+        let server_indexes = index_names(&db, "agent_mcp_servers").await?;
+        assert!(server_indexes
+            .iter()
+            .any(|(name, _)| name.contains("user_id")));
+        assert!(server_indexes
+            .iter()
+            .any(|(name, _)| name.contains("enabled")));
+        assert!(server_indexes
+            .iter()
+            .any(|(name, _)| name.contains("updated_at")));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn migrate_repairs_partial_mcp_tables_and_restores_indexes() -> Result<()> {
+        let db = Database::new("sqlite::memory:").await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE agent_mcp_settings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        "#,
+        )
+        .execute(&db.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE agent_mcp_servers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                transport TEXT NOT NULL,
+                url TEXT,
+                command TEXT,
+                args_json TEXT NOT NULL DEFAULT '[]',
+                env_ciphertext TEXT,
+                auth_type TEXT NOT NULL DEFAULT 'none',
+                auth_config_ciphertext TEXT,
+                custom_headers_ciphertext TEXT,
+                tools_snapshot TEXT NOT NULL DEFAULT '[]',
+                resources_snapshot TEXT NOT NULL DEFAULT '[]',
+                prompts_snapshot TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        "#,
+        )
+        .execute(&db.pool)
+        .await?;
+
+        db.migrate().await?;
+
+        let settings_sql = table_sql(&db, "agent_mcp_settings")
+            .await?
+            .expect("settings sql should exist");
+        assert!(
+            settings_sql.contains("updated_at TEXT NOT NULL DEFAULT (datetime('now'))"),
+            "settings schema should restore updated_at default and constraint"
+        );
+        assert!(
+            settings_sql.contains("FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE"),
+            "settings schema should restore foreign key"
+        );
+
+        let settings_columns = table_columns(&db, "agent_mcp_settings").await?;
+        assert!(settings_columns.contains(&"updated_at".to_string()));
+        assert_eq!(
+            foreign_keys(&db, "agent_mcp_settings").await?,
+            vec![("users".to_string(), "user_id".to_string(), "CASCADE".to_string())]
+        );
+        let server_columns = table_columns(&db, "agent_mcp_servers").await?;
+        assert!(server_columns.contains(&"updated_at".to_string()));
+        assert!(server_columns.contains(&"config_version".to_string()));
+        assert!(server_columns.contains(&"last_status".to_string()));
+        assert!(server_columns.contains(&"last_error".to_string()));
+        assert!(server_columns.contains(&"last_sync_at".to_string()));
+
+        let server_sql = table_sql(&db, "agent_mcp_servers")
+            .await?
+            .expect("server sql should exist");
+        assert!(
+            server_sql.contains("CHECK(transport IN ('sse', 'streamable-http', 'stdio'))"),
+            "server schema should restore transport check constraint"
+        );
+        assert!(
+            server_sql.contains("FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE"),
+            "server schema should restore foreign key"
+        );
+        assert!(
+            server_sql.contains("config_version INTEGER NOT NULL DEFAULT 1"),
+            "server schema should restore config_version default"
+        );
+        assert_eq!(
+            foreign_keys(&db, "agent_mcp_servers").await?,
+            vec![("users".to_string(), "user_id".to_string(), "CASCADE".to_string())]
+        );
+
+        let settings_indexes = index_names(&db, "agent_mcp_settings").await?;
+        assert!(settings_indexes
+            .iter()
+            .any(|(name, unique)| name.contains("user_id") && *unique));
+
+        let server_indexes = index_names(&db, "agent_mcp_servers").await?;
+        assert!(server_indexes
+            .iter()
+            .any(|(name, _)| name.contains("user_id")));
+        assert!(server_indexes
+            .iter()
+            .any(|(name, _)| name.contains("enabled")));
+        assert!(server_indexes
+            .iter()
+            .any(|(name, _)| name.contains("updated_at")));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn migrate_repairs_dirty_mcp_data_with_orphans_and_duplicate_settings() -> Result<()> {
+        let db = Database::new("sqlite::memory:").await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                avatar TEXT,
+                totp_secret TEXT,
+                totp_enabled INTEGER NOT NULL DEFAULT 0,
+                is_super_admin INTEGER NOT NULL DEFAULT 0,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        "#,
+        )
+        .execute(&db.pool)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO users (id, username, password_hash)
+            VALUES (1, 'live-user', 'hash')
+        "#,
+        )
+        .execute(&db.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE agent_mcp_settings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        "#,
+        )
+        .execute(&db.pool)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO agent_mcp_settings (user_id, enabled, created_at)
+            VALUES (1, 0, '2024-01-01T00:00:00Z'),
+                   (1, 1, '2024-01-02T00:00:00Z')
+        "#,
+        )
+        .execute(&db.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE agent_mcp_servers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                transport TEXT NOT NULL,
+                url TEXT,
+                command TEXT,
+                args_json TEXT NOT NULL DEFAULT '[]',
+                env_ciphertext TEXT,
+                auth_type TEXT NOT NULL DEFAULT 'none',
+                auth_config_ciphertext TEXT,
+                custom_headers_ciphertext TEXT,
+                tools_snapshot TEXT NOT NULL DEFAULT '[]',
+                resources_snapshot TEXT NOT NULL DEFAULT '[]',
+                prompts_snapshot TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        "#,
+        )
+        .execute(&db.pool)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO agent_mcp_servers (
+                user_id, name, enabled, transport, url, command, args_json,
+                env_ciphertext, auth_type, auth_config_ciphertext,
+                custom_headers_ciphertext, tools_snapshot, resources_snapshot,
+                prompts_snapshot, created_at
+            ) VALUES
+                (1, 'live-server', 1, 'sse', 'https://example.com', NULL, '[]', NULL, 'none', NULL, NULL, '[]', '[]', '[]', '2024-01-01T00:00:00Z'),
+                (999, 'orphan-server', 1, 'sse', 'https://example.org', NULL, '[]', NULL, 'none', NULL, NULL, '[]', '[]', '[]', '2024-01-02T00:00:00Z')
+        "#,
+        )
+        .execute(&db.pool)
+        .await?;
+
+        db.migrate().await?;
+
+        let settings_rows = sqlx::query(
+            "SELECT id, user_id, enabled FROM agent_mcp_settings ORDER BY id",
+        )
+        .fetch_all(&db.pool)
+        .await?;
+        assert_eq!(settings_rows.len(), 1);
+        assert_eq!(settings_rows[0].try_get::<i64, _>("user_id")?, 1);
+        assert_eq!(settings_rows[0].try_get::<i64, _>("enabled")?, 1);
+
+        let server_rows = sqlx::query(
+            "SELECT id, user_id, name FROM agent_mcp_servers ORDER BY id",
+        )
+        .fetch_all(&db.pool)
+        .await?;
+        assert_eq!(server_rows.len(), 1);
+        assert_eq!(server_rows[0].try_get::<i64, _>("user_id")?, 1);
+        assert_eq!(server_rows[0].try_get::<String, _>("name")?, "live-server");
+
         Ok(())
     }
 }

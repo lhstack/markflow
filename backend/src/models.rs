@@ -92,6 +92,40 @@ pub struct AgentProvider {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct AgentMcpSettings {
+    pub id: i64,
+    pub user_id: i64,
+    pub enabled: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct AgentMcpServer {
+    pub id: i64,
+    pub user_id: i64,
+    pub name: String,
+    pub enabled: i64,
+    pub transport: String,
+    pub url: Option<String>,
+    pub command: Option<String>,
+    pub args_json: String,
+    pub env_ciphertext: Option<String>,
+    pub auth_type: String,
+    pub auth_config_ciphertext: Option<String>,
+    pub custom_headers_ciphertext: Option<String>,
+    pub last_status: Option<String>,
+    pub last_error: Option<String>,
+    pub tools_snapshot: String,
+    pub resources_snapshot: String,
+    pub prompts_snapshot: String,
+    pub last_sync_at: Option<String>,
+    pub config_version: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 // API response types
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UserInfo {

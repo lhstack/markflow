@@ -9,9 +9,22 @@ MarkFlow 是一个基于 `Rust + Vue 3` 的轻量文档系统，核心结构为�
 
 ## 当前版本
 
-当前工作区目标版本：`v1.0.8`
+当前工作区目标版本：`v1.0.9`
 
 以下版本说明基于 git 实际提交与当前工作区待发布改动整理。
+
+### v1.0.9
+
+基于 `v1.0.8..当前工作区` 的改动，`v1.0.9` 重点补齐编辑器目录能力与 AI 助手 MCP 管理链路：
+
+- 编辑器预览区新增文档目录浮层，支持根据当前文档标题动态生成目录、点击目录项跳转到对应标题，并在预览重新渲染后同步刷新目录内容
+- 调整编辑器目录交互与布局：目录按钮改为悬浮显示，不再挤压预览正文区域；展开面板宽度、留白和滚动表现也进一步向分享页样式靠齐
+- AI 助手配置新增独立的 `MCP 配置` 入口，不再混在供应商配置弹窗内部；MCP 管理改为单独弹窗，并优化为左右分栏独立滚动、底部操作区固定可见
+- 后端正式接入 MCP runtime，支持 `sse`、`streamable-http` 与 `stdio` 三种 transport，补齐配置持久化、连接测试、能力刷新、工具/资源/提示快照与聊天时的实际 MCP 注入
+- MCP HTTP 配置支持多种认证模式与自定义 Headers，`stdio` 配置支持命令、参数、环境变量，并通过后端 allowlist 与开关控制是否展示和可用
+- MCP 测试连接与刷新能力改为基于当前表单草稿执行，不必先保存才能验证配置；同时支持新增/复制时直接创建一条默认未启用的后端草稿记录，关闭弹窗后配置不会丢失
+- 收紧 MCP transport 校验与诊断：切换到 `streamable-http` 时会拒绝继续使用 legacy `/sse` 端点；legacy SSE 心跳空消息会被忽略，不再刷无意义解析警告
+- 后端配置与文档补充 `MCP_STDIO_ENABLED / MCP_STDIO_ALLOWED_COMMANDS`，用于控制 `stdio` 是否开启以及允许拉起的命令白名单
 
 ### v1.0.8
 
@@ -178,6 +191,7 @@ MarkFlow 是一个基于 `Rust + Vue 3` 的轻量文档系统，核心结构为�
 - 智能体与 AI 协作
 - 页面内对话助手与独立 Agent Workbench
 - provider kind / model config / modalities 管理
+- 独立 MCP 管理与 `sse / streamable-http / stdio` 接入
 - 前端工具调用桥接与后端主导多轮 loop
 - `[[ACTION:append]] / [[ACTION:replace]]` 流式写文协议
 - ACTION 未闭合时自动 continuation 补写
@@ -210,7 +224,7 @@ markflow/
 │  └─ src/
 └─ frontend/
    ├─ package.json
-   ├─ bun.lock
+   ├─ pnpm-lock.yaml
    └─ src/
 ```
 
@@ -218,8 +232,8 @@ markflow/
 
 - Rust stable（建议 1.93.1）
 - Cargo
-- Node.js 18+（若使用 npm）
-- Bun 1.3.9（推荐）
+- Node.js 18+
+- pnpm 9+（推荐）
 
 ## 本地开发
 
@@ -234,20 +248,12 @@ cargo run
 
 ### 2) 启动前端
 
-使用 Bun：
+使用 pnpm：
 
 ```bash
 cd frontend
-bun install
-bun run dev
-```
-
-或使用 npm：
-
-```bash
-cd frontend
-npm install
-npm run dev
+pnpm install
+pnpm dev
 ```
 
 前端默认地址：`http://localhost:5173`
@@ -258,6 +264,49 @@ npm run dev
 
 - 前端构建前会自动准备离线资源，把 `vditor/dist` 复制到 `frontend/public/vendor/vditor/dist`
 - `Vditor` 编辑器和预览渲染都走本地 `/vendor/vditor` 资源，不依赖外网 CDN
+
+## 后端配置
+
+后端启动时会优先读取可执行文件同目录下的 `config.toml`，同时环境变量会覆盖同名配置。
+
+### MCP stdio 开启方式
+
+MCP 的 `stdio` 传输默认是关闭的。只有后端明确开启后，前端的 MCP 配置弹窗里才会显示 `stdio` 选项。
+
+可用的配置项在 [backend/config.toml](/Volumes/Documents/projects/rust/markflow/backend/config.toml)：
+
+```toml
+mcp_stdio_enabled = false
+mcp_stdio_allowed_commands = ["npx", "node", "uvx"]
+```
+
+含义是：
+
+- `mcp_stdio_enabled`
+  控制是否启用 MCP stdio 能力。设为 `true` 后，前端才会显示 `stdio` 配置。
+- `mcp_stdio_allowed_commands`
+  stdio 命令白名单。只有这里列出的命令才允许被 MCP 启动。
+
+对应环境变量是：
+
+- `MCP_STDIO_ENABLED`
+- `MCP_STDIO_ALLOWED_COMMANDS`
+
+示例：
+
+```bash
+export MCP_STDIO_ENABLED=true
+export MCP_STDIO_ALLOWED_COMMANDS=npx,node,uvx
+cd backend
+cargo run
+```
+
+说明：
+
+- `MCP_STDIO_ENABLED` 支持常见布尔值：`true/false`、`1/0`、`yes/no`、`on/off`
+- `MCP_STDIO_ALLOWED_COMMANDS` 使用逗号分隔，例如 `npx,node,uvx`
+- 环境变量优先级高于 `config.toml`
+- 如果 `mcp_stdio_enabled=false` 或未设置，前端不会显示 `stdio`
 - `Element Plus`、`@element-plus/icons-vue` 等前端依赖通过 npm/bun 本地安装后直接参与打包
 - 已移除 `Google Fonts` 外链，运行时不再请求 `fonts.googleapis.com` / `fonts.gstatic.com`
 

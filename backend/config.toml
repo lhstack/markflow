@@ -36,3 +36,14 @@ log_rotate_days = 1
 
 # Keep rotated logs for this many days (<=0 means keep forever)
 log_keep_days = 14
+
+# MCP stdio support
+# Default is disabled. When disabled, the frontend will not show the stdio transport option.
+# You can enable it here or by environment variable `MCP_STDIO_ENABLED=true`.
+mcp_stdio_enabled = false
+
+# Allowed stdio command whitelist.
+# Only commands listed here can be launched by MCP stdio.
+# You can also override it by environment variable:
+# MCP_STDIO_ALLOWED_COMMANDS=npx,node,uvx
+mcp_stdio_allowed_commands = ["npx", "node", "uvx"]

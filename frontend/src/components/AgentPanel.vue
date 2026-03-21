@@ -66,7 +66,10 @@
                 <el-button class="agent-header-icon" :icon="Plus" circle @click="createSession" />
               </el-tooltip>
               <el-tooltip content="供应商管理" placement="top">
-                <el-button class="agent-header-icon" :icon="Setting" circle @click="showProviderDialog = true" />
+                <el-button class="agent-header-icon" :icon="Setting" circle @click="openProviderDialog" />
+              </el-tooltip>
+              <el-tooltip content="MCP 管理" placement="top">
+                <el-button class="agent-header-icon" :icon="Connection" circle @click="openMcpDialog" />
               </el-tooltip>
               <button class="header-btn" title="清空当前会话" @click="clearCurrentSession">清空</button>
               <button class="header-btn" title="收起" @click="toggleCollapse(true)">收起</button>
@@ -261,7 +264,7 @@
       </section>
     </div>
 
-    <el-dialog v-model="showProviderDialog" class="agent-dialog provider-dialog" title="供应商配置" width="760px" append-to-body destroy-on-close>
+    <el-dialog v-model="showProviderDialog" class="agent-dialog provider-dialog" title="供应商配置" width="820px" append-to-body destroy-on-close>
       <div class="provider-manager">
         <aside class="provider-list-pane">
           <div class="provider-list">
@@ -297,7 +300,7 @@
             <div>认证方式：{{ providerDraftPreset.auth }}</div>
             <div>拉取模型：{{ providerDraftPreset.modelsApi }}</div>
             <div>常见模型：{{ providerDraftPreset.models.join('、') }}</div>
-            <div>供应商配置仅保存在当前浏览器。保存后请到“模型管理”里配置可选模型。</div>
+            <div>供应商配置会持久化到后端。保存后请到“模型管理”里配置可选模型。</div>
           </div>
         </section>
       </div>
@@ -307,6 +310,263 @@
         <el-button :disabled="!providerDraft.id" @click="activateProvider(providerDraft.id)">设为激活</el-button>
         <el-button type="danger" plain :disabled="!providerDraft.id" @click="removeProvider(providerDraft.id)">删除</el-button>
         <el-button type="primary" @click="saveProviderDraft">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="showMcpDialog" class="agent-dialog provider-dialog mcp-dialog" title="MCP 配置" width="840px" append-to-body destroy-on-close align-center>
+      <div class="provider-manager">
+        <aside class="provider-list-pane">
+          <div class="mcp-settings-card">
+            <div class="mcp-settings-copy">
+              <div class="mcp-settings-title">启用 MCP</div>
+              <div class="mcp-settings-desc">开启后，聊天会把已启用的 MCP 服务注入到当前工具链。</div>
+            </div>
+            <el-switch
+              v-model="mcpSettingsEnabled"
+              :loading="mcpSettingsSaving"
+              inline-prompt
+              active-text="开"
+              inactive-text="关"
+              @change="handleMcpSettingsChange"
+            />
+          </div>
+
+          <div class="provider-list">
+            <button
+              v-for="server in mcpServers"
+              :key="server.id"
+              class="provider-item mcp-item"
+              :class="{ active: server.id === mcpDraft.id }"
+              @click="editMcpServer(server.id)"
+            >
+              <span class="provider-item-name">
+                {{ server.name }}
+                <span v-if="server.enabled" class="provider-item-tag">已启用</span>
+              </span>
+              <span class="provider-item-meta">{{ mcpTransportLabel(server.transport) }} · {{ mcpStatusLabel(server.lastStatus) }}</span>
+              <span v-if="server.lastError" class="mcp-item-error">{{ server.lastError }}</span>
+            </button>
+
+            <div v-if="!mcpServers.length && !mcpLoading" class="provider-hint">还没有 MCP 服务，点击“新增”开始配置。</div>
+            <div v-else-if="mcpLoading" class="provider-hint">正在加载 MCP 配置…</div>
+          </div>
+
+          <div class="mcp-runtime-hint">
+            <div>可用传输：{{ availableMcpTransports.length ? availableMcpTransports.map((item) => mcpTransportLabel(item)).join(' / ') : '加载中' }}</div>
+            <div v-if="mcpRuntimeCapabilities.stdioEnabled">
+              允许的 STDIO 命令：{{ mcpRuntimeCapabilities.stdioAllowedCommands.length ? mcpRuntimeCapabilities.stdioAllowedCommands.join('、') : '未限制' }}
+            </div>
+            <div v-else>当前后端未开启 `stdio`，因此不会显示对应配置项。</div>
+          </div>
+        </aside>
+
+        <section class="provider-editor mcp-editor">
+          <div class="mcp-form-grid">
+            <label class="mcp-field">
+              <span class="mcp-field-label">名称</span>
+              <el-input v-model="mcpDraft.name" placeholder="例如 文档知识库 / 项目检索 / GitHub MCP" />
+            </label>
+
+            <label class="mcp-field">
+              <span class="mcp-field-label">启用</span>
+              <div class="mcp-field-inline">
+                <el-switch v-model="mcpDraft.enabled" inline-prompt active-text="开" inactive-text="关" />
+                <span class="mcp-field-help">关闭后仍会保留配置，但不会注入到聊天工具链。</span>
+              </div>
+            </label>
+
+            <label class="mcp-field">
+              <span class="mcp-field-label">传输</span>
+              <el-select v-model="mcpDraft.transport" placeholder="选择传输方式">
+                <el-option
+                  v-for="transport in availableMcpTransports"
+                  :key="transport"
+                  :label="mcpTransportLabel(transport)"
+                  :value="transport"
+                />
+              </el-select>
+            </label>
+
+            <template v-if="mcpIsHttpTransport">
+              <label class="mcp-field mcp-field-full">
+                <span class="mcp-field-label">HTTP URL</span>
+                <el-input
+                  v-model="mcpDraft.url"
+                  :placeholder="mcpDraft.transport === 'sse' ? 'https://example.com/mcp/sse' : 'https://example.com/mcp'"
+                />
+              </label>
+
+              <label class="mcp-field">
+                <span class="mcp-field-label">认证方式</span>
+                <el-select v-model="mcpDraft.authType">
+                  <el-option label="无认证" value="none" />
+                  <el-option label="Bearer Token" value="bearer" />
+                  <el-option label="Basic Auth" value="basic" />
+                  <el-option label="Header" value="header" />
+                  <el-option label="Query" value="query" />
+                </el-select>
+              </label>
+
+              <template v-if="mcpDraft.authType === 'bearer'">
+                <label class="mcp-field">
+                  <span class="mcp-field-label">Scheme</span>
+                  <el-input v-model="mcpDraft.bearerScheme" placeholder="默认 Bearer，可改成 Token 等" />
+                </label>
+                <label class="mcp-field">
+                  <span class="mcp-field-label">Token</span>
+                  <el-input v-model="mcpDraft.bearerToken" type="password" show-password placeholder="Bearer Token" />
+                </label>
+              </template>
+
+              <template v-else-if="mcpDraft.authType === 'basic'">
+                <label class="mcp-field">
+                  <span class="mcp-field-label">用户名</span>
+                  <el-input v-model="mcpDraft.authUsername" placeholder="basic auth 用户名" />
+                </label>
+                <label class="mcp-field">
+                  <span class="mcp-field-label">密码</span>
+                  <el-input v-model="mcpDraft.authPassword" type="password" show-password placeholder="Basic Auth 密码" />
+                </label>
+              </template>
+
+              <template v-else-if="mcpDraft.authType === 'header'">
+                <label class="mcp-field">
+                  <span class="mcp-field-label">Header 名称</span>
+                  <el-input v-model="mcpDraft.authHeaderName" placeholder="例如 Authorization / X-Api-Key" />
+                </label>
+                <label class="mcp-field">
+                  <span class="mcp-field-label">Header 值</span>
+                  <el-input v-model="mcpDraft.authHeaderValue" type="password" show-password placeholder="Header 值" />
+                </label>
+              </template>
+
+              <template v-else-if="mcpDraft.authType === 'query'">
+                <label class="mcp-field">
+                  <span class="mcp-field-label">Query 参数名</span>
+                  <el-input v-model="mcpDraft.authQueryName" placeholder="例如 api_key / token" />
+                </label>
+                <label class="mcp-field">
+                  <span class="mcp-field-label">Query 参数值</span>
+                  <el-input v-model="mcpDraft.authQueryValue" type="password" show-password placeholder="Query 参数值" />
+                </label>
+              </template>
+
+              <div class="mcp-secret-block mcp-field-full">
+                <div class="mcp-secret-head">
+                  <div>
+                    <div class="mcp-field-label">自定义 Headers</div>
+                    <div class="mcp-field-help">按 `KEY: VALUE` 每行一条。保存时会和认证信息一起发给 MCP 服务。</div>
+                  </div>
+                  <el-select v-model="mcpDraft.customHeadersMode" class="mcp-secret-mode-select">
+                    <el-option label="保留当前" value="keep" />
+                    <el-option label="整体替换" value="replace" />
+                    <el-option label="清空" value="clear" />
+                  </el-select>
+                </div>
+
+                <el-input
+                  v-if="mcpDraft.customHeadersMode === 'replace'"
+                  v-model="mcpDraft.customHeadersText"
+                  type="textarea"
+                  :rows="5"
+                  placeholder="例如&#10;X-Workspace: markflow&#10;X-Trace-Id: local-dev"
+                />
+              </div>
+            </template>
+
+            <template v-else>
+              <label class="mcp-field">
+                <span class="mcp-field-label">STDIO Command</span>
+                <el-input v-model="mcpDraft.command" placeholder="例如 npx / uvx / node / python" />
+              </label>
+
+              <label class="mcp-field">
+                <span class="mcp-field-label">允许范围</span>
+                <div class="mcp-field-inline">
+                  <span class="mcp-field-help">
+                    {{ mcpRuntimeCapabilities.stdioAllowedCommands.length ? `当前允许：${mcpRuntimeCapabilities.stdioAllowedCommands.join('、')}` : '当前未配置命令白名单' }}
+                  </span>
+                </div>
+              </label>
+
+              <label class="mcp-field mcp-field-full">
+                <span class="mcp-field-label">STDIO Args</span>
+                <el-input
+                  v-model="mcpDraft.argsText"
+                  type="textarea"
+                  :rows="4"
+                  placeholder="每行一个参数，例如&#10;-y&#10;@modelcontextprotocol/server-filesystem&#10;/path/to/workspace"
+                />
+              </label>
+
+              <div class="mcp-secret-block mcp-field-full">
+                <div class="mcp-secret-head">
+                  <div>
+                    <div class="mcp-field-label">STDIO Env</div>
+                    <div class="mcp-field-help">按 `KEY=VALUE` 每行一条。敏感值会加密后持久化到后端。</div>
+                  </div>
+                  <el-select v-model="mcpDraft.stdioEnvMode" class="mcp-secret-mode-select">
+                    <el-option label="保留当前" value="keep" />
+                    <el-option label="整体替换" value="replace" />
+                    <el-option label="清空" value="clear" />
+                  </el-select>
+                </div>
+
+                <el-input
+                  v-if="mcpDraft.stdioEnvMode === 'replace'"
+                  v-model="mcpDraft.stdioEnvText"
+                  type="textarea"
+                  :rows="5"
+                  placeholder="例如&#10;OPENAI_API_KEY=xxxx&#10;GITHUB_TOKEN=yyyy"
+                />
+              </div>
+            </template>
+          </div>
+
+          <div class="mcp-status-card">
+            <div class="mcp-status-row">
+              <span class="mcp-status-label">状态</span>
+              <span class="mcp-status-value">{{ mcpStatusLabel(mcpDraft.lastStatus) }}</span>
+            </div>
+            <div class="mcp-status-row">
+              <span class="mcp-status-label">配置版本</span>
+              <span class="mcp-status-value">{{ mcpDraft.configVersion || '-' }}</span>
+            </div>
+            <div class="mcp-status-row">
+              <span class="mcp-status-label">最近同步</span>
+              <span class="mcp-status-value">{{ formatOptionalTimestamp(mcpDraft.lastSyncAt) }}</span>
+            </div>
+            <div v-if="mcpDraft.lastError" class="mcp-status-error">{{ mcpDraft.lastError }}</div>
+          </div>
+
+          <div class="mcp-snapshot-card">
+            <el-tabs v-model="activeMcpSnapshotTab" class="mcp-snapshot-tabs">
+              <el-tab-pane label="Tools" name="tools" />
+              <el-tab-pane label="Resources" name="resources" />
+              <el-tab-pane label="Prompts" name="prompts" />
+            </el-tabs>
+
+            <div v-if="activeMcpSnapshotEntries.length" class="mcp-snapshot-list">
+              <article
+                v-for="(entry, index) in activeMcpSnapshotEntries"
+                :key="`${activeMcpSnapshotTab}-${index}`"
+                class="mcp-snapshot-item"
+              >
+                <div class="mcp-snapshot-title">{{ mcpSnapshotEntryTitle(entry, index) }}</div>
+                <pre class="mcp-snapshot-raw">{{ mcpSnapshotEntryDetail(entry) }}</pre>
+              </article>
+            </div>
+            <div v-else class="provider-hint">还没有能力快照。可以直接测试当前表单参数，确认没问题后再保存。</div>
+          </div>
+        </section>
+      </div>
+      <template #footer>
+        <el-button @click="startCreateMcpServer">新增</el-button>
+        <el-button :disabled="!mcpDraft.id" @click="duplicateMcpServer">复制</el-button>
+        <el-button type="danger" plain :disabled="!mcpDraft.id" @click="removeMcpServer(mcpDraft.id)">删除</el-button>
+        <el-button :loading="mcpTesting" @click="testMcpServerConnection">测试连接</el-button>
+        <el-button :loading="mcpRefreshing" @click="refreshMcpServerCapabilities">刷新能力</el-button>
+        <el-button type="primary" :loading="mcpSaving" @click="saveMcpServerDraft">保存</el-button>
       </template>
     </el-dialog>
 
@@ -639,7 +899,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, triggerRef, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Plus, QuestionFilled, Setting } from '@element-plus/icons-vue'
+import { Connection, Plus, QuestionFilled, Setting } from '@element-plus/icons-vue'
 
 import request from '@/utils/request'
 import {
@@ -969,6 +1229,176 @@ interface ProviderDetailResponse {
   is_active?: boolean
 }
 
+type McpTransport = 'sse' | 'streamable-http' | 'stdio'
+type McpAuthType = 'none' | 'bearer' | 'basic' | 'header' | 'query'
+type McpSecretCollectionMode = 'keep' | 'replace' | 'clear'
+type McpSnapshotTab = 'tools' | 'resources' | 'prompts'
+
+interface McpRuntimeCapabilities {
+  transports: McpTransport[]
+  stdioEnabled: boolean
+  stdioAllowedCommands: string[]
+}
+
+interface McpRuntimeCapabilitiesApiResponse {
+  transports?: string[]
+  stdio_enabled?: boolean
+  stdio_allowed_commands?: string[]
+}
+
+interface McpSettingsState {
+  enabled: boolean
+  updatedAt: number | null
+}
+
+interface McpSettingsApiResponse {
+  settings?: {
+    enabled?: boolean
+    updated_at?: string | null
+  }
+}
+
+interface McpSecretValueResponse {
+  has_value?: boolean
+  value?: string | null
+}
+
+interface McpSecretEntry {
+  name: string
+  hasValue: boolean
+  value: string
+}
+
+interface McpSecretEntryApiResponse {
+  name?: string
+  has_value?: boolean
+  value?: string | null
+}
+
+interface McpAuthDetail {
+  authType: McpAuthType
+  scheme: string
+  username: string
+  headerName: string
+  queryName: string
+  tokenHasValue: boolean
+  passwordHasValue: boolean
+  valueHasValue: boolean
+  tokenValue: string
+  passwordValue: string
+  valueText: string
+}
+
+interface McpAuthDetailApiResponse {
+  auth_type?: string
+  scheme?: string | null
+  username?: string | null
+  header_name?: string | null
+  query_name?: string | null
+  token?: McpSecretValueResponse
+  password?: McpSecretValueResponse
+  value?: McpSecretValueResponse
+}
+
+interface McpServerSummary {
+  id: string
+  name: string
+  enabled: boolean
+  transport: McpTransport
+  url: string
+  command: string
+  authType: McpAuthType
+  lastStatus: string | null
+  lastError: string | null
+  configVersion: number
+  createdAt: number
+  updatedAt: number
+}
+
+interface McpServerSummaryApiResponse {
+  id: number | string
+  name?: string
+  enabled?: boolean
+  transport?: string
+  url?: string | null
+  command?: string | null
+  auth_type?: string
+  last_status?: string | null
+  last_error?: string | null
+  config_version?: number
+  created_at?: string
+  updated_at?: string
+}
+
+interface McpServerDetail extends McpServerSummary {
+  args: string[]
+  auth: McpAuthDetail | null
+  customHeaders: McpSecretEntry[]
+  stdioEnv: McpSecretEntry[]
+  toolsSnapshot: unknown[]
+  resourcesSnapshot: unknown[]
+  promptsSnapshot: unknown[]
+  lastSyncAt: number | null
+}
+
+interface McpServerDetailApiResponse extends McpServerSummaryApiResponse {
+  args?: string[]
+  auth?: McpAuthDetailApiResponse | null
+  custom_headers?: McpSecretEntryApiResponse[]
+  stdio_env?: McpSecretEntryApiResponse[]
+  tools_snapshot?: unknown
+  resources_snapshot?: unknown
+  prompts_snapshot?: unknown
+  last_sync_at?: string | null
+}
+
+interface McpServersResponse {
+  servers?: McpServerSummaryApiResponse[]
+}
+
+interface McpServerResponse {
+  server?: McpServerDetailApiResponse
+}
+
+interface McpDraft {
+  id: string | null
+  name: string
+  enabled: boolean
+  transport: McpTransport
+  url: string
+  command: string
+  argsText: string
+  authType: McpAuthType
+  bearerScheme: string
+  bearerToken: string
+  authUsername: string
+  authPassword: string
+  authHeaderName: string
+  authHeaderValue: string
+  authQueryName: string
+  authQueryValue: string
+  customHeadersMode: McpSecretCollectionMode
+  customHeadersText: string
+  stdioEnvMode: McpSecretCollectionMode
+  stdioEnvText: string
+  existingCustomHeaders: McpSecretEntry[]
+  existingStdioEnv: McpSecretEntry[]
+  authSecretFlags: {
+    token: boolean
+    password: boolean
+    value: boolean
+  }
+  lastStatus: string | null
+  lastError: string | null
+  configVersion: number
+  toolsSnapshot: unknown[]
+  resourcesSnapshot: unknown[]
+  promptsSnapshot: unknown[]
+  lastSyncAt: number | null
+  createdAt: number
+  updatedAt: number
+}
+
 const REQUEST_RECENT_MESSAGE_COUNT = 8
 const REQUEST_SUMMARY_TRIGGER_CHARS = 6000
 const REQUEST_SUMMARY_MAX_ITEMS = 6
@@ -1083,6 +1513,7 @@ const MAX_REPEAT_TOOL_SIGNATURE_HITS = 4
 const mounted = ref(false)
 const collapsed = ref(false)
 const showProviderDialog = ref(false)
+const showMcpDialog = ref(false)
 const showModelDialog = ref(false)
 const showModelConfigDialog = ref(false)
 const showAttachmentPreview = ref(false)
@@ -1119,6 +1550,24 @@ const providerDraft = ref<ProviderDraft>({
   baseUrl: providerKindDefaults.openai.baseUrl,
   apiKey: '',
 })
+const mcpLoading = ref(false)
+const mcpSaving = ref(false)
+const mcpTesting = ref(false)
+const mcpRefreshing = ref(false)
+const mcpSettingsSaving = ref(false)
+const mcpSettings = ref<McpSettingsState>({
+  enabled: false,
+  updatedAt: null,
+})
+const mcpSettingsEnabled = ref(false)
+const mcpRuntimeCapabilities = ref<McpRuntimeCapabilities>({
+  transports: ['sse', 'streamable-http'],
+  stdioEnabled: false,
+  stdioAllowedCommands: [],
+})
+const mcpServers = ref<McpServerSummary[]>([])
+const mcpDraft = ref<McpDraft>(createMcpDraft())
+const activeMcpSnapshotTab = ref<McpSnapshotTab>('tools')
 const modelDraft = ref<ModelDraft>({
   remoteModels: [],
   enabledModels: [],
@@ -1191,6 +1640,25 @@ const runtimeDockSummary = computed(() => {
   return currentRuntimeStep.value?.title || '暂无运行状态'
 })
 const activeProvider = computed(() => providers.value.find((provider) => provider.id === activeProviderId.value) || null)
+const mcpIsHttpTransport = computed(() => mcpDraft.value.transport !== 'stdio')
+const availableMcpTransports = computed(() => {
+  const values = uniqueStrings([
+    ...mcpRuntimeCapabilities.value.transports,
+    mcpDraft.value.transport,
+  ])
+  return values
+    .map((value) => normalizeMcpTransport(value))
+    .filter((value, index, list): value is McpTransport => Boolean(value) && list.indexOf(value) === index)
+})
+const activeMcpSnapshotEntries = computed(() => {
+  if (activeMcpSnapshotTab.value === 'resources') {
+    return mcpDraft.value.resourcesSnapshot
+  }
+  if (activeMcpSnapshotTab.value === 'prompts') {
+    return mcpDraft.value.promptsSnapshot
+  }
+  return mcpDraft.value.toolsSnapshot
+})
 const selectedProviderId = computed({
   get: () => activeProviderId.value,
   set: (value: string) => {
@@ -1837,6 +2305,270 @@ function createProviderDraft(seed = ''): ProviderDraft {
   }
 }
 
+function normalizeOptionalTimestamp(value: unknown) {
+  if (typeof value === 'string' && value.trim()) {
+    const timestamp = new Date(value).getTime()
+    return Number.isFinite(timestamp) ? timestamp : null
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value
+  }
+  return null
+}
+
+function formatOptionalTimestamp(value: number | null) {
+  if (!value) return '未同步'
+  return formatSessionTime(value)
+}
+
+function normalizeMcpTransport(value: unknown): McpTransport | null {
+  if (typeof value !== 'string') return null
+  const normalized = value.trim().toLowerCase().replace(/_/g, '-')
+  if (normalized === 'streamable-http') return 'streamable-http'
+  if (normalized === 'stdio') return 'stdio'
+  if (normalized === 'sse') return 'sse'
+  return null
+}
+
+function normalizeMcpAuthType(value: unknown): McpAuthType {
+  if (typeof value !== 'string') return 'none'
+  const normalized = value.trim().toLowerCase().replace(/_/g, '-')
+  if (normalized === 'bearer' || normalized === 'basic' || normalized === 'header' || normalized === 'query') {
+    return normalized
+  }
+  return 'none'
+}
+
+function mcpTransportLabel(transport: string) {
+  if (transport === 'streamable-http') return 'Streamable HTTP'
+  if (transport === 'stdio') return 'STDIO'
+  return 'SSE'
+}
+
+function mcpStatusLabel(status: string | null | undefined) {
+  if (!status) return '未检测'
+  if (status === 'ready') return '已就绪'
+  if (status === 'error') return '异常'
+  if (status === 'disabled') return '已禁用'
+  return status
+}
+
+function normalizeMcpSecretEntry(raw: unknown): McpSecretEntry | null {
+  if (!raw || typeof raw !== 'object') return null
+  const name = typeof (raw as any).name === 'string' ? (raw as any).name.trim() : ''
+  if (!name) return null
+  return {
+    name,
+    hasValue: (raw as any).has_value === true || (raw as any).hasValue === true,
+    value: typeof (raw as any).value === 'string' ? (raw as any).value : '',
+  }
+}
+
+function normalizeMcpAuthDetail(raw: unknown): McpAuthDetail | null {
+  if (!raw || typeof raw !== 'object') return null
+  return {
+    authType: normalizeMcpAuthType((raw as any).auth_type ?? (raw as any).authType),
+    scheme: typeof (raw as any).scheme === 'string' ? (raw as any).scheme : '',
+    username: typeof (raw as any).username === 'string' ? (raw as any).username : '',
+    headerName: typeof (raw as any).header_name === 'string' ? (raw as any).header_name : '',
+    queryName: typeof (raw as any).query_name === 'string' ? (raw as any).query_name : '',
+    tokenHasValue: (raw as any).token?.has_value === true || (raw as any).token?.hasValue === true,
+    passwordHasValue: (raw as any).password?.has_value === true || (raw as any).password?.hasValue === true,
+    valueHasValue: (raw as any).value?.has_value === true || (raw as any).value?.hasValue === true,
+    tokenValue: typeof (raw as any).token?.value === 'string' ? (raw as any).token.value : '',
+    passwordValue: typeof (raw as any).password?.value === 'string' ? (raw as any).password.value : '',
+    valueText: typeof (raw as any).value?.value === 'string' ? (raw as any).value.value : '',
+  }
+}
+
+function normalizeMcpServerSummary(raw: unknown): McpServerSummary | null {
+  if (!raw || typeof raw !== 'object') return null
+  const transport = normalizeMcpTransport((raw as any).transport)
+  if (!transport) return null
+  return {
+    id: `${(raw as any).id ?? ''}`.trim() || genId(),
+    name: typeof (raw as any).name === 'string' && (raw as any).name.trim() ? (raw as any).name.trim() : '未命名 MCP',
+    enabled: (raw as any).enabled === true,
+    transport,
+    url: typeof (raw as any).url === 'string' ? (raw as any).url.trim() : '',
+    command: typeof (raw as any).command === 'string' ? (raw as any).command.trim() : '',
+    authType: normalizeMcpAuthType((raw as any).auth_type ?? (raw as any).authType),
+    lastStatus: typeof (raw as any).last_status === 'string'
+      ? (raw as any).last_status
+      : typeof (raw as any).lastStatus === 'string'
+        ? (raw as any).lastStatus
+        : null,
+    lastError: typeof (raw as any).last_error === 'string'
+      ? (raw as any).last_error
+      : typeof (raw as any).lastError === 'string'
+        ? (raw as any).lastError
+        : null,
+    configVersion: Number.isFinite((raw as any).config_version) ? Number((raw as any).config_version) : Number((raw as any).configVersion) || 1,
+    createdAt: normalizeOptionalTimestamp((raw as any).created_at ?? (raw as any).createdAt) || Date.now(),
+    updatedAt: normalizeOptionalTimestamp((raw as any).updated_at ?? (raw as any).updatedAt) || Date.now(),
+  }
+}
+
+function normalizeMcpServerDetail(raw: unknown): McpServerDetail | null {
+  const summary = normalizeMcpServerSummary(raw)
+  if (!summary || !raw || typeof raw !== 'object') return null
+  return {
+    ...summary,
+    args: Array.isArray((raw as any).args)
+      ? (raw as any).args
+        .filter((value: unknown): value is string => typeof value === 'string')
+        .map((value: string) => value.trim())
+        .filter(Boolean)
+      : [],
+    auth: normalizeMcpAuthDetail((raw as any).auth),
+    customHeaders: Array.isArray((raw as any).custom_headers ?? (raw as any).customHeaders)
+      ? ((raw as any).custom_headers ?? (raw as any).customHeaders)
+        .map((item: unknown) => normalizeMcpSecretEntry(item))
+        .filter((item: McpSecretEntry | null): item is McpSecretEntry => Boolean(item))
+      : [],
+    stdioEnv: Array.isArray((raw as any).stdio_env ?? (raw as any).stdioEnv)
+      ? ((raw as any).stdio_env ?? (raw as any).stdioEnv)
+        .map((item: unknown) => normalizeMcpSecretEntry(item))
+        .filter((item: McpSecretEntry | null): item is McpSecretEntry => Boolean(item))
+      : [],
+    toolsSnapshot: Array.isArray((raw as any).tools_snapshot ?? (raw as any).toolsSnapshot) ? ((raw as any).tools_snapshot ?? (raw as any).toolsSnapshot) : [],
+    resourcesSnapshot: Array.isArray((raw as any).resources_snapshot ?? (raw as any).resourcesSnapshot) ? ((raw as any).resources_snapshot ?? (raw as any).resourcesSnapshot) : [],
+    promptsSnapshot: Array.isArray((raw as any).prompts_snapshot ?? (raw as any).promptsSnapshot) ? ((raw as any).prompts_snapshot ?? (raw as any).promptsSnapshot) : [],
+    lastSyncAt: normalizeOptionalTimestamp((raw as any).last_sync_at ?? (raw as any).lastSyncAt),
+  }
+}
+
+function createMcpDraft(seed = ''): McpDraft {
+  return {
+    id: null,
+    name: seed || `MCP 服务 ${mcpServers.value.length + 1}`,
+    enabled: true,
+    transport: 'sse',
+    url: '',
+    command: '',
+    argsText: '',
+    authType: 'none',
+    bearerScheme: 'Bearer',
+    bearerToken: '',
+    authUsername: '',
+    authPassword: '',
+    authHeaderName: 'Authorization',
+    authHeaderValue: '',
+    authQueryName: 'token',
+    authQueryValue: '',
+    customHeadersMode: 'replace',
+    customHeadersText: '',
+    stdioEnvMode: 'replace',
+    stdioEnvText: '',
+    existingCustomHeaders: [],
+    existingStdioEnv: [],
+    authSecretFlags: {
+      token: false,
+      password: false,
+      value: false,
+    },
+    lastStatus: null,
+    lastError: null,
+    configVersion: 1,
+    toolsSnapshot: [],
+    resourcesSnapshot: [],
+    promptsSnapshot: [],
+    lastSyncAt: null,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  }
+}
+
+function normalizePersistedMcpDraftId(value: string | null | undefined) {
+  if (!value) return null
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric) || numeric <= 0) return null
+  return `${numeric}`
+}
+
+function createMcpDraftFromDetail(detail: McpServerDetail): McpDraft {
+  const customHeadersText = detail.customHeaders
+    .map((entry) => `${entry.name}: ${entry.value}`)
+    .join('\n')
+  const stdioEnvText = detail.stdioEnv
+    .map((entry) => `${entry.name}=${entry.value}`)
+    .join('\n')
+  return {
+    id: normalizePersistedMcpDraftId(detail.id),
+    name: detail.name,
+    enabled: detail.enabled,
+    transport: detail.transport,
+    url: detail.url,
+    command: detail.command,
+    argsText: detail.args.join('\n'),
+    authType: detail.auth?.authType || 'none',
+    bearerScheme: detail.auth?.scheme || 'Bearer',
+    bearerToken: detail.auth?.tokenValue || '',
+    authUsername: detail.auth?.username || '',
+    authPassword: detail.auth?.passwordValue || '',
+    authHeaderName: detail.auth?.headerName || 'Authorization',
+    authHeaderValue: detail.auth?.authType === 'header' ? detail.auth.valueText : '',
+    authQueryName: detail.auth?.queryName || 'token',
+    authQueryValue: detail.auth?.authType === 'query' ? detail.auth.valueText : '',
+    customHeadersMode: 'replace',
+    customHeadersText,
+    stdioEnvMode: 'replace',
+    stdioEnvText,
+    existingCustomHeaders: [...detail.customHeaders],
+    existingStdioEnv: [...detail.stdioEnv],
+    authSecretFlags: {
+      token: detail.auth?.tokenHasValue === true,
+      password: detail.auth?.passwordHasValue === true,
+      value: detail.auth?.valueHasValue === true,
+    },
+    lastStatus: detail.lastStatus,
+    lastError: detail.lastError,
+    configVersion: detail.configVersion,
+    toolsSnapshot: [...detail.toolsSnapshot],
+    resourcesSnapshot: [...detail.resourcesSnapshot],
+    promptsSnapshot: [...detail.promptsSnapshot],
+    lastSyncAt: detail.lastSyncAt,
+    createdAt: detail.createdAt,
+    updatedAt: detail.updatedAt,
+  }
+}
+
+function normalizeMcpRuntimeCapabilities(raw: unknown): McpRuntimeCapabilities {
+  const transports = Array.isArray((raw as any)?.transports)
+    ? (raw as any).transports
+      .map((value: unknown) => normalizeMcpTransport(value))
+      .filter((value: McpTransport | null, index: number, list: Array<McpTransport | null>): value is McpTransport => Boolean(value) && list.indexOf(value) === index)
+    : ['sse', 'streamable-http']
+  return {
+    transports: transports.length ? transports : ['sse', 'streamable-http'],
+    stdioEnabled: (raw as any)?.stdio_enabled === true || (raw as any)?.stdioEnabled === true,
+    stdioAllowedCommands: Array.isArray((raw as any)?.stdio_allowed_commands ?? (raw as any)?.stdioAllowedCommands)
+      ? ((raw as any).stdio_allowed_commands ?? (raw as any).stdioAllowedCommands)
+        .filter((value: unknown): value is string => typeof value === 'string')
+        .map((value: string) => value.trim())
+        .filter(Boolean)
+      : [],
+  }
+}
+
+function mcpSnapshotEntryTitle(entry: unknown, index: number) {
+  if (typeof entry === 'string' && entry.trim()) return entry.trim()
+  if (entry && typeof entry === 'object') {
+    const anyEntry = entry as Record<string, unknown>
+    const candidate = anyEntry.title || anyEntry.name || anyEntry.uri || anyEntry.path || anyEntry.id
+    if (typeof candidate === 'string' && candidate.trim()) return candidate.trim()
+  }
+  return `项目 ${index + 1}`
+}
+
+function mcpSnapshotEntryDetail(entry: unknown) {
+  try {
+    return JSON.stringify(entry, null, 2)
+  } catch {
+    return String(entry)
+  }
+}
+
 function normalizeProvider(raw: any): AgentProvider | null {
   if (!raw || typeof raw !== 'object') return null
 
@@ -2266,6 +2998,383 @@ function ensureProviderDraftLoaded() {
     return
   }
   providerDraft.value = createProviderDraft()
+}
+
+async function refreshMcpManagementState() {
+  mcpLoading.value = true
+  try {
+    const [runtimeData, settingsData, listData] = await Promise.all([
+      request.get('/agent/mcps/runtime-capabilities') as Promise<McpRuntimeCapabilitiesApiResponse>,
+      request.get('/agent/mcps/settings') as Promise<McpSettingsApiResponse>,
+      request.get('/agent/mcps') as Promise<McpServersResponse>,
+    ])
+
+    mcpRuntimeCapabilities.value = normalizeMcpRuntimeCapabilities(runtimeData)
+    mcpSettings.value = {
+      enabled: settingsData.settings?.enabled === true,
+      updatedAt: normalizeOptionalTimestamp(settingsData.settings?.updated_at ?? null),
+    }
+    mcpSettingsEnabled.value = mcpSettings.value.enabled
+    mcpServers.value = (listData.servers || [])
+      .map((server) => normalizeMcpServerSummary(server))
+      .filter((server): server is McpServerSummary => Boolean(server))
+
+    if (mcpDraft.value.id && mcpServers.value.some((server) => server.id === mcpDraft.value.id)) {
+      await editMcpServer(mcpDraft.value.id, { silent: true })
+      return
+    }
+    if (mcpServers.value[0]) {
+      await editMcpServer(mcpServers.value[0].id, { silent: true })
+      return
+    }
+
+    const nextDraft = createMcpDraft()
+    if (!mcpRuntimeCapabilities.value.stdioEnabled && nextDraft.transport === 'stdio') {
+      nextDraft.transport = 'sse'
+    }
+    mcpDraft.value = nextDraft
+    activeMcpSnapshotTab.value = 'tools'
+  } catch (error: any) {
+    logAgentPanelError('refresh_mcp_state', error)
+    ElMessage.error(error.response?.data?.error || error.message || '加载 MCP 配置失败')
+  } finally {
+    mcpLoading.value = false
+  }
+}
+
+async function editMcpServer(serverId: string, options: { silent?: boolean } = {}) {
+  if (!serverId) return
+  try {
+    const data = await request.get(`/agent/mcps/${serverId}`) as McpServerResponse
+    const detail = normalizeMcpServerDetail(data.server)
+    if (!detail) {
+      throw new Error('MCP 服务详情缺失')
+    }
+    mcpDraft.value = createMcpDraftFromDetail(detail)
+    activeMcpSnapshotTab.value = 'tools'
+  } catch (error: any) {
+    logAgentPanelError('edit_mcp_server', error, { serverId })
+    if (!options.silent) {
+      ElMessage.error(error.response?.data?.error || error.message || '读取 MCP 服务详情失败')
+    }
+  }
+}
+
+async function startCreateMcpServer() {
+  const draft = createMcpDraft()
+  draft.enabled = false
+  if (!mcpRuntimeCapabilities.value.stdioEnabled && draft.transport === 'stdio') {
+    draft.transport = 'sse'
+  }
+  await createPersistedMcpServer(draft, '已新增 MCP 服务')
+}
+
+async function duplicateMcpServer() {
+  const current = mcpDraft.value
+  const next = createMcpDraft(current.name ? `${current.name} 副本` : '')
+  next.enabled = false
+  next.transport = current.transport === 'stdio' && !mcpRuntimeCapabilities.value.stdioEnabled ? 'sse' : current.transport
+  next.url = current.url
+  next.command = current.command
+  next.argsText = current.argsText
+  next.authType = current.authType
+  next.bearerScheme = current.bearerScheme
+  next.bearerToken = current.bearerToken
+  next.authUsername = current.authUsername
+  next.authPassword = current.authPassword
+  next.authHeaderName = current.authHeaderName
+  next.authHeaderValue = current.authHeaderValue
+  next.authQueryName = current.authQueryName
+  next.authQueryValue = current.authQueryValue
+  next.customHeadersText = current.customHeadersText
+  next.stdioEnvText = current.stdioEnvText
+  next.authSecretFlags = {
+    token: false,
+    password: false,
+    value: false,
+  }
+  await createPersistedMcpServer(next, '已复制 MCP 服务')
+}
+
+async function handleMcpSettingsChange(value: string | number | boolean) {
+  const enabled = Boolean(value)
+  const previous = mcpSettings.value.enabled
+  mcpSettingsSaving.value = true
+  try {
+    const data = await request.post('/agent/mcps/settings', {
+      enabled,
+    }) as McpSettingsApiResponse
+    mcpSettings.value = {
+      enabled: data.settings?.enabled === true,
+      updatedAt: normalizeOptionalTimestamp(data.settings?.updated_at ?? null),
+    }
+    mcpSettingsEnabled.value = mcpSettings.value.enabled
+    ElMessage.success(mcpSettings.value.enabled ? '已启用 MCP' : '已关闭 MCP')
+  } catch (error: any) {
+    mcpSettingsEnabled.value = previous
+    logAgentPanelError('save_mcp_settings', error)
+    ElMessage.error(error.response?.data?.error || error.message || '保存 MCP 开关失败')
+  } finally {
+    mcpSettingsSaving.value = false
+  }
+}
+
+function buildMcpSecretLinesPayload(
+  mode: McpSecretCollectionMode,
+  text: string,
+  options: { allowKeep?: boolean } = {},
+) {
+  if (mode === 'keep' && options.allowKeep !== false) return { mode: 'keep' }
+  if (mode === 'keep') {
+    return {
+      mode: 'replace',
+      value: text.split('\n').map((line) => line.trim()).filter(Boolean),
+    }
+  }
+  if (mode === 'clear') return { mode: 'clear' }
+  return {
+    mode: 'replace',
+    value: text.split('\n').map((line) => line.trim()).filter(Boolean),
+  }
+}
+
+function validateMcpDraft(options: { requireCompleteConnection?: boolean } = {}) {
+  const requireCompleteConnection = options.requireCompleteConnection !== false
+  const name = mcpDraft.value.name.trim()
+  if (!name) return '请填写 MCP 名称'
+
+  if (mcpDraft.value.transport === 'stdio') {
+    if (!mcpRuntimeCapabilities.value.stdioEnabled) {
+      return '当前后端没有开启 stdio'
+    }
+    if (requireCompleteConnection && !mcpDraft.value.command.trim()) {
+      return '请填写 STDIO Command'
+    }
+    return ''
+  }
+
+  if (requireCompleteConnection && !mcpDraft.value.url.trim()) {
+    return '请填写 HTTP URL'
+  }
+
+  if (mcpDraft.value.authType === 'bearer' && !mcpDraft.value.bearerToken.trim() && !mcpDraft.value.authSecretFlags.token) {
+    return '请填写 Bearer Token'
+  }
+  if (mcpDraft.value.authType === 'basic') {
+    if (!mcpDraft.value.authUsername.trim()) return '请填写 Basic Auth 用户名'
+    if (!mcpDraft.value.authPassword.trim() && !mcpDraft.value.authSecretFlags.password) {
+      return '请填写 Basic Auth 密码'
+    }
+  }
+  if (mcpDraft.value.authType === 'header') {
+    if (!mcpDraft.value.authHeaderName.trim()) return '请填写 Header 名称'
+    if (!mcpDraft.value.authHeaderValue.trim() && !mcpDraft.value.authSecretFlags.value) {
+      return '请填写 Header 值'
+    }
+  }
+  if (mcpDraft.value.authType === 'query') {
+    if (!mcpDraft.value.authQueryName.trim()) return '请填写 Query 参数名'
+    if (!mcpDraft.value.authQueryValue.trim() && !mcpDraft.value.authSecretFlags.value) {
+      return '请填写 Query 参数值'
+    }
+  }
+  return ''
+}
+
+function buildMcpAuthPayload(
+  draft: McpDraft = mcpDraft.value,
+  options: { allowKeep?: boolean } = {},
+) {
+  const allowKeep = options.allowKeep !== false
+  if (draft.transport === 'stdio' || draft.authType === 'none') {
+    return { mode: 'clear' }
+  }
+
+  if (draft.authType === 'bearer') {
+    return {
+      mode: 'replace',
+      value: {
+        type: 'bearer',
+        scheme: draft.bearerScheme.trim() || null,
+        token: draft.bearerToken.trim()
+          ? { mode: 'replace', value: draft.bearerToken.trim() }
+          : draft.authSecretFlags.token && allowKeep
+            ? { mode: 'keep' }
+            : { mode: 'clear' },
+      },
+    }
+  }
+
+  if (draft.authType === 'basic') {
+    return {
+      mode: 'replace',
+      value: {
+        type: 'basic',
+        username: draft.authUsername.trim(),
+        password: draft.authPassword.trim()
+          ? { mode: 'replace', value: draft.authPassword.trim() }
+          : draft.authSecretFlags.password && allowKeep
+            ? { mode: 'keep' }
+            : { mode: 'clear' },
+      },
+    }
+  }
+
+  if (draft.authType === 'header') {
+    return {
+      mode: 'replace',
+      value: {
+        type: 'header',
+        name: draft.authHeaderName.trim(),
+        value: draft.authHeaderValue.trim()
+          ? { mode: 'replace', value: draft.authHeaderValue.trim() }
+          : draft.authSecretFlags.value && allowKeep
+            ? { mode: 'keep' }
+            : { mode: 'clear' },
+      },
+    }
+  }
+
+  return {
+    mode: 'replace',
+    value: {
+      type: 'query',
+      name: draft.authQueryName.trim(),
+      value: draft.authQueryValue.trim()
+        ? { mode: 'replace', value: draft.authQueryValue.trim() }
+        : draft.authSecretFlags.value && allowKeep
+          ? { mode: 'keep' }
+          : { mode: 'clear' },
+    },
+  }
+}
+
+function buildMcpDraftPayload(
+  draft: McpDraft = mcpDraft.value,
+  options: { allowKeep?: boolean } = {},
+) {
+  const persistedId = normalizePersistedMcpDraftId(draft.id)
+  const allowKeep = options.allowKeep !== false && Boolean(persistedId)
+  const isHttpTransport = draft.transport !== 'stdio'
+  const normalizedUrl = draft.url.trim()
+  const normalizedCommand = draft.command.trim()
+  return {
+    id: persistedId ? Number(persistedId) : null,
+    name: draft.name.trim(),
+    enabled: draft.enabled,
+    transport: draft.transport,
+    url: isHttpTransport ? (normalizedUrl || null) : null,
+    command: draft.transport === 'stdio' ? (normalizedCommand || null) : null,
+    args: draft.transport === 'stdio'
+      ? draft.argsText.split('\n').map((line) => line.trim()).filter(Boolean)
+      : [],
+    auth: buildMcpAuthPayload(draft, { allowKeep }),
+    custom_headers: isHttpTransport
+      ? buildMcpSecretLinesPayload(draft.customHeadersMode, draft.customHeadersText, { allowKeep })
+      : { mode: 'clear' },
+    stdio_env: draft.transport === 'stdio'
+      ? buildMcpSecretLinesPayload(draft.stdioEnvMode, draft.stdioEnvText, { allowKeep })
+      : { mode: 'clear' },
+  }
+}
+
+async function saveMcpServerDraft() {
+  const validationMessage = validateMcpDraft({ requireCompleteConnection: mcpDraft.value.enabled })
+  if (validationMessage) {
+    ElMessage.warning(validationMessage)
+    return
+  }
+
+  mcpSaving.value = true
+  try {
+    const payload = buildMcpDraftPayload()
+    const data = await request.post('/agent/mcps', payload) as McpServerResponse
+    const detail = normalizeMcpServerDetail(data.server)
+    if (!detail) {
+      throw new Error('MCP 保存结果缺失')
+    }
+    await refreshMcpManagementState()
+    mcpDraft.value = createMcpDraftFromDetail(detail)
+    ElMessage.success('MCP 服务已保存')
+  } catch (error: any) {
+    logAgentPanelError('save_mcp_server', error, { serverId: mcpDraft.value.id, transport: mcpDraft.value.transport })
+    ElMessage.error(error.response?.data?.error || error.message || '保存 MCP 服务失败')
+  } finally {
+    mcpSaving.value = false
+  }
+}
+
+async function removeMcpServer(serverId: string | null) {
+  if (!serverId) return
+  try {
+    await request.delete(`/agent/mcps/${serverId}`)
+    await refreshMcpManagementState()
+    ElMessage.success('MCP 服务已删除')
+  } catch (error: any) {
+    logAgentPanelError('remove_mcp_server', error, { serverId })
+    ElMessage.error(error.response?.data?.error || error.message || '删除 MCP 服务失败')
+  }
+}
+
+async function runMcpServerAction(
+  endpoint: 'test' | 'refresh',
+) {
+  const validationMessage = validateMcpDraft({ requireCompleteConnection: true })
+  if (validationMessage) {
+    ElMessage.warning(validationMessage)
+    return
+  }
+  const loadingRef = endpoint === 'test' ? mcpTesting : mcpRefreshing
+  loadingRef.value = true
+  try {
+    const data = await request.post(`/agent/mcps/draft/${endpoint}`, buildMcpDraftPayload()) as McpServerResponse
+    const detail = normalizeMcpServerDetail(data.server)
+    if (!detail) {
+      throw new Error('MCP 刷新结果缺失')
+    }
+    mcpDraft.value = createMcpDraftFromDetail(detail)
+    ElMessage.success(endpoint === 'test' ? 'MCP 测试连接成功' : 'MCP 能力已刷新')
+  } catch (error: any) {
+    const server = normalizeMcpServerDetail(error?.response?.data?.server)
+    if (server) {
+      mcpDraft.value = createMcpDraftFromDetail(server)
+    }
+    logAgentPanelError(`mcp_${endpoint}`, error, { serverId: mcpDraft.value.id, transport: mcpDraft.value.transport })
+    ElMessage.error(error.response?.data?.error || error.message || (endpoint === 'test' ? '测试连接失败' : '刷新 MCP 能力失败'))
+  } finally {
+    loadingRef.value = false
+  }
+}
+
+async function createPersistedMcpServer(
+  draft: McpDraft,
+  successMessage: string,
+) {
+  mcpSaving.value = true
+  try {
+    const payload = buildMcpDraftPayload(draft, { allowKeep: false })
+    const data = await request.post('/agent/mcps', payload) as McpServerResponse
+    const detail = normalizeMcpServerDetail(data.server)
+    if (!detail) {
+      throw new Error('MCP 创建结果缺失')
+    }
+    mcpDraft.value = createMcpDraftFromDetail(detail)
+    await refreshMcpManagementState()
+    ElMessage.success(successMessage)
+  } catch (error: any) {
+    logAgentPanelError('create_mcp_server', error, { sourceId: draft.id, transport: draft.transport })
+    ElMessage.error(error.response?.data?.error || error.message || '创建 MCP 服务失败')
+  } finally {
+    mcpSaving.value = false
+  }
+}
+
+async function testMcpServerConnection() {
+  await runMcpServerAction('test')
+}
+
+async function refreshMcpServerCapabilities() {
+  await runMcpServerAction('refresh')
 }
 
 function resetModelDraft() {
@@ -3087,7 +4196,15 @@ function saveCurrentModelConfig() {
 
 function openProviderManagerFromModelDialog() {
   showModelDialog.value = false
+  openProviderDialog()
+}
+
+function openProviderDialog() {
   showProviderDialog.value = true
+}
+
+function openMcpDialog() {
+  showMcpDialog.value = true
 }
 
 function openAttachmentPicker() {
@@ -4390,12 +5507,12 @@ async function sendMessage() {
   const provider = activeProvider.value
   if (!provider) {
     ElMessage.warning('请先配置并激活一个供应商')
-    showProviderDialog.value = true
+    openProviderDialog()
     return
   }
   if (!provider.hasApiKey) {
     ElMessage.warning('当前激活供应商缺少 API Key')
-    showProviderDialog.value = true
+    openProviderDialog()
     return
   }
 
@@ -6543,6 +7660,47 @@ watch(showProviderDialog, (visible) => {
   ensureProviderDraftLoaded()
 })
 
+watch(showMcpDialog, (visible) => {
+  if (!visible) return
+  void refreshMcpManagementState()
+})
+
+watch(
+  () => mcpDraft.value.transport,
+  (transport) => {
+    if (transport === 'stdio') {
+      mcpDraft.value.authType = 'none'
+    }
+  },
+)
+
+watch(
+  () => mcpRuntimeCapabilities.value.stdioEnabled,
+  (enabled) => {
+    if (!enabled && mcpDraft.value.transport === 'stdio') {
+      mcpDraft.value.transport = 'sse'
+    }
+  },
+)
+
+watch(
+  () => mcpDraft.value.customHeadersMode,
+  (mode) => {
+    if (mode !== 'replace') {
+      mcpDraft.value.customHeadersText = ''
+    }
+  },
+)
+
+watch(
+  () => mcpDraft.value.stdioEnvMode,
+  (mode) => {
+    if (mode !== 'replace') {
+      mcpDraft.value.stdioEnvText = ''
+    }
+  },
+)
+
 watch(showModelDialog, (visible) => {
   customModelInput.value = ''
   modelSearchQuery.value = ''
@@ -7512,7 +8670,7 @@ onUnmounted(() => {
 .provider-manager {
   display: grid;
   grid-template-columns: 220px minmax(0, 1fr);
-  gap: 16px;
+  gap: 12px;
 }
 
 .provider-list-pane {
@@ -7580,10 +8738,207 @@ onUnmounted(() => {
   gap: 12px;
 }
 
+.mcp-editor {
+  gap: 10px;
+}
+
 .provider-hint {
   font-size: 12px;
   color: #708067;
   line-height: 1.6;
+}
+
+.mcp-settings-card,
+.mcp-status-card,
+.mcp-snapshot-card,
+.mcp-secret-block {
+  border-radius: 14px;
+  border: 1px solid rgba(122, 147, 91, 0.14);
+  background: rgba(248, 250, 242, 0.84);
+}
+
+.mcp-settings-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+}
+
+.mcp-settings-copy {
+  min-width: 0;
+}
+
+.mcp-settings-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #24311f;
+}
+
+.mcp-settings-desc,
+.mcp-runtime-hint,
+.mcp-field-help,
+.mcp-secret-summary {
+  font-size: 12px;
+  line-height: 1.6;
+  color: #708067;
+}
+
+.mcp-runtime-hint {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.mcp-item {
+  gap: 4px;
+}
+
+.mcp-item-error {
+  font-size: 11px;
+  line-height: 1.5;
+  color: #b45f52;
+  word-break: break-word;
+}
+
+.mcp-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.mcp-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mcp-field-full {
+  grid-column: 1 / -1;
+}
+
+.mcp-field-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: #4f6047;
+}
+
+.mcp-field-inline {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+  flex-wrap: wrap;
+}
+
+.mcp-secret-block {
+  padding: 10px 12px;
+}
+
+.mcp-secret-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.mcp-secret-mode-select {
+  width: 136px;
+  flex-shrink: 0;
+}
+
+.mcp-status-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+}
+
+.mcp-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.mcp-status-label {
+  font-size: 12px;
+  color: #708067;
+}
+
+.mcp-status-value {
+  font-size: 12px;
+  font-weight: 700;
+  color: #24311f;
+  text-align: right;
+}
+
+.mcp-status-error {
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(180, 95, 82, 0.08);
+  color: #a14b40;
+  font-size: 12px;
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+.mcp-snapshot-card {
+  padding: 10px 12px;
+}
+
+.mcp-snapshot-tabs {
+  margin-bottom: 8px;
+}
+
+.mcp-snapshot-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 320px;
+  overflow: auto;
+  padding-right: 4px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(111, 154, 79, 0.58) rgba(122, 147, 91, 0.12);
+}
+
+.mcp-snapshot-list::-webkit-scrollbar {
+  width: 10px;
+}
+
+.mcp-snapshot-list::-webkit-scrollbar-track {
+  background: rgba(122, 147, 91, 0.12);
+  border-radius: 999px;
+}
+
+.mcp-snapshot-list::-webkit-scrollbar-thumb {
+  background: rgba(111, 154, 79, 0.58);
+  border-radius: 999px;
+  border: 2px solid rgba(246, 248, 239, 0.9);
+}
+
+.mcp-snapshot-item {
+  border-radius: 12px;
+  border: 1px solid rgba(122, 147, 91, 0.12);
+  background: rgba(255, 255, 255, 0.88);
+  padding: 10px 12px;
+}
+
+.mcp-snapshot-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #24311f;
+  margin-bottom: 6px;
+}
+
+.mcp-snapshot-raw {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 11px;
+  line-height: 1.6;
+  color: #51604a;
 }
 
 .model-manager {
@@ -7888,6 +9243,13 @@ onUnmounted(() => {
   box-shadow: 0 24px 60px rgba(67, 86, 50, 0.18);
 }
 
+:deep(.mcp-dialog .el-dialog) {
+  width: min(840px, calc(100vw - 36px)) !important;
+  max-height: calc(100vh - 28px);
+  display: flex;
+  flex-direction: column;
+}
+
 :deep(.model-config-dialog .el-dialog) {
   width: min(760px, calc(100vw - 36px)) !important;
 }
@@ -7909,6 +9271,70 @@ onUnmounted(() => {
 :deep(.model-config-dialog .el-dialog__body) {
   padding-top: 16px;
   padding-bottom: 12px;
+}
+
+:deep(.mcp-dialog .el-dialog__body) {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  padding-top: 14px;
+  padding-bottom: 12px;
+}
+
+:deep(.mcp-dialog .el-dialog__footer) {
+  flex-shrink: 0;
+  padding-top: 10px;
+  border-top: 1px solid rgba(122, 147, 91, 0.1);
+  background: linear-gradient(180deg, rgba(251, 252, 247, 0.98), rgba(246, 248, 239, 0.96));
+}
+
+.mcp-dialog .provider-manager {
+  align-items: stretch;
+  height: min(68vh, 680px);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.mcp-dialog .provider-list-pane {
+  min-height: 0;
+}
+
+.mcp-dialog .provider-list {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+}
+
+.mcp-dialog .provider-editor {
+  min-height: 0;
+  overflow: auto;
+  padding-right: 4px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(111, 154, 79, 0.58) rgba(122, 147, 91, 0.12);
+}
+
+.mcp-dialog .mcp-status-card,
+.mcp-dialog .mcp-snapshot-card,
+.mcp-dialog .mcp-secret-block {
+  border-radius: 12px;
+}
+
+.mcp-dialog .provider-editor::-webkit-scrollbar,
+.mcp-dialog .provider-list::-webkit-scrollbar {
+  width: 10px;
+}
+
+.mcp-dialog .provider-editor::-webkit-scrollbar-track,
+.mcp-dialog .provider-list::-webkit-scrollbar-track {
+  background: rgba(122, 147, 91, 0.12);
+  border-radius: 999px;
+}
+
+.mcp-dialog .provider-editor::-webkit-scrollbar-thumb,
+.mcp-dialog .provider-list::-webkit-scrollbar-thumb {
+  background: rgba(111, 154, 79, 0.58);
+  border-radius: 999px;
+  border: 2px solid rgba(246, 248, 239, 0.9);
 }
 
 :deep(.provider-dialog .el-input__wrapper),
@@ -8037,7 +9463,8 @@ onUnmounted(() => {
 
   .provider-manager,
   .model-grid,
-  .model-pane-head-row {
+  .model-pane-head-row,
+  .mcp-form-grid {
     grid-template-columns: 1fr;
   }
 

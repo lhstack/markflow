@@ -1,6 +1,8 @@
 mod agent_protocol;
 mod auth;
 mod db;
+mod mcp;
+mod mcp_chat;
 mod models;
 mod routes;
 
@@ -45,6 +47,14 @@ struct FileConfig {
     log_rotate_size_mb: Option<u64>,
     log_rotate_days: Option<i64>,
     log_keep_days: Option<i64>,
+    mcp_stdio_enabled: Option<bool>,
+    mcp_stdio_allowed_commands: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BackendRuntimeConfig {
+    pub mcp_stdio_enabled: bool,
+    pub mcp_stdio_allowed_commands: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -132,6 +142,51 @@ fn cfg_i64(env_key: &str, file_val: Option<i64>, default: i64) -> i64 {
         .and_then(|v| v.parse::<i64>().ok())
         .or(file_val)
         .unwrap_or(default)
+}
+
+fn parse_string_list(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|item| item.trim())
+        .filter(|item| !item.is_empty())
+        .map(|item| item.to_string())
+        .collect()
+}
+
+fn resolve_bool(env_value: Option<&str>, file_val: Option<bool>, default: bool) -> bool {
+    env_value.and_then(parse_bool).or(file_val).unwrap_or(default)
+}
+
+fn load_backend_runtime_config(file_cfg: &FileConfig) -> BackendRuntimeConfig {
+    load_backend_runtime_config_with_overrides(
+        file_cfg,
+        std::env::var("MCP_STDIO_ENABLED").ok().as_deref(),
+        std::env::var("MCP_STDIO_ALLOWED_COMMANDS").ok().as_deref(),
+    )
+}
+
+fn load_backend_runtime_config_with_overrides(
+    file_cfg: &FileConfig,
+    stdio_enabled_env: Option<&str>,
+    allowed_commands_env: Option<&str>,
+) -> BackendRuntimeConfig {
+    let mcp_stdio_enabled = resolve_bool(stdio_enabled_env, file_cfg.mcp_stdio_enabled, false);
+    let mcp_stdio_allowed_commands = allowed_commands_env
+        .map(parse_string_list)
+        .or_else(|| {
+            file_cfg.mcp_stdio_allowed_commands.as_ref().map(|values| {
+                values
+                    .iter()
+                    .map(|item| item.trim().to_string())
+                    .filter(|item| !item.is_empty())
+                    .collect()
+            })
+        })
+        .unwrap_or_default();
+
+    BackendRuntimeConfig {
+        mcp_stdio_enabled,
+        mcp_stdio_allowed_commands,
+    }
 }
 
 fn split_file_name(name: &str) -> (String, String) {
@@ -345,6 +400,7 @@ impl Write for RotatingFileGuard {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let file_cfg = load_config();
+    let runtime_config = Arc::new(load_backend_runtime_config(&file_cfg));
 
     // env > config.toml > defaults
     let rust_log = cfg_val(
@@ -416,7 +472,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     tracing::info!(
-        "Resolved config: port={}, database={}, upload_dir={}, registration_enabled={}, upload_max_mb={}, share_password_secret_source={}, log_to_file={}, log_dir={}, file={}, rotate_size_mb={}, rotate_days={}, keep_days={}",
+        "Resolved config: port={}, database={}, upload_dir={}, registration_enabled={}, upload_max_mb={}, share_password_secret_source={}, log_to_file={}, log_dir={}, file={}, rotate_size_mb={}, rotate_days={}, keep_days={}, mcp_stdio_enabled={}, mcp_stdio_allowed_commands={}",
         port,
         database_url,
         upload_dir,
@@ -433,6 +489,8 @@ async fn main() -> anyhow::Result<()> {
         log_rotate_size_mb,
         log_rotate_days,
         log_keep_days,
+        runtime_config.mcp_stdio_enabled,
+        runtime_config.mcp_stdio_allowed_commands.len(),
     );
 
     let db = Database::new(&database_url).await?;
@@ -452,6 +510,7 @@ async fn main() -> anyhow::Result<()> {
         );
     }
     let db = Arc::new(db);
+    let mcp_connection_manager = Arc::new(mcp::McpConnectionManager::new());
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -476,6 +535,35 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/agent/providers",
             get(routes::agent::list_providers).post(routes::agent::save_provider),
+        )
+        .route(
+            "/agent/mcps/settings",
+            get(routes::agent::get_mcp_settings).post(routes::agent::update_mcp_settings),
+        )
+        .route(
+            "/agent/mcps",
+            get(routes::agent::list_mcp_servers_handler).post(routes::agent::save_mcp_server),
+        )
+        .route(
+            "/agent/mcps/:id",
+            get(routes::agent::get_mcp_server).delete(routes::agent::delete_mcp_server),
+        )
+        .route(
+            "/agent/mcps/draft/test",
+            post(routes::agent::test_mcp_server_draft),
+        )
+        .route(
+            "/agent/mcps/draft/refresh",
+            post(routes::agent::refresh_mcp_server_draft),
+        )
+        .route("/agent/mcps/:id/test", post(routes::agent::test_mcp_server))
+        .route(
+            "/agent/mcps/:id/refresh",
+            post(routes::agent::refresh_mcp_server),
+        )
+        .route(
+            "/agent/mcps/runtime-capabilities",
+            get(routes::agent::get_runtime_capabilities),
         )
         .route(
             "/agent/providers/:id",
@@ -559,6 +647,8 @@ async fn main() -> anyhow::Result<()> {
         .nest("/api", api)
         .fallback(static_handler)
         .layer(Extension(db))
+        .layer(Extension(runtime_config))
+        .layer(Extension(mcp_connection_manager))
         .layer(cors)
         .layer(TraceLayer::new_for_http());
 
@@ -568,4 +658,39 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backend_runtime_config_defaults_stdio_off_and_allowlist_empty() {
+        let cfg = FileConfig::default();
+        let runtime = load_backend_runtime_config_with_overrides(&cfg, None, None);
+
+        assert!(!runtime.mcp_stdio_enabled);
+        assert!(runtime.mcp_stdio_allowed_commands.is_empty());
+    }
+
+    #[test]
+    fn backend_runtime_config_prefers_overrides_for_stdio_settings() {
+        let cfg = FileConfig {
+            mcp_stdio_enabled: Some(false),
+            mcp_stdio_allowed_commands: Some(vec!["ignored".to_string()]),
+            ..Default::default()
+        };
+
+        let runtime = load_backend_runtime_config_with_overrides(
+            &cfg,
+            Some("true"),
+            Some("git, node,  "),
+        );
+
+        assert!(runtime.mcp_stdio_enabled);
+        assert_eq!(
+            runtime.mcp_stdio_allowed_commands,
+            vec!["git".to_string(), "node".to_string()]
+        );
+    }
 }

@@ -37,7 +37,7 @@ docker pull lhstack/markflow:latest
 
 - 镜像仅在发布 `v*` 版本标签时构建并推送
 - `latest` 始终指向最近一次正式版本发布
-- 同时也会发布对应版本标签，例如 `lhstack/markflow:v1.0.8`
+- 同时也会发布对应版本标签，例如 `lhstack/markflow:v1.0.9`
 
 运行容器：
 
@@ -85,6 +85,8 @@ services:
       LOG_ROTATE_SIZE_MB: "50"
       LOG_ROTATE_DAYS: "1"
       LOG_KEEP_DAYS: "14"
+      MCP_STDIO_ENABLED: "false"
+      MCP_STDIO_ALLOWED_COMMANDS: "npx,node,uvx"
     volumes:
       - ./data:/app/data
       - ./uploads:/app/uploads
@@ -123,6 +125,8 @@ docker compose up -d
 | `LOG_ROTATE_SIZE_MB` | `50` | 日志滚动大小（MB） |
 | `LOG_ROTATE_DAYS` | `1` | 日志滚动天数 |
 | `LOG_KEEP_DAYS` | `14` | 历史日志保留天数 |
+| `MCP_STDIO_ENABLED` | `false` | 是否启用 MCP `stdio` transport |
+| `MCP_STDIO_ALLOWED_COMMANDS` | 空 | 允许被 MCP stdio 拉起的命令白名单，逗号分隔 |
 
 说明：
 
@@ -130,6 +134,8 @@ docker compose up -d
 - 一旦系统配置已写入数据库，后续运行会优先读取数据库中的配置
 - 分享密码不会以明文直接落库，而是使用 `SHARE_PASSWORD_SECRET` 进行服务端加密后保存
 - 如果未单独配置 `SHARE_PASSWORD_SECRET`，系统会回退使用 `JWT_SECRET`，但生产环境不建议这样做
+- 若要在容器里启用 MCP `stdio`，必须同时设置 `MCP_STDIO_ENABLED=true`，并通过 `MCP_STDIO_ALLOWED_COMMANDS` 显式声明可执行命令
+- 前端只有在后端开启了 `stdio` 后，才会显示对应 transport 配置项
 
 ## 首次启动
 
@@ -152,6 +158,29 @@ docker logs --tail 200 markflow
 ```
 
 建议首次登录后立即修改管理员密码。
+
+## 1.0.9 版本更新
+
+以下内容基于 `v1.0.8..当前工作区` 的实际改动整理：
+
+- 编辑器预览区新增文档目录浮层，可根据当前标题结构动态生成目录，点击目录项后跳转到对应标题，并在预览重渲染后自动刷新目录内容
+- 编辑器目录改为悬浮样式，不再挤压预览正文；面板宽度、留白与滚动表现也进一步向分享页目录体验靠齐
+- AI 助手配置新增独立的 `MCP 配置` 弹窗，不再与供应商配置混在一起，MCP 管理的左右分栏和底部操作区也更适合长表单编辑
+- 后端正式接入 MCP runtime，支持 `sse`、`streamable-http` 与 `stdio` 三种 transport，并补齐持久化、测试连接、刷新能力、工具/资源/提示快照与聊天实际注入
+- MCP HTTP 配置支持 Bearer、Basic、Header、Query 等认证方式与自定义 Headers；`stdio` 支持命令、参数和环境变量配置
+- MCP 测试连接与刷新能力支持直接基于当前草稿执行，不必先保存；新增与复制操作也会直接创建一条默认未启用的 MCP 记录，方便后续继续填写
+- 新增 `MCP_STDIO_ENABLED / MCP_STDIO_ALLOWED_COMMANDS` 配置，用于控制 `stdio` 是否可见以及允许执行的命令白名单
+- 收紧 MCP transport 校验并增强诊断日志：`streamable-http` 不再允许误配 legacy `/sse` 端点，legacy SSE 心跳空消息也不会再产生日志噪音
+
+如果你准备基于 `v1.0.9` 发布镜像，建议在发布说明中额外强调两点：
+
+- 这是一次同时覆盖编辑器体验和 AI 工具接入能力的升级，重点在编辑区目录、MCP 接入、配置管理与运行时稳定性
+- 工作区当前文案对应的是“待发布内容”，只有打出正式 `v1.0.9` 标签并推送后，Docker Hub 才会出现对应镜像
+
+计划发布后，Docker Hub 将新增：
+
+- `lhstack/markflow:v1.0.9`
+- `lhstack/markflow:latest`
 
 ## 1.0.8 版本更新
 
