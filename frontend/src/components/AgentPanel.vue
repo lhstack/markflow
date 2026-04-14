@@ -8576,12 +8576,14 @@ onUnmounted(() => {
 
 .agent-bottom-bar {
   display: flex;
-  align-items: center;
-  gap: 12px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
 }
 
 .agent-controls {
   flex: 1;
+  width: 100%;
   min-width: 0;
   display: flex;
 }
@@ -8594,17 +8596,17 @@ onUnmounted(() => {
 }
 
 .agent-select-row {
-  display: grid;
-  grid-template-columns: 42px minmax(0, 1fr);
-  align-items: center;
-  gap: 6px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
   min-width: 0;
 }
 
 .agent-control-label {
   font-size: 12px;
   color: #607057;
-  text-align: right;
+  text-align: left;
   white-space: nowrap;
 }
 
@@ -8620,6 +8622,7 @@ onUnmounted(() => {
   align-items: center;
   gap: 8px;
   flex-shrink: 0;
+  justify-content: flex-end;
 }
 
 .session-select-option {
