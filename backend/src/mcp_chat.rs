@@ -57,12 +57,7 @@ impl McpChatToolRegistry {
             } => {
                 let args = arguments.as_object().cloned().unwrap_or_else(JsonObject::default);
                 match client
-                    .call_tool(CallToolRequestParams {
-                        name: remote_name.into(),
-                        arguments: Some(args),
-                        meta: None,
-                        task: None,
-                    })
+                    .call_tool(CallToolRequestParams::new(remote_name).with_arguments(args))
                     .await
                 {
                     Ok(result) => json!({
@@ -95,10 +90,7 @@ impl McpChatToolRegistry {
                 };
 
                 match client
-                    .read_resource(ReadResourceRequestParams {
-                        meta: None,
-                        uri: uri.to_string(),
-                    })
+                    .read_resource(ReadResourceRequestParams::new(uri.to_string()))
                     .await
                 {
                     Ok(result) => json!({
@@ -134,12 +126,13 @@ impl McpChatToolRegistry {
                     .get("arguments")
                     .and_then(Value::as_object)
                     .cloned();
+                let request = if let Some(arguments) = prompt_arguments {
+                    GetPromptRequestParams::new(prompt_name.to_string()).with_arguments(arguments)
+                } else {
+                    GetPromptRequestParams::new(prompt_name.to_string())
+                };
                 match client
-                    .get_prompt(GetPromptRequestParams {
-                        meta: None,
-                        name: prompt_name.to_string(),
-                        arguments: prompt_arguments,
-                    })
+                    .get_prompt(request)
                     .await
                 {
                     Ok(result) => json!({

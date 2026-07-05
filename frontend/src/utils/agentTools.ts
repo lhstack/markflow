@@ -34,6 +34,8 @@ export interface AgentToolRuntime {
   openTreeNode: (args: Record<string, any>) => Promise<unknown>
   readDocument: (args: Record<string, any>) => Promise<unknown>
   readEditorSnapshot: (args: Record<string, any>) => Promise<unknown>
+  appendCurrentDocumentContent: (args: Record<string, any>) => Promise<unknown>
+  replaceCurrentDocumentContent: (args: Record<string, any>) => Promise<unknown>
   rewriteDocumentSection: (args: Record<string, any>) => Promise<unknown>
   replaceDocumentBlock: (args: Record<string, any>) => Promise<unknown>
   replaceDocumentBlocks: (args: Record<string, any>) => Promise<unknown>
@@ -193,6 +195,8 @@ function createMarkflowJsHelper(toolRuntime: AgentToolRuntime) {
     openTreeNode: (args: Record<string, any>) => toolRuntime.openTreeNode(args),
     readDocument: (args: Record<string, any>) => toolRuntime.readDocument(args),
     readEditorSnapshot: (args: Record<string, any> = {}) => toolRuntime.readEditorSnapshot(args),
+    appendCurrentDocumentContent: (args: Record<string, any>) => toolRuntime.appendCurrentDocumentContent(args),
+    replaceCurrentDocumentContent: (args: Record<string, any>) => toolRuntime.replaceCurrentDocumentContent(args),
     rewriteDocumentSection: (args: Record<string, any>) => toolRuntime.rewriteDocumentSection(args),
     replaceDocumentBlock: (args: Record<string, any>) => toolRuntime.replaceDocumentBlock(args),
     replaceDocumentBlocks: (args: Record<string, any>) => toolRuntime.replaceDocumentBlocks(args),
@@ -209,6 +213,38 @@ async function executeBrowserJavascript(args: Record<string, any>) {
   const code = typeof args.code === 'string' ? args.code : ''
   if (!code.trim()) {
     throw new Error('execute_browser_javascript 缺少 code 参数')
+  }
+
+  const timeoutSecs = Math.max(1, Math.min(300, Number.isFinite(Number(args.timeout_secs)) ? Number(args.timeout_secs) : 30))
+  const startedAt = Date.now()
+  const stdout: string[] = []
+  const stderr: string[] = []
+  const stringifyConsoleValue = (value: unknown) => {
+    if (typeof value === 'string') return value
+    try {
+      return JSON.stringify(safeSerialize(value))
+    } catch {
+      return String(value)
+    }
+  }
+  const captureConsole = {
+    ...console,
+    log: (...items: unknown[]) => {
+      stdout.push(items.map(stringifyConsoleValue).join(' '))
+      console.log(...items)
+    },
+    info: (...items: unknown[]) => {
+      stdout.push(items.map(stringifyConsoleValue).join(' '))
+      console.info(...items)
+    },
+    warn: (...items: unknown[]) => {
+      stderr.push(items.map(stringifyConsoleValue).join(' '))
+      console.warn(...items)
+    },
+    error: (...items: unknown[]) => {
+      stderr.push(items.map(stringifyConsoleValue).join(' '))
+      console.error(...items)
+    },
   }
 
   const toolRuntime = requireRuntime()
@@ -230,7 +266,8 @@ async function executeBrowserJavascript(args: Record<string, any>) {
     `"use strict"; return (async () => { ${code}\n })();`,
   )
 
-  const result = await executor(
+  let timeoutId: number | null = null
+  const execution = Promise.resolve().then(() => executor(
     window,
     document,
     window.location,
@@ -238,14 +275,26 @@ async function executeBrowserJavascript(args: Record<string, any>) {
     window.navigator,
     window.localStorage,
     window.sessionStorage,
-    console,
+    captureConsole,
     editor,
     markflow,
-  )
+  ))
+  const timeout = new Promise((_, reject) => {
+    timeoutId = window.setTimeout(() => reject(new Error(`execute_browser_javascript timed out after ${timeoutSecs}s`)), timeoutSecs * 1000)
+  })
 
-  return {
-    executed: true,
-    result: safeSerialize(result),
+  try {
+    const result = await Promise.race([execution, timeout])
+    return {
+      exit_code: 0,
+      success: true,
+      stdout: stdout.join('\n'),
+      stderr: stderr.join('\n'),
+      result: safeSerialize(result),
+      duration_ms: Date.now() - startedAt,
+    }
+  } finally {
+    if (timeoutId !== null) window.clearTimeout(timeoutId)
   }
 }
 
@@ -259,86 +308,8 @@ export async function executeAgentToolCalls(calls: AgentToolCall[]): Promise<Age
       const toolRuntime = requireRuntime()
 
       switch (call.name) {
-        case 'get_current_page_state':
-          output = await toolRuntime.getCurrentPageState()
-          break
-        case 'list_page_routes':
-          output = await toolRuntime.listPageRoutes()
-          break
-        case 'navigate_to_page':
-          output = await toolRuntime.navigateToPage(args)
-          break
-        case 'update_profile':
-          output = await toolRuntime.updateProfile(args)
-          break
-        case 'list_uploads':
-          output = await toolRuntime.listUploads(args)
-          break
-        case 'delete_uploads':
-          output = await toolRuntime.deleteUploads(args)
-          break
-        case 'list_projects':
-          output = await toolRuntime.listProjects(args)
-          break
-        case 'open_project':
-          output = await toolRuntime.openProject(args)
-          break
-        case 'create_project':
-          output = await toolRuntime.createProject(args)
-          break
-        case 'update_project':
-          output = await toolRuntime.updateProject(args)
-          break
-        case 'delete_projects':
-          output = await toolRuntime.deleteProjects(args)
-          break
         case 'execute_browser_javascript':
           output = await executeBrowserJavascript(args)
-          break
-        case 'get_project_tree':
-          output = await toolRuntime.getProjectTree(args)
-          break
-        case 'create_tree_node':
-          output = await toolRuntime.createTreeNode(args)
-          break
-        case 'move_tree_node':
-          output = await toolRuntime.moveTreeNode(args)
-          break
-        case 'open_tree_node':
-          output = await toolRuntime.openTreeNode(args)
-          break
-        case 'read_document':
-          output = await toolRuntime.readDocument(args)
-          break
-        case 'read_editor_snapshot':
-          output = await toolRuntime.readEditorSnapshot(args)
-          break
-        case 'rewrite_document_section':
-          output = await toolRuntime.rewriteDocumentSection(args)
-          break
-        case 'replace_document_block':
-          output = await toolRuntime.replaceDocumentBlock(args)
-          break
-        case 'replace_document_blocks':
-          output = await toolRuntime.replaceDocumentBlocks(args)
-          break
-        case 'swap_document_sections':
-          output = await toolRuntime.swapDocumentSections(args)
-          break
-        case 'save_current_document':
-          output = await toolRuntime.saveCurrentDocument(args)
-          break
-        case 'update_tree_node_meta':
-          output = await toolRuntime.updateTreeNodeMeta(args)
-          break
-        case 'delete_tree_nodes':
-          output = await toolRuntime.deleteTreeNodes(args)
-          break
-        case 'get_markdown_editor_runtime':
-          output = await toolRuntime.getMarkdownEditorRuntime()
-          break
-        case 'get_browser_runtime':
-          output = await toolRuntime.getBrowserRuntime(args)
           break
         default:
           throw new Error(`未知工具: ${call.name}`)

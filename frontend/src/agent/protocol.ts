@@ -1,8 +1,6 @@
 import protocol from '@/agent/agent-protocol.json'
-import type { AgentWriterMode } from '@/utils/agentWriter'
 
 type AgentRouteRecord = (typeof protocol.routes)[number]
-type AgentWriteActionRecord = (typeof protocol.writeActions)[number]
 type AgentTaskAnalysisRecord = typeof protocol.taskAnalysis
 type AgentToolPolicyRecord = (typeof protocol.toolPolicies)[number]
 
@@ -42,9 +40,6 @@ export interface AgentToolProtocolMetadata {
 }
 
 export const DEFAULT_AGENT_BASE_URL = protocol.defaultBaseUrl
-export const AGENT_WRITE_ACTIONS = protocol.writeActions as readonly AgentWriteActionRecord[]
-export const AGENT_WRITE_ACTION_MODES = AGENT_WRITE_ACTIONS.map((item) => item.mode) as AgentWriterMode[]
-export const AGENT_ACTION_CLOSE_MARKER = '[[/ACTION]]'
 export const AGENT_TASK_ANALYSIS_MODES = protocol.taskAnalysis.modes as readonly AgentTaskAnalysisRecord['modes'][number][]
 export const AGENT_TASK_ANALYSIS_COMPLEXITIES = protocol.taskAnalysis.complexities as readonly AgentTaskAnalysisRecord['complexities'][number][]
 export const AGENT_TASK_ANALYSIS_INTENTS = protocol.taskAnalysis.intents as readonly AgentTaskAnalysisRecord['intents'][number][]
@@ -80,10 +75,6 @@ export interface AgentControlBlock {
   planCompletedSteps?: string[]
 }
 
-export const AGENT_WRITE_ACTION_OPEN_MARKERS = AGENT_WRITE_ACTIONS.map((item) => ({
-  marker: item.marker,
-  mode: item.mode as AgentWriterMode,
-}))
 export const AGENT_ROUTE_DEFINITIONS = protocol.routes as readonly AgentRouteDefinition[]
 export const AGENT_TOOL_POLICIES = protocol.toolPolicies as readonly AgentToolPolicyDefinition[]
 
@@ -172,10 +163,3 @@ export function toolHasOnlyCapabilities(
   return Boolean(capabilities.length) && capabilities.every((capability) => allowedCapabilities.includes(capability))
 }
 
-export function resolveAgentWriteMode(marker: string): AgentWriterMode | null {
-  const normalized = marker.trim().toUpperCase()
-  const matched = AGENT_WRITE_ACTION_OPEN_MARKERS.find(
-    (item) => item.marker.toUpperCase() === normalized,
-  )
-  return matched?.mode || null
-}

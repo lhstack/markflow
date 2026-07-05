@@ -33,11 +33,15 @@ sha2 = "0.10"
 futures-util = "0.3"
 tokio-stream = "0.1"
 tower = "0.5"
-rig-core = { version = "0.32.0", features = ["rmcp"] }
-rmcp = { version = "0.16", features = ["client", "transport-streamable-http-client-reqwest", "transport-child-process"] }
-reqwest = { version = "0.13.2", features = ["json", "stream"] }
+rig = { package = "rig-core", version = "0.38.1", features = ["rmcp"] }
+rmcp = { version = "=1.7.0", features = ["client", "transport-streamable-http-client-reqwest", "transport-child-process"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "stream", "multipart", "rustls"] }
 schemars = "1"
+url = "2"
 
 [build-dependencies]
 # build script to copy frontend dist
 toml = "0.8"
+
+[patch.crates-io]
+rig-core = { path = "vendor/rig-core" }

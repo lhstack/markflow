@@ -1,0 +1,146 @@
+[package]
+name = "rig-core"
+version.workspace = true
+edition = { workspace = true }
+license = "MIT"
+readme = "README.md"
+description = "An opinionated library for building LLM powered applications."
+repository = "https://github.com/0xPlaygrounds/rig"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lints]
+workspace = true
+
+[lib]
+name = "rig_core"
+path = "src/lib.rs"
+doctest = true
+
+[dependencies]
+as-any = { workspace = true }
+async-stream = { workspace = true }
+base64 = { workspace = true }
+bytes = { workspace = true }
+epub = { workspace = true, optional = true }
+futures = { workspace = true }
+glob = { workspace = true }
+lopdf = { workspace = true, optional = true }
+mime_guess = { workspace = true }
+ordered-float = { workspace = true }
+quick-xml = { workspace = true, optional = true }
+rayon = { workspace = true, optional = true }
+reqwest = { workspace = true, features = ["json", "stream", "multipart"] }
+rig-derive = { version = "0.38.1", path = "../rig-derive", optional = true }
+schemars = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+rmcp = { workspace = true, optional = true, features = ["client"] }
+tokio = { workspace = true, features = ["rt", "sync"] }
+http = { workspace = true }
+tracing-futures = { workspace = true, features = ["futures-03"] }
+serenity = { workspace = true, optional = true }
+fastrand = { workspace = true }
+nanoid = { workspace = true }
+getrandom = { workspace = true, optional = true }
+eventsource-stream = { workspace = true }
+pin-project-lite = { workspace = true }
+futures-timer = { workspace = true }
+wasm-bindgen-futures = { workspace = true, optional = true }
+mime = { workspace = true }
+reqwest-middleware = { workspace = true, optional = true, features = [
+  "json",
+  "multipart",
+  "charset",
+  "http2",
+] }
+
+# Native-only dependency for OpenAI Responses websocket mode.
+# Keeping it target-scoped avoids pulling a tokio socket transport into wasm builds.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+tokio-tungstenite = { workspace = true, optional = true }
+
+[dev-dependencies]
+anyhow = { workspace = true }
+assert_fs = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+tokio-test = { workspace = true }
+redis = { workspace = true, features = ["tokio-comp", "aio", "vector-sets"] }
+serde_path_to_error = { workspace = true }
+base64 = { workspace = true }
+reqwest-retry = { workspace = true }
+reqwest-middleware = { workspace = true, features = [
+  "json",
+  "multipart",
+  "charset",
+  "http2",
+  "rustls",
+] }
+
+# Required for `rmcp` example
+hyper-util = { workspace = true, features = ["service", "server"] }
+rmcp = { workspace = true, features = [
+  "client",
+  "macros",
+  "reqwest",                                  # required for some strange reason
+  "transport-streamable-http-client",
+  "transport-streamable-http-client-reqwest",
+  "transport-streamable-http-server-session",
+  "transport-streamable-http-server",
+  "transport-worker",
+] }
+axum = { workspace = true }
+
+# required for otel
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true, features = ["rt-tokio"] }
+opentelemetry-otlp = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+
+
+[features]
+default = ["reqwest", "derive", "rustls"]
+audio = []
+image = []
+derive = ["dep:rig-derive"]
+experimental = []
+test-utils = []
+discord-bot = ["dep:serenity"]
+pdf = ["dep:lopdf"]
+epub = ["dep:epub", "dep:quick-xml"]
+rayon = ["dep:rayon"]
+wasm = [
+  "dep:getrandom",
+  "dep:wasm-bindgen-futures",
+  "futures-timer/wasm-bindgen",
+  "getrandom/js",
+]
+rmcp = ["dep:rmcp"]
+socks = ["reqwest/socks"]
+reqwest = [
+  "reqwest/charset",
+  "reqwest/http2",
+  "reqwest/system-proxy",
+]
+websocket = ["websocket-rustls"]
+websocket-rustls = [
+  "dep:tokio-tungstenite",
+  "tokio-tungstenite/connect",
+  "rustls",
+]
+websocket-native-tls = [
+  "dep:tokio-tungstenite",
+  "tokio-tungstenite/connect",
+  "native-tls",
+]
+rustls = ["reqwest/rustls", "tokio-tungstenite?/rustls-tls-webpki-roots"]
+native-tls = ["reqwest/native-tls", "tokio-tungstenite?/native-tls"]
+reqwest-middleware = ["reqwest-middleware-rustls"]
+reqwest-middleware-rustls = ["dep:reqwest-middleware", "rustls", "reqwest-middleware/rustls"]
+reqwest-middleware-native-tls = ["dep:reqwest-middleware", "native-tls"]

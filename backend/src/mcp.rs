@@ -1141,6 +1141,8 @@ mod tests {
         BackendRuntimeConfig {
             mcp_stdio_enabled: true,
             mcp_stdio_allowed_commands: commands.iter().map(|item| item.to_string()).collect(),
+            skills_root_dir: String::new(),
+            ..Default::default()
         }
     }
 

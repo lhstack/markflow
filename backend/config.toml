@@ -47,3 +47,27 @@ mcp_stdio_enabled = false
 # You can also override it by environment variable:
 # MCP_STDIO_ALLOWED_COMMANDS=npx,node,uvx
 mcp_stdio_allowed_commands = ["npx", "node", "uvx"]
+
+# Skills manual directory (relative to working dir or absolute path)
+# The agent loads operation manuals from here via skills_list / skills_view.
+# Leave empty or remove to disable skills tools.
+# Override by environment variable SKILLS_ROOT_DIR.
+skills_root_dir = "./skills"
+
+# Web Fetch tool configuration
+# Enable default proxy for the web_fetch tool. This proxy only affects web_fetch, not model API requests.
+# Override by environment variable WEB_FETCH_PROXY_ENABLED=true/false.
+web_fetch_proxy_enabled = false
+
+# Default proxy address used by web_fetch when proxy is enabled.
+# Examples: http://127.0.0.1:7890, http://127.0.0.1:10809, socks5://127.0.0.1:1080
+# Override by environment variable WEB_FETCH_PROXY.
+web_fetch_proxy = ""
+
+# Default request timeout for web_fetch, in seconds. Runtime clamp: 1..300.
+# Override by environment variable WEB_FETCH_TIMEOUT_SECS.
+web_fetch_timeout_secs = 30
+
+# Default maximum response body bytes read by web_fetch. Runtime clamp: 1..5000000.
+# Override by environment variable WEB_FETCH_MAX_RESPONSE_BYTES.
+web_fetch_max_response_bytes = 1000000

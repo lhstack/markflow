@@ -80,14 +80,32 @@ pub struct AgentProvider {
     pub id: i64,
     pub user_id: i64,
     pub name: String,
-    pub provider_kind: String,
+    // "openai" | "anthropic"
+    pub kind: String,
     pub base_url: String,
     pub api_key_ciphertext: String,
+    // OpenAI 传输模式: "responses" | "completions"; anthropic 忽略
+    pub api: String,
+    pub anthropic_version: Option<String>,
+    // 拉取到的远程模型清单快照(JSON string 数组)
     pub remote_models: String,
-    pub enabled_models: String,
-    pub custom_models: String,
-    pub model_configs: String,
     pub is_active: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct AgentModel {
+    pub id: i64,
+    pub provider_id: i64,
+    // 展示别名
+    pub alias: String,
+    // 实际下发给上游的模型名
+    pub model_id: String,
+    pub display_name: Option<String>,
+    // 全部运行参数序列化后的 JSON blob
+    pub config: String,
+    pub sort_order: i64,
     pub created_at: String,
     pub updated_at: String,
 }

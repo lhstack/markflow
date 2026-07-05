@@ -497,17 +497,35 @@ impl Database {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
                 name TEXT NOT NULL,
-                provider_kind TEXT NOT NULL DEFAULT 'openai',
+                kind TEXT NOT NULL DEFAULT 'openai',
                 base_url TEXT NOT NULL,
                 api_key_ciphertext TEXT NOT NULL,
+                api TEXT NOT NULL DEFAULT 'responses',
+                anthropic_version TEXT,
                 remote_models TEXT NOT NULL DEFAULT '[]',
-                enabled_models TEXT NOT NULL DEFAULT '[]',
-                custom_models TEXT NOT NULL DEFAULT '[]',
-                model_configs TEXT NOT NULL DEFAULT '{}',
                 is_active INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 updated_at TEXT NOT NULL DEFAULT (datetime('now')),
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+        "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS agent_models (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                provider_id INTEGER NOT NULL,
+                alias TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                display_name TEXT,
+                config TEXT NOT NULL DEFAULT '{}',
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (provider_id) REFERENCES agent_providers(id) ON DELETE CASCADE
             )
         "#,
         )
@@ -562,62 +580,35 @@ impl Database {
     }
 
     async fn ensure_agent_provider_columns(&self) -> Result<()> {
+        // Full reconstruction: the legacy single-table layout (with model_configs /
+        // enabled_models / custom_models columns) is incompatible with the new
+        // provider + model two-table design. Detect the legacy shape and drop it so
+        // create_tables can rebuild the current schema. Existing provider rows are
+        // discarded by design (no compatibility/migration path).
         let columns = sqlx::query("PRAGMA table_info(agent_providers)")
             .fetch_all(&self.pool)
             .await?;
 
-        let has_provider_kind = columns.iter().any(|col| {
+        let is_legacy = columns.iter().any(|col| {
             col.try_get::<String, _>("name")
-                .map(|name| name == "provider_kind")
+                .map(|name| {
+                    name == "model_configs"
+                        || name == "enabled_models"
+                        || name == "custom_models"
+                        || name == "provider_kind"
+                })
                 .unwrap_or(false)
         });
-        let has_model_configs = columns.iter().any(|col| {
-            col.try_get::<String, _>("name")
-                .map(|name| name == "model_configs")
-                .unwrap_or(false)
-        });
 
-        if !has_provider_kind {
-            sqlx::query(
-                "ALTER TABLE agent_providers ADD COLUMN provider_kind TEXT NOT NULL DEFAULT 'openai'",
-            )
-            .execute(&self.pool)
-            .await?;
+        if is_legacy {
+            sqlx::query("DROP TABLE IF EXISTS agent_models")
+                .execute(&self.pool)
+                .await?;
+            sqlx::query("DROP TABLE IF EXISTS agent_providers")
+                .execute(&self.pool)
+                .await?;
+            self.create_tables().await?;
         }
-
-        if !has_model_configs {
-            sqlx::query(
-                "ALTER TABLE agent_providers ADD COLUMN model_configs TEXT NOT NULL DEFAULT '{}'",
-            )
-            .execute(&self.pool)
-            .await?;
-        }
-
-        sqlx::query(
-            r#"
-            UPDATE agent_providers
-               SET provider_kind = CASE
-                   WHEN instr(lower(name || ' ' || base_url), 'anthropic') > 0
-                     OR instr(lower(name || ' ' || base_url), 'claude') > 0
-                     THEN 'anthropic'
-                   WHEN instr(lower(name || ' ' || base_url), 'google') > 0
-                     OR instr(lower(name || ' ' || base_url), 'gemini') > 0
-                     OR instr(lower(name || ' ' || base_url), 'generativelanguage') > 0
-                     THEN 'gemini'
-                   WHEN lower(trim(provider_kind)) IN ('openai', 'anthropic', 'gemini')
-                     THEN lower(trim(provider_kind))
-                   ELSE 'openai'
-               END
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            "UPDATE agent_providers SET model_configs = '{}' WHERE trim(model_configs) = ''",
-        )
-        .execute(&self.pool)
-        .await?;
 
         Ok(())
     }
@@ -674,6 +665,11 @@ impl Database {
         .await?;
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_agent_providers_user_active ON agent_providers(user_id, is_active)",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_agent_models_provider_id ON agent_models(provider_id)",
         )
         .execute(&self.pool)
         .await?;
@@ -1274,9 +1270,8 @@ mod tests {
         sqlx::query(
             r#"
             INSERT INTO agent_providers (
-                user_id, name, provider_kind, base_url, api_key_ciphertext,
-                remote_models, enabled_models, custom_models, model_configs, is_active
-            ) VALUES (?, 'primary', 'openai', 'https://api.openai.com/v1', 'ciphertext', '[]', '[]', '[]', '{}', 1)
+                user_id, name, kind, base_url, api_key_ciphertext, api, remote_models, is_active
+            ) VALUES (?, 'primary', 'openai', 'https://api.openai.com/v1', 'ciphertext', 'responses', '[]', 1)
         "#,
         )
         .bind(user_id)

@@ -1,4 +1,3 @@
-mod agent_protocol;
 mod auth;
 mod db;
 mod mcp;
@@ -7,6 +6,7 @@ mod models;
 mod routes;
 
 use axum::{
+    extract::DefaultBodyLimit,
     routing::{delete, get, post, put},
     Extension, Router,
 };
@@ -49,12 +49,21 @@ struct FileConfig {
     log_keep_days: Option<i64>,
     mcp_stdio_enabled: Option<bool>,
     mcp_stdio_allowed_commands: Option<Vec<String>>,
+    skills_root_dir: Option<String>,
+    web_fetch_proxy_enabled: Option<bool>,
+    web_fetch_proxy: Option<String>,
+    web_fetch_timeout_secs: Option<u64>,
+    web_fetch_max_response_bytes: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct BackendRuntimeConfig {
     pub mcp_stdio_enabled: bool,
     pub mcp_stdio_allowed_commands: Vec<String>,
+    pub skills_root_dir: String,
+    pub web_fetch_proxy: Option<String>,
+    pub web_fetch_timeout_secs: u64,
+    pub web_fetch_max_response_bytes: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -161,6 +170,10 @@ fn load_backend_runtime_config(file_cfg: &FileConfig) -> BackendRuntimeConfig {
         file_cfg,
         std::env::var("MCP_STDIO_ENABLED").ok().as_deref(),
         std::env::var("MCP_STDIO_ALLOWED_COMMANDS").ok().as_deref(),
+        std::env::var("WEB_FETCH_PROXY_ENABLED").ok().as_deref(),
+        std::env::var("WEB_FETCH_PROXY").ok().as_deref(),
+        std::env::var("WEB_FETCH_TIMEOUT_SECS").ok().as_deref(),
+        std::env::var("WEB_FETCH_MAX_RESPONSE_BYTES").ok().as_deref(),
     )
 }
 
@@ -168,6 +181,10 @@ fn load_backend_runtime_config_with_overrides(
     file_cfg: &FileConfig,
     stdio_enabled_env: Option<&str>,
     allowed_commands_env: Option<&str>,
+    web_fetch_proxy_enabled_env: Option<&str>,
+    web_fetch_proxy_env: Option<&str>,
+    web_fetch_timeout_env: Option<&str>,
+    web_fetch_max_response_env: Option<&str>,
 ) -> BackendRuntimeConfig {
     let mcp_stdio_enabled = resolve_bool(stdio_enabled_env, file_cfg.mcp_stdio_enabled, false);
     let mcp_stdio_allowed_commands = allowed_commands_env
@@ -183,9 +200,44 @@ fn load_backend_runtime_config_with_overrides(
         })
         .unwrap_or_default();
 
+    let skills_root_dir = std::env::var("SKILLS_ROOT_DIR")
+        .ok()
+        .or_else(|| file_cfg.skills_root_dir.clone())
+        .map(|value| value.trim().to_string())
+        .unwrap_or_default();
+
+    let web_fetch_proxy_enabled = resolve_bool(
+        web_fetch_proxy_enabled_env,
+        file_cfg.web_fetch_proxy_enabled,
+        false,
+    );
+    let web_fetch_proxy = web_fetch_proxy_enabled
+        .then(|| {
+            web_fetch_proxy_env
+                .map(ToOwned::to_owned)
+                .or_else(|| file_cfg.web_fetch_proxy.clone())
+        })
+        .flatten()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let web_fetch_timeout_secs = web_fetch_timeout_env
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .or(file_cfg.web_fetch_timeout_secs)
+        .unwrap_or(30)
+        .clamp(1, 300);
+    let web_fetch_max_response_bytes = web_fetch_max_response_env
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .or(file_cfg.web_fetch_max_response_bytes)
+        .unwrap_or(1_000_000)
+        .clamp(1, 5_000_000);
+
     BackendRuntimeConfig {
         mcp_stdio_enabled,
         mcp_stdio_allowed_commands,
+        skills_root_dir,
+        web_fetch_proxy,
+        web_fetch_timeout_secs,
+        web_fetch_max_response_bytes,
     }
 }
 
@@ -472,7 +524,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     tracing::info!(
-        "Resolved config: port={}, database={}, upload_dir={}, registration_enabled={}, upload_max_mb={}, share_password_secret_source={}, log_to_file={}, log_dir={}, file={}, rotate_size_mb={}, rotate_days={}, keep_days={}, mcp_stdio_enabled={}, mcp_stdio_allowed_commands={}",
+        "Resolved config: port={}, database={}, upload_dir={}, registration_enabled={}, upload_max_mb={}, share_password_secret_source={}, log_to_file={}, log_dir={}, file={}, rotate_size_mb={}, rotate_days={}, keep_days={}, mcp_stdio_enabled={}, mcp_stdio_allowed_commands={}, web_fetch_proxy_enabled={}, web_fetch_timeout_secs={}, web_fetch_max_response_bytes={}",
         port,
         database_url,
         upload_dir,
@@ -491,6 +543,9 @@ async fn main() -> anyhow::Result<()> {
         log_keep_days,
         runtime_config.mcp_stdio_enabled,
         runtime_config.mcp_stdio_allowed_commands.len(),
+        runtime_config.web_fetch_proxy.is_some(),
+        runtime_config.web_fetch_timeout_secs,
+        runtime_config.web_fetch_max_response_bytes,
     );
 
     let db = Database::new(&database_url).await?;
@@ -503,6 +558,7 @@ async fn main() -> anyhow::Result<()> {
         settings.registration_enabled == 1,
         settings.upload_max_bytes
     );
+    let upload_body_limit = (settings.upload_max_bytes as usize).saturating_add(1024 * 1024);
     if let Some(password) = db.ensure_super_admin().await? {
         tracing::warn!(
             "Initialized super admin account: username=admin password={}",
@@ -565,6 +621,11 @@ async fn main() -> anyhow::Result<()> {
             "/agent/mcps/runtime-capabilities",
             get(routes::agent::get_runtime_capabilities),
         )
+        .route("/agent/skills", get(routes::agent::list_skills_handler))
+        .route("/agent/skills/files", post(routes::agent::list_skill_files_handler))
+        .route("/agent/skills/files/read", post(routes::agent::read_skill_file_handler))
+        .route("/agent/skills/files/save", post(routes::agent::save_skill_file_handler))
+        .route("/agent/skills/delete", post(routes::agent::delete_skill_handler))
         .route(
             "/agent/providers/:id",
             get(routes::agent::get_provider).delete(routes::agent::delete_provider),
@@ -577,12 +638,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/agent/tool-callback", post(routes::agent::submit_tool_callback))
         .route("/agent/models", post(routes::agent::list_models))
         .route(
-            "/uploads",
-            get(routes::uploads::list_uploads).post(routes::uploads::upload_file),
+            "/agent/models/save",
+            post(routes::agent::save_model),
         )
         .route(
-            "/uploads/:id",
-            put(routes::uploads::replace_upload).delete(routes::uploads::delete_upload),
+            "/agent/models/delete",
+            post(routes::agent::delete_model),
         )
         .route(
             "/projects",
@@ -642,6 +703,19 @@ async fn main() -> anyhow::Result<()> {
             get(routes::admin::export_user_data),
         );
 
+    let uploads_api = Router::new()
+        .route(
+            "/uploads",
+            get(routes::uploads::list_uploads).post(routes::uploads::upload_file),
+        )
+        .route(
+            "/uploads/:id",
+            put(routes::uploads::replace_upload).delete(routes::uploads::delete_upload),
+        )
+        .layer(DefaultBodyLimit::max(upload_body_limit));
+
+    let api = api.merge(uploads_api);
+
     let app = Router::new()
         .route("/uploads/files/:id", get(routes::uploads::serve_upload))
         .nest("/api", api)
@@ -667,7 +741,7 @@ mod tests {
     #[test]
     fn backend_runtime_config_defaults_stdio_off_and_allowlist_empty() {
         let cfg = FileConfig::default();
-        let runtime = load_backend_runtime_config_with_overrides(&cfg, None, None);
+        let runtime = load_backend_runtime_config_with_overrides(&cfg, None, None, None, None, None, None);
 
         assert!(!runtime.mcp_stdio_enabled);
         assert!(runtime.mcp_stdio_allowed_commands.is_empty());
@@ -685,6 +759,10 @@ mod tests {
             &cfg,
             Some("true"),
             Some("git, node,  "),
+            None,
+            None,
+            None,
+            None,
         );
 
         assert!(runtime.mcp_stdio_enabled);
